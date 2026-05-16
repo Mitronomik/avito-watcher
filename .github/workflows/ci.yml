@@ -60,6 +60,9 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install pytest pytest-asyncio ruff
 
+      - name: Run Ruff lint
+        run: ruff check app tests
+
       - name: Compile Python files
         run: python -m compileall app
 
