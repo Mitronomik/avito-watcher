@@ -8,10 +8,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db.base import Base
-from app.models.alert_sent import AlertSent
-from app.models.listing import Listing
-from app.models.listing_snapshot import ListingSnapshot
-from app.models.search_job import SearchJob
+from app.models.alert_sent import AlertSent  # noqa: F401
+from app.models.listing import Listing  # noqa: F401
+from app.models.listing_snapshot import ListingSnapshot  # noqa: F401
+from app.models.search_job import SearchJob  # noqa: F401
 
 
 @pytest.fixture
