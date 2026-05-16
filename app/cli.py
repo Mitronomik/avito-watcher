@@ -23,7 +23,10 @@ def cmd_seed_search(args) -> None:
 def cmd_run_once(args) -> None:
     init_db()
     service = MonitorService()
-    result = service.run_once(args.url) if args.url else service.run_all_searches()
+    if args.search_id is not None:
+        result = service.run_once(args.search_id)
+    else:
+        result = service.run_all_searches()
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
@@ -45,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     seed.set_defaults(func=cmd_seed_search)
 
     run_once = sub.add_parser("run-once", help="Run one monitoring cycle")
-    run_once.add_argument("--url", required=False)
+    run_once.add_argument("--search-id", type=int, required=False)
     run_once.set_defaults(func=cmd_run_once)
 
     run_all = sub.add_parser("run-all", help="Run all configured searches")

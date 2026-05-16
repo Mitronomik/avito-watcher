@@ -29,9 +29,8 @@ async def create_search(payload: SearchCreate, db: Session = Depends(get_db)):
 async def run_monitor_once(db: Session = Depends(get_db)):
     service = MonitorService()
     repo = SearchRepository(db)
-    searches = repo.list_all()
+    searches = repo.list_active()
     if not searches:
         return {"message": "no searches configured"}
-    result = await service.process_search(db, searches[0].source_url)
-    db.commit()
+    result = await service.process_search(db, searches[0])
     return result
