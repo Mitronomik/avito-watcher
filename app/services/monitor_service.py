@@ -1,35 +1,79 @@
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
 from app.agents.scorer import ListingScorer
 from app.db.session import SessionLocal
+from app.models.search_job import SearchJob
 from app.notifiers.telegram import TelegramNotifier
 from app.parsers.avito_parser import AvitoParser
+from app.parsers.schemas import ListingCard
 from app.repositories.alert_repository import AlertRepository
 from app.repositories.listing_repository import ListingRepository
 from app.repositories.search_repository import SearchRepository
 from app.utils.formatting import build_listing_message
 
 
-class MonitorService:
-    def __init__(self) -> None:
-        self.parser = AvitoParser()
-        self.scorer = ListingScorer()
-        self.notifier = TelegramNotifier()
+def _utcnow() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
 
-    async def process_search(self, db: Session, search_url: str) -> dict:
+
+class MonitorService:
+    def __init__(
+        self,
+        parser: AvitoParser | None = None,
+        scorer: ListingScorer | None = None,
+        notifier: TelegramNotifier | None = None,
+    ) -> None:
+        self.parser = parser or AvitoParser()
+        self.scorer = scorer or ListingScorer()
+        self.notifier = notifier or TelegramNotifier()
+
+    async def process_search(self, db: Session, search: SearchJob) -> dict:
+        search_repo = SearchRepository(db)
+        checked_at = _utcnow()
+        baseline_run = not search.baseline_initialized
+
+        try:
+            cards = await self.parser.fetch_search_cards(search.source_url)
+            result = await self._process_cards(db, cards, baseline_run)
+
+            if baseline_run:
+                search_repo.mark_baseline_initialized(search, checked_at)
+            search_repo.record_successful_check(search, checked_at)
+            db.commit()
+
+            result["baseline_initialized"] = search.baseline_initialized
+            result["baseline_run"] = baseline_run
+            return result
+        except Exception as exc:
+            db.rollback()
+            failed_at = _utcnow()
+            persistent_search = search_repo.get(search.id) if search.id is not None else search
+            if persistent_search is None:
+                raise
+            search_repo.record_failed_check(persistent_search, failed_at, str(exc))
+            db.commit()
+            raise
+
+    async def process_search_by_id(self, db: Session, search_job_id: int) -> dict:
+        repo = SearchRepository(db)
+        search = repo.get(search_job_id)
+        if search is None:
+            raise ValueError(f"Search job {search_job_id} not found")
+        return await self.process_search(db, search)
+
+    async def _process_cards(self, db: Session, cards: list[ListingCard], baseline_run: bool) -> dict:
         listing_repo = ListingRepository(db)
         alert_repo = AlertRepository(db)
-        cards = await self.parser.fetch_search_cards(search_url)
 
         created = 0
         alerted = 0
         price_changed = 0
 
         for card in cards:
-            now = datetime.utcnow()
+            now = _utcnow()
             existing = listing_repo.get_by_external_id(card.external_id)
 
             if existing:
@@ -41,7 +85,7 @@ class MonitorService:
                 existing.area_m2 = card.area_m2
                 existing.rooms = card.rooms or existing.rooms
 
-                if old_price != card.price:
+                if not baseline_run and old_price != card.price:
                     existing.price = card.price
                     listing_repo.create_snapshot(
                         external_id=card.external_id,
@@ -76,6 +120,9 @@ class MonitorService:
             )
             created += 1
 
+            if baseline_run:
+                continue
+
             try:
                 llm = await self.scorer.score(card)
             except Exception as exc:
@@ -104,7 +151,6 @@ class MonitorService:
             alert_repo.create(listing_external_id=card.external_id, dedupe_key=dedupe_key)
             alerted += 1
 
-        db.commit()
         return {
             "created": created,
             "alerted": alerted,
@@ -112,27 +158,22 @@ class MonitorService:
             "total_seen": len(cards),
         }
 
-    def run_once(self, search_url: str) -> dict:
+    def run_once(self, search_job_id: int) -> dict:
         with SessionLocal() as db:
-            return asyncio.run(self.process_search(db, search_url))
+            return asyncio.run(self.process_search_by_id(db, search_job_id))
 
     def run_all_searches(self) -> list[dict]:
         with SessionLocal() as db:
             repo = SearchRepository(db)
-            searches = repo.list_all()
-            if not searches:
-                searches = [
-                    repo.create(
-                        name="default",
-                        source_url="https://www.avito.ru/all/kvartiry/prodam-ASgBAgICAUSSA8YQ",
-                    )
-                ]
-                db.commit()
-
+            searches = repo.list_active()
             results = []
             for search in searches:
-                result = asyncio.run(self.process_search(db, search.source_url))
-                result["search"] = search.name
+                try:
+                    result = asyncio.run(self.process_search(db, search))
+                except Exception as exc:
+                    result = {"search": search.name, "error": str(exc)}
+                else:
+                    result["search"] = search.name
                 results.append(result)
 
             return results
