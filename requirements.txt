@@ -1,0 +1,15 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+sqlalchemy==2.0.40
+psycopg[binary]==3.2.7
+pydantic==2.11.4
+pydantic-settings==2.9.1
+redis==6.0.0
+httpx==0.28.1
+APScheduler==3.10.4
+playwright==1.52.0
+python-telegram-bot==22.0
+beautifulsoup4==4.13.4
+lxml==5.4.0
+python-dotenv==1.1.0
+alembic==1.15.2
