@@ -9,7 +9,7 @@ build:
 	$(COMPOSE) build app worker
 
 migrate: build infra
-	$(COMPOSE) run --rm app alembic upgrade head
+	$(COMPOSE) run --rm -e PYTHONPATH=/app app alembic upgrade head
 
 up: migrate
 	$(COMPOSE) up -d app worker

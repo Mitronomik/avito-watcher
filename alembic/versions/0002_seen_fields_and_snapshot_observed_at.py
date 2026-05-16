@@ -1,13 +1,13 @@
 """seen fields and snapshot observed_at
 
-Revision ID: 0002_seen_fields_and_snapshot_observed_at
+Revision ID: 0002_seen_fields
 Revises: 0001_init
 Create Date: 2026-05-17
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0002_seen_fields_and_snapshot_observed_at"
+revision = "0002_seen_fields"
 down_revision = "0001_init"
 branch_labels = None
 depends_on = None
