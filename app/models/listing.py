@@ -1,4 +1,5 @@
-from sqlalchemy import String, Integer, Float, Boolean
+from datetime import datetime
+from sqlalchemy import String, Integer, Float, Boolean, DateTime
 from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
 
@@ -15,3 +16,5 @@ class Listing(Base):
     area_m2: Mapped[float | None] = mapped_column(Float, nullable=True)
     rooms: Mapped[str] = mapped_column(String(64), default="")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
