@@ -18,7 +18,10 @@ class FakeParser:
     async def fetch_search_cards(self, search_url: str):
         self.calls += 1
         assert search_url
-        return self.batches.pop(0)
+        batch = self.batches.pop(0)
+        if isinstance(batch, Exception):
+            raise batch
+        return batch
 
 
 class FakeScorer:
@@ -48,9 +51,9 @@ def card(external_id: str, price: float = 100.0) -> ListingCard:
     )
 
 
-def make_search(db_session):
+def make_search(db_session, name: str = "test", source_url: str = "https://www.avito.ru/test"):
     repo = SearchRepository(db_session)
-    search = repo.create(name="test", source_url="https://www.avito.ru/test")
+    search = repo.create(name=name, source_url=source_url)
     db_session.commit()
     return search
 
@@ -178,7 +181,7 @@ class FailingScorer:
         raise RuntimeError("scoring failed")
 
 
-def test_scoring_failure_records_failed_check_without_partial_commit(db_session):
+def test_scoring_failure_still_sends_alert_with_fallback_summary(db_session):
     search = make_search(db_session)
     baseline_service = MonitorService(
         parser=FakeParser([[card("1")]]),
@@ -187,23 +190,53 @@ def test_scoring_failure_records_failed_check_without_partial_commit(db_session)
     )
     run(baseline_service, db_session, search)
 
+    notifier = FakeNotifier()
     failing_service = MonitorService(
         parser=FakeParser([[card("1"), card("2")]]),
         scorer=FailingScorer(),
-        notifier=FakeNotifier(),
+        notifier=notifier,
     )
 
-    try:
-        run(failing_service, db_session, search)
-    except RuntimeError as exc:
-        assert str(exc) == "scoring failed"
-    else:
-        raise AssertionError("expected scoring failure")
+    result = run(failing_service, db_session, search)
 
     db_session.refresh(search)
-    assert search.fail_count == 1
-    assert search.last_error == "scoring failed"
-    assert search.last_checked_at is not None
-    assert scalar_count(db_session, Listing) == 1
-    assert scalar_count(db_session, ListingSnapshot) == 1
-    assert scalar_count(db_session, AlertSent) == 0
+    assert result["created"] == 1
+    assert result["alerted"] == 1
+    assert search.fail_count == 0
+    assert search.last_error == ""
+    assert scalar_count(db_session, Listing) == 2
+    assert scalar_count(db_session, ListingSnapshot) == 2
+    assert scalar_count(db_session, AlertSent) == 1
+    assert len(notifier.messages) == 1
+    assert "LLM scoring unavailable: scoring failed" in notifier.messages[0]
+
+
+def test_run_all_searches_records_one_failure_and_continues_next_search(monkeypatch, db_session):
+    import app.services.monitor_service as monitor_module
+
+    first = make_search(db_session, name="first", source_url="https://www.avito.ru/first")
+    second = make_search(db_session, name="second", source_url="https://www.avito.ru/second")
+    parser = FakeParser([RuntimeError("parser failed"), [card("2")]])
+
+    class FakeSessionLocal:
+        def __enter__(self):
+            return db_session
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(monitor_module, "SessionLocal", lambda: FakeSessionLocal())
+
+    result = MonitorService(parser=parser, scorer=FakeScorer(), notifier=FakeNotifier()).run_all_searches()
+
+    db_session.refresh(first)
+    db_session.refresh(second)
+    assert parser.calls == 2
+    assert result[0] == {"search": "first", "error": "parser failed"}
+    assert result[1]["search"] == "second"
+    assert result[1]["baseline_run"] is True
+    assert result[1]["created"] == 1
+    assert first.fail_count == 1
+    assert first.last_error == "parser failed"
+    assert second.baseline_initialized is True
+    assert second.fail_count == 0

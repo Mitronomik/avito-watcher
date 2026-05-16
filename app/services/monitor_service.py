@@ -123,7 +123,15 @@ class MonitorService:
             if baseline_run:
                 continue
 
-            llm = await self.scorer.score(card)
+            try:
+                llm = await self.scorer.score(card)
+            except Exception as exc:
+                llm = {
+                    "score": 0,
+                    "summary": f"LLM scoring unavailable: {exc}",
+                    "tags": ["llm_error"],
+                }
+
             dedupe_key = f"telegram:new:{card.external_id}"
             if alert_repo.exists_by_dedupe_key(dedupe_key):
                 continue
@@ -160,8 +168,12 @@ class MonitorService:
             searches = repo.list_active()
             results = []
             for search in searches:
-                result = asyncio.run(self.process_search(db, search))
-                result["search"] = search.name
+                try:
+                    result = asyncio.run(self.process_search(db, search))
+                except Exception as exc:
+                    result = {"search": search.name, "error": str(exc)}
+                else:
+                    result["search"] = search.name
                 results.append(result)
 
             return results
