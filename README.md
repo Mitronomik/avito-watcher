@@ -38,7 +38,7 @@ python -m app.cli telegram-bot
 ```text
 /start
 /help
-/add <name> <url>
+/add <url> [name]
 /list
 /pause <search_id>
 /resume <search_id>

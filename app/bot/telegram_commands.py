@@ -16,7 +16,7 @@ SessionFactory = Callable[[], Session]
 HELP_TEXT = """Avito Watcher commands:
 /start - show this help
 /help - show this help
-/add <name> <url> - add a search job
+/add <url> [name] - add a search job
 /list - list search jobs
 /pause <search_id> - pause a search job
 /resume <search_id> - resume a search job
@@ -37,15 +37,16 @@ class TelegramSearchCommandHandlers:
 
     async def add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         args = list(getattr(context, "args", []) or [])
-        if len(args) < 2:
-            await _reply(update, "Usage: /add <name> <url>")
+        if not args:
+            await _reply(update, _add_usage())
             return
 
-        name = args[0].strip()
-        source_url = " ".join(args[1:]).strip()
-        if not name or not source_url:
-            await _reply(update, "Usage: /add <name> <url>")
+        source_url = args[0].strip()
+        if not _is_http_url(source_url):
+            await _reply(update, _add_usage())
             return
+
+        name = " ".join(args[1:]).strip() or "avito_search"
 
         with self.session_factory() as db:
             repo = SearchRepository(db)
@@ -149,6 +150,14 @@ def build_telegram_application(
     application.add_handler(CommandHandler("resume", handlers.resume))
     application.add_handler(CommandHandler("status", handlers.status))
     return application
+
+
+def _add_usage() -> str:
+    return "Usage: /add <url> [name]"
+
+
+def _is_http_url(value: str) -> bool:
+    return value.startswith(("http://", "https://"))
 
 
 def _parse_search_id(context: Any) -> int | None:

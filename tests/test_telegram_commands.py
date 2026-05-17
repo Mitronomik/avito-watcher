@@ -49,38 +49,62 @@ def test_start_and_help_show_available_commands(db_session):
 
     run(handler.start(update, make_context()))
 
-    assert "/add <name> <url>" in update.effective_message.replies[0]
+    assert "/add <url> [name]" in update.effective_message.replies[0]
     assert "/pause <search_id>" in update.effective_message.replies[0]
 
 
-def test_add_creates_search_with_default_baseline_and_polling(db_session):
+def test_add_creates_search_with_custom_name_and_default_polling(db_session):
     handler = make_handler(db_session)
     update = make_update()
 
     run(
         handler.add(
             update,
-            make_context("spb", "https://www.avito.ru/all/kvartiry"),
+            make_context("https://example.com/search", "Commercial", "SPb"),
         )
     )
 
     search = SearchRepository(db_session).list_all()[0]
-    assert search.name == "spb"
-    assert search.source_url == "https://www.avito.ru/all/kvartiry"
+    assert search.name == "Commercial SPb"
+    assert search.source_url == "https://example.com/search"
     assert search.poll_interval_sec == 180
     assert search.is_active is True
     assert search.baseline_initialized is False
     assert "Search added: id=" in update.effective_message.replies[0]
 
 
+def test_add_uses_default_name_when_name_is_omitted(db_session):
+    handler = make_handler(db_session)
+    update = make_update()
+
+    run(handler.add(update, make_context("https://example.com/search")))
+
+    search = SearchRepository(db_session).list_all()[0]
+    assert search.name == "avito_search"
+    assert search.source_url == "https://example.com/search"
+    assert search.poll_interval_sec == 180
+    assert search.is_active is True
+    assert search.baseline_initialized is False
+
+
+def test_add_rejects_non_http_url(db_session):
+    handler = make_handler(db_session)
+    update = make_update()
+
+    run(handler.add(update, make_context("not-a-url", "name")))
+
+    assert SearchRepository(db_session).list_all() == []
+    assert update.effective_message.replies == ["Usage: /add <url> [name]"]
+
+
 def test_add_validates_required_arguments(db_session):
     handler = make_handler(db_session)
     update = make_update()
 
-    run(handler.add(update, make_context("missing_url")))
+    run(handler.add(update, make_context()))
 
     assert SearchRepository(db_session).list_all() == []
-    assert update.effective_message.replies == ["Usage: /add <name> <url>"]
+    assert update.effective_message.replies == ["Usage: /add <url> [name]"]
 
 
 def test_list_shows_search_state_and_next_run_at(db_session):
