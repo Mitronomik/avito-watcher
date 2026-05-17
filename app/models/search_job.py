@@ -19,6 +19,6 @@ class SearchJob(Base):
     baseline_initialized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    last_error: Mapped[str] = mapped_column(String(2048), default="", nullable=False)
+    last_error: Mapped[str | None] = mapped_column(String(2048), nullable=True, default=None)
     fail_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
