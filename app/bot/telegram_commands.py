@@ -1,4 +1,6 @@
-from datetime import UTC, datetime
+import json
+import re
+from datetime import UTC, date, datetime
 from typing import Any, Callable
 
 from sqlalchemy.orm import Session
@@ -20,7 +22,10 @@ HELP_TEXT = """Avito Watcher commands:
 /list - list search jobs
 /pause <search_id> - pause a search job
 /resume <search_id> - resume a search job
-/status - show watcher status"""
+/status - show watcher status
+/showfilters <search_id> - show search filters
+/setfilters <search_id> key=value key=value ... - merge search filters
+/clearfilters <search_id> - clear search filters"""
 
 
 class TelegramSearchCommandHandlers:
@@ -133,6 +138,74 @@ class TelegramSearchCommandHandlers:
 
         await _reply(update, "\n".join(lines))
 
+    async def showfilters(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        search_id = _parse_search_id(context)
+        if search_id is None:
+            await _reply(update, "Usage: /showfilters <search_id>")
+            return
+
+        with self.session_factory() as db:
+            repo = SearchRepository(db)
+            search = repo.get(search_id)
+            if search is None:
+                await _reply(update, f"Search not found: {search_id}")
+                return
+            filters_json = dict(search.filters_json or {})
+
+        if not filters_json:
+            await _reply(update, f"Filters for search {search_id} are empty.")
+            return
+
+        await _reply(
+            update,
+            f"Filters for search {search_id}:\n"
+            f"{json.dumps(filters_json, ensure_ascii=False, indent=2, sort_keys=True)}",
+        )
+
+    async def setfilters(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        args = list(getattr(context, "args", []) or [])
+        search_id = _parse_search_id_from_args(args)
+        if search_id is None or len(args) < 2:
+            await _reply(update, "Usage: /setfilters <search_id> key=value key=value ...")
+            return
+
+        parsed_filters, error = _parse_filter_assignments(args[1:])
+        if error is not None:
+            await _reply(update, error)
+            return
+
+        with self.session_factory() as db:
+            repo = SearchRepository(db)
+            search = repo.get(search_id)
+            if search is None:
+                await _reply(update, f"Search not found: {search_id}")
+                return
+
+            merged_filters = dict(search.filters_json or {})
+            merged_filters.update(parsed_filters)
+            repo.update_filters(search, merged_filters)
+            db.commit()
+
+        changed_keys = ", ".join(sorted(parsed_filters))
+        await _reply(update, f"Filters updated for search {search_id}: {changed_keys}")
+
+    async def clearfilters(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        search_id = _parse_search_id(context)
+        if search_id is None:
+            await _reply(update, "Usage: /clearfilters <search_id>")
+            return
+
+        with self.session_factory() as db:
+            repo = SearchRepository(db)
+            search = repo.get(search_id)
+            if search is None:
+                await _reply(update, f"Search not found: {search_id}")
+                return
+            repo.update_filters(search, {})
+            db.commit()
+
+        await _reply(update, f"Filters cleared for search {search_id}.")
+
 
 def build_telegram_application(
     session_factory: SessionFactory = SessionLocal,
@@ -149,7 +222,28 @@ def build_telegram_application(
     application.add_handler(CommandHandler("pause", handlers.pause))
     application.add_handler(CommandHandler("resume", handlers.resume))
     application.add_handler(CommandHandler("status", handlers.status))
+    application.add_handler(CommandHandler("showfilters", handlers.showfilters))
+    application.add_handler(CommandHandler("setfilters", handlers.setfilters))
+    application.add_handler(CommandHandler("clearfilters", handlers.clearfilters))
     return application
+
+
+NUMERIC_FILTER_KEYS = {"min_price", "max_price", "min_area", "max_area", "max_age_hours"}
+KEYWORD_FILTER_KEYS = {"include_keywords", "exclude_keywords", "location_keywords"}
+DATE_FILTER_KEYS = {"published_after", "published_on_date"}
+BOOL_FILTER_KEYS = {"require_published_at"}
+SUPPORTED_FILTER_KEYS = (
+    NUMERIC_FILTER_KEYS | KEYWORD_FILTER_KEYS | DATE_FILTER_KEYS | BOOL_FILTER_KEYS
+)
+BOOL_VALUES = {
+    "true": True,
+    "yes": True,
+    "1": True,
+    "false": False,
+    "no": False,
+    "0": False,
+}
+PUBLISHED_ON_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _add_usage() -> str:
@@ -164,10 +258,90 @@ def _parse_search_id(context: Any) -> int | None:
     args = list(getattr(context, "args", []) or [])
     if len(args) != 1:
         return None
+    return _parse_search_id_from_args(args)
+
+
+def _parse_search_id_from_args(args: list[str]) -> int | None:
+    if not args:
+        return None
     try:
         return int(args[0])
     except ValueError:
         return None
+
+
+def _parse_filter_assignments(args: list[str]) -> tuple[dict[str, Any], str | None]:
+    parsed: dict[str, Any] = {}
+    for arg in args:
+        if "=" not in arg:
+            return {}, f"Invalid filter assignment: {arg}. Expected key=value."
+
+        key, raw_value = arg.split("=", 1)
+        key = key.strip()
+        if key not in SUPPORTED_FILTER_KEYS:
+            supported_keys = ", ".join(sorted(SUPPORTED_FILTER_KEYS))
+            return {}, f"Unknown filter key: {key}. Supported keys: {supported_keys}"
+
+        value, error = _parse_filter_value(key, raw_value)
+        if error is not None:
+            return {}, error
+        parsed[key] = value
+
+    return parsed, None
+
+
+def _parse_filter_value(key: str, raw_value: str) -> tuple[Any, str | None]:
+    if key in NUMERIC_FILTER_KEYS:
+        try:
+            return float(raw_value), None
+        except ValueError:
+            return None, f"Invalid numeric value for {key}: {raw_value}"
+
+    if key in KEYWORD_FILTER_KEYS:
+        return _parse_keyword_filter(raw_value), None
+
+    if key == "published_on_date":
+        if not PUBLISHED_ON_DATE_RE.fullmatch(raw_value):
+            return None, f"Invalid date for {key}: {raw_value}. Use YYYY-MM-DD."
+        try:
+            date.fromisoformat(raw_value)
+        except ValueError:
+            return None, f"Invalid date for {key}: {raw_value}. Use YYYY-MM-DD."
+        return raw_value, None
+
+    if key == "published_after":
+        try:
+            datetime.fromisoformat(_normalize_iso_datetime(raw_value))
+        except ValueError:
+            return None, f"Invalid ISO datetime for {key}: {raw_value}"
+        return raw_value, None
+
+    if key in BOOL_FILTER_KEYS:
+        bool_value = BOOL_VALUES.get(raw_value.strip().lower())
+        if bool_value is None:
+            return None, f"Invalid boolean value for {key}: {raw_value}"
+        return bool_value, None
+
+    return None, f"Unsupported filter key: {key}"
+
+
+def _parse_keyword_filter(raw_value: str) -> list[str]:
+    stripped = raw_value.strip()
+    if stripped.startswith("[") and stripped.endswith("]"):
+        try:
+            decoded = json.loads(stripped)
+        except json.JSONDecodeError:
+            decoded = stripped
+        if isinstance(decoded, list):
+            return [item.strip() for item in map(str, decoded) if item.strip()]
+
+    return [item.strip() for item in stripped.split(",") if item.strip()]
+
+
+def _normalize_iso_datetime(value: str) -> str:
+    if value.endswith("Z"):
+        return value[:-1] + "+00:00"
+    return value
 
 
 async def _reply(update: Update, text: str) -> None:

@@ -177,3 +177,178 @@ def test_status_shows_counts_due_searches_and_last_errors(db_session):
     assert f"- #{paused.id} paused: previous failure" in reply
     db_session.refresh(due)
     assert due.baseline_initialized is False
+
+
+def make_search_with_filters(db_session, filters_json=None):
+    repo = SearchRepository(db_session)
+    search = repo.create(
+        "filtered",
+        "https://www.avito.ru/filtered",
+        filters_json=filters_json or {},
+    )
+    db_session.commit()
+    return search
+
+
+def test_showfilters_with_empty_filters(db_session):
+    search = make_search_with_filters(db_session)
+    handler = make_handler(db_session)
+    update = make_update()
+
+    run(handler.showfilters(update, make_context(str(search.id))))
+
+    assert update.effective_message.replies == [
+        f"Filters for search {search.id} are empty."
+    ]
+
+
+def test_setfilters_numeric_values(db_session):
+    search = make_search_with_filters(db_session, {"include_keywords": ["office"]})
+    handler = make_handler(db_session)
+    update = make_update()
+
+    run(
+        handler.setfilters(
+            update,
+            make_context(str(search.id), "min_price=1000000", "max_area=80.5"),
+        )
+    )
+    db_session.refresh(search)
+
+    assert search.filters_json == {
+        "include_keywords": ["office"],
+        "min_price": 1000000.0,
+        "max_area": 80.5,
+    }
+    assert update.effective_message.replies == [
+        f"Filters updated for search {search.id}: max_area, min_price"
+    ]
+
+
+def test_setfilters_boolean_require_published_at_true(db_session):
+    search = make_search_with_filters(db_session)
+    handler = make_handler(db_session)
+    update = make_update()
+
+    run(
+        handler.setfilters(
+            update,
+            make_context(str(search.id), "require_published_at=true"),
+        )
+    )
+    db_session.refresh(search)
+
+    assert search.filters_json["require_published_at"] is True
+
+
+def test_setfilters_keyword_list_parsing(db_session):
+    search = make_search_with_filters(db_session)
+    handler = make_handler(db_session)
+    update = make_update()
+
+    run(
+        handler.setfilters(
+            update,
+            make_context(str(search.id), "exclude_keywords=доля, аренда,,ипотека"),
+        )
+    )
+    db_session.refresh(search)
+
+    assert search.filters_json["exclude_keywords"] == ["доля", "аренда", "ипотека"]
+
+
+def test_setfilters_published_on_date_valid(db_session):
+    search = make_search_with_filters(db_session)
+    handler = make_handler(db_session)
+    update = make_update()
+
+    run(
+        handler.setfilters(
+            update,
+            make_context(str(search.id), "published_on_date=2026-05-17"),
+        )
+    )
+    db_session.refresh(search)
+
+    assert search.filters_json["published_on_date"] == "2026-05-17"
+
+
+def test_setfilters_rejects_unknown_key(db_session):
+    search = make_search_with_filters(db_session, {"max_price": 10.0})
+    handler = make_handler(db_session)
+    update = make_update()
+
+    run(handler.setfilters(update, make_context(str(search.id), "unknown=1")))
+    db_session.refresh(search)
+
+    assert search.filters_json == {"max_price": 10.0}
+    assert "Unknown filter key: unknown" in update.effective_message.replies[0]
+
+
+def test_setfilters_rejects_invalid_number(db_session):
+    search = make_search_with_filters(db_session, {"max_price": 10.0})
+    handler = make_handler(db_session)
+    update = make_update()
+
+    run(handler.setfilters(update, make_context(str(search.id), "max_price=cheap")))
+    db_session.refresh(search)
+
+    assert search.filters_json == {"max_price": 10.0}
+    assert update.effective_message.replies == ["Invalid numeric value for max_price: cheap"]
+
+
+def test_setfilters_rejects_invalid_date(db_session):
+    search = make_search_with_filters(db_session, {"max_price": 10.0})
+    handler = make_handler(db_session)
+    update = make_update()
+
+    run(
+        handler.setfilters(
+            update,
+            make_context(str(search.id), "published_on_date=17-05-2026"),
+        )
+    )
+    db_session.refresh(search)
+
+    assert search.filters_json == {"max_price": 10.0}
+    assert update.effective_message.replies == [
+        "Invalid date for published_on_date: 17-05-2026. Use YYYY-MM-DD."
+    ]
+
+
+def test_invalid_setfilters_does_not_partially_update_filters_json(db_session):
+    search = make_search_with_filters(db_session, {"max_price": 10.0})
+    handler = make_handler(db_session)
+    update = make_update()
+
+    run(
+        handler.setfilters(
+            update,
+            make_context(str(search.id), "min_price=5", "max_area=bad"),
+        )
+    )
+    db_session.refresh(search)
+
+    assert search.filters_json == {"max_price": 10.0}
+    assert update.effective_message.replies == ["Invalid numeric value for max_area: bad"]
+
+
+def test_clearfilters_resets_filters_json(db_session):
+    search = make_search_with_filters(db_session, {"max_price": 10.0})
+    handler = make_handler(db_session)
+    update = make_update()
+
+    run(handler.clearfilters(update, make_context(str(search.id))))
+    db_session.refresh(search)
+
+    assert search.filters_json == {}
+    assert update.effective_message.replies == [f"Filters cleared for search {search.id}."]
+
+
+def test_filter_commands_missing_search_id_return_helpful_message(db_session):
+    handler = make_handler(db_session)
+    update = make_update()
+
+    run(handler.showfilters(update, make_context("999")))
+
+    assert update.effective_message.replies == ["Search not found: 999"]

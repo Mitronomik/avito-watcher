@@ -115,6 +115,22 @@ python -m app.cli telegram-bot
 /pause <search_id>
 /resume <search_id>
 /status
+/showfilters <search_id>
+/setfilters <search_id> key=value key=value ...
+/clearfilters <search_id>
 ```
 
 Telegram-команды управляют SearchJob в базе данных и не запускают мониторинг или парсинг Avito.
+Команды фильтров только читают и обновляют `SearchJob.filters_json`: они не запускают worker, AvitoParser, LLM-оценку и не отправляют алерты по объявлениям.
+
+Примеры управления фильтрами:
+
+```text
+/setfilters 1 max_age_hours=24 require_published_at=true
+/setfilters 1 max_price=30000000 min_area=40 exclude_keywords=доля,аренда
+/showfilters 1
+/clearfilters 1
+```
+
+Поддерживаемые ключи: `min_price`, `max_price`, `min_area`, `max_area`, `include_keywords`, `exclude_keywords`, `location_keywords`, `max_age_hours`, `published_after`, `published_on_date`, `require_published_at`.
+Для свежих объявлений рекомендуется настройка `max_age_hours=24 require_published_at=true`: она ограничивает выдачу объявлениями с распознанной датой публикации за последние 24 часа.
