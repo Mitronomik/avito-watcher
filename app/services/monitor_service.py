@@ -1,5 +1,6 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
@@ -13,6 +14,8 @@ from app.repositories.alert_repository import AlertRepository
 from app.repositories.listing_repository import ListingRepository
 from app.repositories.search_repository import SearchRepository
 from app.utils.formatting import build_listing_message
+
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
 
 def _as_float(value: object) -> float | None:
@@ -34,44 +37,36 @@ def _as_keywords(value: object) -> list[str]:
     return []
 
 
-def _raw_text(raw: dict) -> str:
-    parts = []
-    for value in raw.values():
-        if isinstance(value, (str, int, float)):
-            parts.append(str(value))
-    return " ".join(parts)
-
-
-def _listing_text(card: ListingCard) -> str:
-    return " ".join(
-        part
-        for part in (card.title, card.address, card.rooms, _raw_text(card.raw))
-        if part
-    ).lower()
-
-
 def passes_rule_filters(card: ListingCard, filters: dict | None) -> bool:
     filters = filters or {}
-    price = _as_float(card.price)
-    area = _as_float(card.area_m2)
 
     min_price = _as_float(filters.get("min_price"))
-    if min_price is not None and (price is None or price < min_price):
+    if min_price is not None and (card.price is None or card.price < min_price):
         return False
 
     max_price = _as_float(filters.get("max_price"))
-    if max_price is not None and (price is None or price > max_price):
+    if max_price is not None and (card.price is None or card.price > max_price):
         return False
 
-    min_area = _as_float(filters.get("min_area"))
-    if min_area is not None and (area is None or area < min_area):
+    min_area = _as_float(filters.get("min_area") or filters.get("min_area_m2"))
+    if min_area is not None and (card.area_m2 is None or card.area_m2 < min_area):
         return False
 
-    max_area = _as_float(filters.get("max_area"))
-    if max_area is not None and (area is None or area > max_area):
+    max_area = _as_float(filters.get("max_area") or filters.get("max_area_m2"))
+    if max_area is not None and (card.area_m2 is None or card.area_m2 > max_area):
         return False
 
-    text = _listing_text(card)
+    text = " ".join(
+        part
+        for part in (
+            card.title,
+            card.address,
+            str(card.raw.get("text", "")),
+            str(card.raw.get("description", "")),
+        )
+        if part
+    ).lower()
+
     include_keywords = _as_keywords(filters.get("include_keywords"))
     if include_keywords and not any(keyword in text for keyword in include_keywords):
         return False
@@ -102,20 +97,85 @@ def _utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
+def _as_utc_naive(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        return _as_utc_naive(datetime.fromisoformat(text))
+    except ValueError:
+        return None
+
+
+def passes_publication_filters(
+    card: ListingCard,
+    filters: dict | None,
+    now: datetime | None = None,
+) -> bool:
+    filters = filters or {}
+    published_at = card.published_at
+
+    if filters.get("require_published_at") is True and published_at is None:
+        return False
+
+    if published_at is None:
+        return True
+
+    published_at = _as_utc_naive(published_at)
+    now = _as_utc_naive(now or _utcnow())
+
+    max_age_hours = _as_float(filters.get("max_age_hours"))
+    if max_age_hours is not None and published_at < now - timedelta(hours=max_age_hours):
+        return False
+
+    published_after = _parse_iso_datetime(filters.get("published_after"))
+    if published_after is not None and published_at <= published_after:
+        return False
+
+    published_on_date = filters.get("published_on_date")
+    if isinstance(published_on_date, str) and published_on_date.strip():
+        try:
+            expected_date = datetime.strptime(
+                published_on_date.strip(), "%Y-%m-%d"
+            ).date()
+        except ValueError:
+            expected_date = None
+        if expected_date is not None:
+            # Publication dates are stored as naive UTC; convert to Moscow local date for date-only filters.
+            local_date = published_at.replace(tzinfo=UTC).astimezone(MOSCOW_TZ).date()
+            if local_date != expected_date:
+                return False
+
+    return True
+
+
 class MonitorService:
     def __init__(
         self,
         parser: AvitoParser | None = None,
         scorer: ListingScorer | None = None,
         notifier: TelegramNotifier | None = None,
+        now_func=None,
     ) -> None:
         self.parser = parser or AvitoParser()
         self.scorer = scorer or ListingScorer()
         self.notifier = notifier or TelegramNotifier()
+        self.now_func = now_func or _utcnow
+
+    def _now(self) -> datetime:
+        return _as_utc_naive(self.now_func())
 
     async def process_search(self, db: Session, search: SearchJob) -> dict:
         search_repo = SearchRepository(db)
-        checked_at = _utcnow()
+        checked_at = self._now()
         baseline_run = not search.baseline_initialized
 
         try:
@@ -134,7 +194,7 @@ class MonitorService:
             return result
         except Exception as exc:
             db.rollback()
-            failed_at = _utcnow()
+            failed_at = self._now()
             persistent_search = (
                 search_repo.get(search.id) if search.id is not None else search
             )
@@ -164,11 +224,12 @@ class MonitorService:
         created = 0
         alerted = 0
         price_changed = 0
-        filtered = 0
+        filtered_by_rules = 0
+        filtered_by_publication_date = 0
         scored = 0
 
         for card in cards:
-            now = _utcnow()
+            now = self._now()
             existing = listing_repo.get_by_external_id(card.external_id)
 
             if existing:
@@ -179,6 +240,10 @@ class MonitorService:
                 existing.address = card.address or existing.address
                 existing.area_m2 = card.area_m2
                 existing.rooms = card.rooms or existing.rooms
+                if card.published_label:
+                    existing.published_label = card.published_label
+                if card.published_at is not None:
+                    existing.published_at = card.published_at
 
                 if not baseline_run and old_price != card.price:
                     existing.price = card.price
@@ -186,6 +251,8 @@ class MonitorService:
                         external_id=card.external_id,
                         title=card.title,
                         price=card.price,
+                        published_label=card.published_label,
+                        published_at=card.published_at,
                         payload_json=card.raw,
                         screenshot_path="",
                         observed_at=now,
@@ -202,6 +269,8 @@ class MonitorService:
                 address=card.address,
                 area_m2=card.area_m2,
                 rooms=card.rooms,
+                published_label=card.published_label,
+                published_at=card.published_at,
                 first_seen_at=now,
                 last_seen_at=now,
             )
@@ -209,6 +278,8 @@ class MonitorService:
                 external_id=card.external_id,
                 title=card.title,
                 price=card.price,
+                published_label=card.published_label,
+                published_at=card.published_at,
                 payload_json=card.raw,
                 screenshot_path="",
                 observed_at=now,
@@ -219,7 +290,11 @@ class MonitorService:
                 continue
 
             if not passes_rule_filters(card, filters):
-                filtered += 1
+                filtered_by_rules += 1
+                continue
+
+            if not passes_publication_filters(card, filters, now):
+                filtered_by_publication_date += 1
                 continue
 
             scored += 1
@@ -243,6 +318,7 @@ class MonitorService:
                     "address": card.address,
                     "area_m2": card.area_m2,
                     "rooms": card.rooms,
+                    "published_label": card.published_label,
                     "url": card.url,
                 },
                 llm.get("summary", ""),
@@ -253,11 +329,14 @@ class MonitorService:
             )
             alerted += 1
 
+        filtered = filtered_by_rules + filtered_by_publication_date
         return {
             "created": created,
             "alerted": alerted,
             "price_changed": price_changed,
             "filtered": filtered,
+            "filtered_by_rules": filtered_by_rules,
+            "filtered_by_publication_date": filtered_by_publication_date,
             "scored": scored,
             "total_seen": len(cards),
         }

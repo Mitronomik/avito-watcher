@@ -49,6 +49,8 @@ def card(
     title: str | None = None,
     address: str = "",
     raw: dict | None = None,
+    published_label: str = "",
+    published_at: datetime | None = None,
 ) -> ListingCard:
     payload = {"external_id": external_id, "price": price}
     if raw:
@@ -60,6 +62,8 @@ def card(
         price=price,
         address=address,
         area_m2=area_m2,
+        published_label=published_label,
+        published_at=published_at,
         raw=payload,
     )
 
@@ -571,3 +575,179 @@ def test_max_area_filter_uses_area_parsed_from_card_text(db_session):
     assert result["filtered"] == 1
     assert result["scored"] == 0
     assert result["alerted"] == 0
+
+
+
+def test_max_age_hours_allows_fresh_listing(db_session):
+    now = datetime(2026, 5, 17, 12, 0, 0)
+    search = make_search(db_session, filters_json={"max_age_hours": 2})
+    scorer = FakeScorer()
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser(
+            [
+                [card("1", published_at=now - timedelta(hours=1))],
+                [
+                    card("1", published_at=now - timedelta(hours=1)),
+                    card("2", published_at=now - timedelta(minutes=30)),
+                ],
+            ]
+        ),
+        scorer=scorer,
+        notifier=notifier,
+        now_func=lambda: now,
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_publication_date"] == 0
+    assert result["scored"] == 1
+    assert result["alerted"] == 1
+
+
+def test_max_age_hours_filters_old_listing(db_session):
+    now = datetime(2026, 5, 17, 12, 0, 0)
+    search = make_search(db_session, filters_json={"max_age_hours": 2})
+    service = MonitorService(
+        parser=FakeParser(
+            [[card("1")], [card("1"), card("2", published_at=now - timedelta(hours=3))]]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+        now_func=lambda: now,
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["filtered"] == 1
+    assert result["filtered_by_rules"] == 0
+    assert result["filtered_by_publication_date"] == 1
+    assert result["scored"] == 0
+    assert scalar_count(db_session, Listing) == 2
+    assert scalar_count(db_session, ListingSnapshot) == 2
+
+
+def test_published_on_date_allows_matching_moscow_date(db_session):
+    search = make_search(db_session, filters_json={"published_on_date": "2026-05-17"})
+    service = MonitorService(
+        parser=FakeParser(
+            [[card("1")], [card("1"), card("2", published_at=datetime(2026, 5, 16, 21, 30, 0))]]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+        now_func=lambda: datetime(2026, 5, 17, 12, 0, 0),
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_publication_date"] == 0
+    assert result["alerted"] == 1
+
+
+def test_published_on_date_filters_non_matching_moscow_date(db_session):
+    search = make_search(db_session, filters_json={"published_on_date": "2026-05-17"})
+    service = MonitorService(
+        parser=FakeParser(
+            [[card("1")], [card("1"), card("2", published_at=datetime(2026, 5, 15, 21, 30, 0))]]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+        now_func=lambda: datetime(2026, 5, 17, 12, 0, 0),
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_publication_date"] == 1
+    assert result["alerted"] == 0
+
+
+def test_require_published_at_filters_unknown_published_at(db_session):
+    search = make_search(db_session, filters_json={"require_published_at": True})
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_publication_date"] == 1
+    assert result["scored"] == 0
+    assert result["alerted"] == 0
+
+
+def test_baseline_ignores_publication_filters_but_saves_records(db_session):
+    search = make_search(
+        db_session,
+        filters_json={"require_published_at": True, "max_age_hours": 1},
+    )
+    scorer = FakeScorer()
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("1")]]),
+        scorer=scorer,
+        notifier=notifier,
+    )
+
+    result = run(service, db_session, search)
+
+    assert result["baseline_run"] is True
+    assert result["created"] == 1
+    assert result["filtered_by_publication_date"] == 0
+    assert result["scored"] == 0
+    assert result["alerted"] == 0
+    assert scalar_count(db_session, Listing) == 1
+    assert scalar_count(db_session, ListingSnapshot) == 1
+    assert scorer.cards == []
+    assert notifier.messages == []
+
+
+def test_listing_and_snapshot_store_publication_fields(db_session):
+    published_at = datetime(2026, 5, 17, 9, 34, 0)
+    search = make_search(db_session)
+    service = MonitorService(
+        parser=FakeParser(
+            [[card("1", published_label="Сегодня 12:34", published_at=published_at)]]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    run(service, db_session, search)
+
+    listing = db_session.scalar(select(Listing).where(Listing.external_id == "1"))
+    snapshot = db_session.scalar(
+        select(ListingSnapshot).where(ListingSnapshot.external_id == "1")
+    )
+    assert listing.published_label == "Сегодня 12:34"
+    assert listing.published_at == published_at
+    assert snapshot.published_label == "Сегодня 12:34"
+    assert snapshot.published_at == published_at
+
+
+def test_existing_listing_updates_publication_fields_when_seen_again(db_session):
+    first_published_at = datetime(2026, 5, 17, 9, 34, 0)
+    second_published_at = datetime(2026, 5, 17, 10, 10, 0)
+    search = make_search(db_session)
+    service = MonitorService(
+        parser=FakeParser(
+            [
+                [card("1", published_label="Сегодня 12:34", published_at=first_published_at)],
+                [card("1", published_label="Сегодня 13:10", published_at=second_published_at)],
+            ]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    run(service, db_session, search)
+    run(service, db_session, search)
+
+    listing = db_session.scalar(select(Listing).where(Listing.external_id == "1"))
+    assert listing.published_label == "Сегодня 13:10"
+    assert listing.published_at == second_published_at
