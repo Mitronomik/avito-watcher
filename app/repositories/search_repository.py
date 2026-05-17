@@ -52,6 +52,9 @@ class SearchRepository:
     def resume(self, search: SearchJob) -> None:
         self.activate(search)
 
+    def update_filters(self, search: SearchJob, filters_json: dict) -> None:
+        search.filters_json = dict(filters_json)
+
     def mark_baseline_initialized(self, search: SearchJob, checked_at: datetime) -> None:
         search.baseline_initialized = True
         search.baseline_initialized_at = checked_at
