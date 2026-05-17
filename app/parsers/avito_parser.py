@@ -173,7 +173,7 @@ class AvitoParser:
         self._validate_search_url(search_url)
 
         # Fetch HTML via stealth engine (nodriver → camoufox fallback)
-        # _fetch_page_html raises ParserError on block/timeout
+        # _fetch_page_html raises ParserError only when all engines are blocked.
         page_html: str = await self._fetch_page_html(search_url)
 
         # Parse the returned HTML with BeautifulSoup
@@ -218,18 +218,7 @@ class AvitoParser:
                 page = await browser.new_page()
                 await page.set_content(page_html, wait_until="domcontentloaded")
 
-                title = await page.title()
-                body_text = (await page.locator("body").first.text_content()) or ""
-                if self._looks_like_captcha_or_block(title, body_text):
-                    raise ParserError(
-                        ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK,
-                        "Search page content looks like captcha, robot check, or access block",
-                    )
-
                 cards = await page.locator(CARD_SELECTOR).all()
-                if not cards:
-                    raise await self._classify_missing_cards(page)
-
                 result: list[ListingCard] = []
 
                 for idx, card in enumerate(cards[:CARD_LIMIT]):
