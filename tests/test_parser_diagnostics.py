@@ -9,7 +9,7 @@ from app import cli
 from app.models.alert_sent import AlertSent
 from app.models.listing import Listing
 from app.models.listing_snapshot import ListingSnapshot
-from app.parsers.avito_parser import AvitoParser
+from app.parsers.avito_parser import AvitoParser, _Engine
 from app.parsers.errors import ParserError, ParserErrorType
 from app.parsers.schemas import ListingCard
 from app.services.monitor_service import MonitorService
@@ -107,7 +107,9 @@ def test_fetch_page_html_raises_possible_captcha_or_block_when_all_engines_fail(
 
     with patch.object(parser, "_try_engine", new=try_engine):
         with pytest.raises(ParserError) as exc_info:
-            asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+            asyncio.run(
+                parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry")
+            )
 
     assert exc_info.value.error_type == ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK
     assert try_engine.await_count == 2
@@ -118,6 +120,56 @@ def test_parser_preserves_sha256_external_id_fallback():
 
     assert external_id.startswith("fallback-")
     assert len(external_id) == len("fallback-") + 16
+
+
+def test_extract_external_id_success_case():
+    assert (
+        AvitoParser._extract_external_id("/moskva/kvartiry/komnata_987654321", 0)
+        == "987654321"
+    )
+
+
+def test_extract_external_id_with_query_string():
+    href = "/moskva/kvartiry/komnata_111222333?context=popup"
+
+    assert AvitoParser._extract_external_id(href, 0) == "111222333"
+
+
+def test_fetch_page_html_nodriver_blocked_camoufox_succeeds_engine_flip():
+    parser = AvitoParser()
+    html = "<html><body>ok</body></html>"
+    try_engine = AsyncMock(
+        side_effect=[
+            {"ok": False, "error_type": "blocked", "html": ""},
+            {"ok": True, "html": html},
+        ]
+    )
+
+    with patch.object(parser, "_try_engine", new=try_engine):
+        result = asyncio.run(
+            parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry")
+        )
+
+    assert result == html
+    assert parser._prefer_engine == _Engine.CAMOUFOX
+
+
+def test_fetch_page_html_both_engines_blocked_raises():
+    parser = AvitoParser()
+    try_engine = AsyncMock(
+        side_effect=[
+            {"ok": False, "error_type": "blocked", "html": ""},
+            {"ok": False, "error_type": "blocked", "html": ""},
+        ]
+    )
+
+    with patch.object(parser, "_try_engine", new=try_engine):
+        with pytest.raises(ParserError) as exc_info:
+            asyncio.run(
+                parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry")
+            )
+
+    assert exc_info.value.error_type == ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK
 
 
 def test_monitor_records_parser_error_type_in_last_error(db_session):
@@ -280,6 +332,7 @@ def test_parse_published_at_russian_labels():
         "1 час назад": datetime(2026, 5, 17, 14, 0, 0),
         "30 минут назад": datetime(2026, 5, 17, 14, 30, 0),
         "1 минуту назад": datetime(2026, 5, 17, 14, 59, 0),
+        # "17 мая" has no time → midnight Moscow (00:00 MSK) → UTC 21:00 of prev day.
         "17 мая": datetime(2026, 5, 16, 21, 0, 0),
         "17 мая 14:20": datetime(2026, 5, 17, 11, 20, 0),
         "17 мая в 14:20": datetime(2026, 5, 17, 11, 20, 0),
