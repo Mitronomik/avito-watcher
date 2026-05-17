@@ -248,3 +248,49 @@ def test_extract_structured_published_label_prefers_marker_over_fallback_text():
 def test_unknown_published_label_returns_none_without_exception():
     assert AvitoParser._extract_published_label("Адрес рядом с метро") == ""
     assert AvitoParser._parse_published_at("непонятная дата", datetime(2026, 5, 17)) is None
+
+
+class _FakeBodyLocator:
+    def __init__(self, text: str):
+        self.first = self
+        self._text = text
+
+    async def text_content(self):
+        return self._text
+
+
+class _FakePageForMissingCards:
+    def __init__(self, title: str, body_text: str):
+        self._title = title
+        self._body_text = body_text
+
+    async def title(self):
+        return self._title
+
+    def locator(self, selector: str):
+        assert selector == "body"
+        return _FakeBodyLocator(self._body_text)
+
+
+def test_classify_missing_cards_detects_possible_captcha_or_block():
+    page = _FakePageForMissingCards("Доступ ограничен", "Подтвердите, что вы не робот")
+
+    error = asyncio.run(AvitoParser._classify_missing_cards(page))
+
+    assert error.error_type == ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK
+
+
+def test_classify_missing_cards_detects_empty_results():
+    page = _FakePageForMissingCards("Avito", "Ничего не найдено. Попробуйте изменить параметры поиска")
+
+    error = asyncio.run(AvitoParser._classify_missing_cards(page))
+
+    assert error.error_type == ParserErrorType.EMPTY_RESULTS
+
+
+def test_classify_missing_cards_defaults_to_layout_changed():
+    page = _FakePageForMissingCards("Avito", "Unexpected page without cards")
+
+    error = asyncio.run(AvitoParser._classify_missing_cards(page))
+
+    assert error.error_type == ParserErrorType.LAYOUT_CHANGED

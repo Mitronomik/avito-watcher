@@ -1,9 +1,14 @@
+import random
 from datetime import datetime, timedelta
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.search_job import SearchJob
+
+DEFAULT_POLL_INTERVAL_SEC = 180
+FAILED_CHECK_BACKOFF_CAP_SEC = 7200
+NEXT_RUN_JITTER_SEC = 15
 
 
 class SearchRepository:
@@ -73,4 +78,17 @@ class SearchRepository:
         self.update_next_run_at(search, checked_at)
 
     def update_next_run_at(self, search: SearchJob, checked_at: datetime) -> None:
-        search.next_run_at = checked_at + timedelta(seconds=search.poll_interval_sec or 180)
+        interval_sec = self._next_interval_sec(search)
+        jitter_sec = random.randint(-NEXT_RUN_JITTER_SEC, NEXT_RUN_JITTER_SEC)
+        next_run_at = checked_at + timedelta(seconds=interval_sec + jitter_sec)
+        search.next_run_at = max(next_run_at, checked_at)
+
+    @staticmethod
+    def _next_interval_sec(search: SearchJob) -> int:
+        base_interval = search.poll_interval_sec or DEFAULT_POLL_INTERVAL_SEC
+        fail_count = search.fail_count or 0
+        if fail_count <= 0:
+            return base_interval
+
+        backoff = base_interval * (2 ** (fail_count - 1))
+        return min(backoff, FAILED_CHECK_BACKOFF_CAP_SEC)

@@ -520,7 +520,9 @@ def test_successful_run_updates_next_run_at(monkeypatch, db_session):
     db_session.refresh(search)
     assert result[0]["search"] == search.name
     assert search.last_success_at is not None
-    assert search.next_run_at == search.last_success_at + timedelta(seconds=45)
+    min_next_run_at = search.last_success_at + timedelta(seconds=30)
+    max_next_run_at = search.last_success_at + timedelta(seconds=60)
+    assert min_next_run_at <= search.next_run_at <= max_next_run_at
 
 
 def test_min_area_filter_uses_area_parsed_from_card_text(db_session):
