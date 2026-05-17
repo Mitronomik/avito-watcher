@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.search_job import SearchJob
@@ -17,9 +17,17 @@ class SearchRepository:
         return list(self.db.scalars(select(SearchJob)).all())
 
     def list_active(self) -> list[SearchJob]:
-        if hasattr(SearchJob, "is_active"):
-            return list(self.db.scalars(select(SearchJob).where(SearchJob.is_active.is_(True))).all())
-        return self.list_all()
+        return list(self.db.scalars(select(SearchJob).where(SearchJob.is_active.is_(True))).all())
+
+    def list_due_active(self, now: datetime) -> list[SearchJob]:
+        return list(
+            self.db.scalars(
+                select(SearchJob).where(
+                    SearchJob.is_active.is_(True),
+                    or_(SearchJob.next_run_at.is_(None), SearchJob.next_run_at <= now),
+                )
+            ).all()
+        )
 
     def create(self, name: str, source_url: str, filters_json: dict | None = None, poll_interval_sec: int = 180) -> SearchJob:
         item = SearchJob(
@@ -31,6 +39,18 @@ class SearchRepository:
         self.db.add(item)
         self.db.flush()
         return item
+
+    def deactivate(self, search: SearchJob) -> None:
+        search.is_active = False
+
+    def activate(self, search: SearchJob) -> None:
+        search.is_active = True
+
+    def pause(self, search: SearchJob) -> None:
+        self.deactivate(search)
+
+    def resume(self, search: SearchJob) -> None:
+        self.activate(search)
 
     def mark_baseline_initialized(self, search: SearchJob, checked_at: datetime) -> None:
         search.baseline_initialized = True

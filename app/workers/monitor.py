@@ -18,7 +18,7 @@ def main() -> None:
             run_monitor_cycle()
         except Exception as exc:
             print({"worker_error": str(exc)})
-        time.sleep(180)
+        time.sleep(20)
 
 
 if __name__ == "__main__":
