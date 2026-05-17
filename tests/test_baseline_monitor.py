@@ -517,3 +517,57 @@ def test_successful_run_updates_next_run_at(monkeypatch, db_session):
     assert result[0]["search"] == search.name
     assert search.last_success_at is not None
     assert search.next_run_at == search.last_success_at + timedelta(seconds=45)
+
+
+def test_min_area_filter_uses_area_parsed_from_card_text(db_session):
+    from app.parsers.avito_parser import AvitoParser
+
+    parsed_area = AvitoParser._extract_area_m2("Студия, 32,5 м², 4/12 эт.")
+    search = make_search(db_session, filters_json={"min_area": 40.0})
+    scorer = FakeScorer()
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser(
+            [
+                [card("1", area_m2=45.0)],
+                [card("1", area_m2=45.0), card("2", area_m2=parsed_area)],
+            ]
+        ),
+        scorer=scorer,
+        notifier=notifier,
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert parsed_area == 32.5
+    assert result["filtered"] == 1
+    assert result["scored"] == 0
+    assert result["alerted"] == 0
+
+
+def test_max_area_filter_uses_area_parsed_from_card_text(db_session):
+    from app.parsers.avito_parser import AvitoParser
+
+    parsed_area = AvitoParser._extract_area_m2("3-к. квартира, 74 кв. м, 10/16 эт.")
+    search = make_search(db_session, filters_json={"max_area": 60.0})
+    scorer = FakeScorer()
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser(
+            [
+                [card("1", area_m2=45.0)],
+                [card("1", area_m2=45.0), card("2", area_m2=parsed_area)],
+            ]
+        ),
+        scorer=scorer,
+        notifier=notifier,
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert parsed_area == 74.0
+    assert result["filtered"] == 1
+    assert result["scored"] == 0
+    assert result["alerted"] == 0
