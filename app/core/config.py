@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     scrape_headless: bool = True
     scrape_timeout_ms: int = 45000
     scrape_concurrency: int = 2
+    proxy_urls: str = ""
+    # Comma-separated mobile proxy URLs, mirrors PROXY_URLS env var.
+    # app/workers/monitor.py reads os.getenv("PROXY_URLS") directly,
+    # but this field documents the variable and enables future config-driven injection.
 
 
 settings = Settings()
