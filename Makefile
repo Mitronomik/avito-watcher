@@ -1,4 +1,4 @@
-.PHONY: infra build migrate up down logs status seed run-once run-all api worker
+.PHONY: infra build migrate up down logs status seed run-once run-all api worker bot bot-logs bot-restart
 
 COMPOSE=docker compose -f deploy/docker-compose.yml
 
@@ -6,7 +6,7 @@ infra:
 	$(COMPOSE) up -d postgres redis ollama
 
 build:
-	$(COMPOSE) build app worker
+	$(COMPOSE) build app worker telegram_bot
 
 migrate: build infra
 	$(COMPOSE) run --rm -e PYTHONPATH=/app app alembic upgrade head
@@ -37,3 +37,13 @@ api:
 
 worker:
 	$(COMPOSE) up worker
+
+
+bot:
+	$(COMPOSE) up telegram_bot
+
+bot-logs:
+	$(COMPOSE) logs -f --tail=200 telegram_bot
+
+bot-restart:
+	$(COMPOSE) restart telegram_bot
