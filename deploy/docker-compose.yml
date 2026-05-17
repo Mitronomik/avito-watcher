@@ -83,6 +83,25 @@ services:
       ollama:
         condition: service_started
 
+  telegram_bot:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    working_dir: /app
+    command: python -m app.cli telegram-bot
+    env_file:
+      - ../.env
+    environment:
+      APP_ENV: docker
+      PYTHONPATH: /app
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/avito_watcher
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   ollama_data:

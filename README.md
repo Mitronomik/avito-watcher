@@ -3,9 +3,9 @@
 Стартовый production-oriented skeleton для мониторинга поисковой выдачи недвижимости: Playwright + PostgreSQL + Telegram + Ollama.
 
 ## Что нового в v3
-- CLI-команда для `seed-search`, `run-once`, `run-all`
+- CLI-команда для `seed-search`, `run-once`, `run-all` и `telegram-bot`
 - bootstrap-скрипт для быстрого старта
-- `docker compose` с app-сервисом
+- `docker compose` с отдельными сервисами для API, worker и Telegram command bot
 - пример сидирования search job из CLI
 - более понятный локальный запуск
 
@@ -15,9 +15,81 @@ cp .env.example .env
 ./scripts/bootstrap.sh
 ```
 
-## Ручной запуск
+## Docker Compose
+
+Все команды ниже используют основной compose-файл:
+
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml <command>
+```
+
+### Запустить только инфраструктуру
+
+Инфраструктура включает PostgreSQL, Redis и Ollama без API, worker и Telegram command bot:
+
+```bash
+make infra
+```
+
+Эквивалентная команда без Makefile:
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d postgres redis ollama
+```
+
+### Запустить API
+
+API-сервис запускает только FastAPI/admin-приложение и не выполняет мониторинг Avito:
+
+```bash
+make api
+```
+
+Эквивалентная команда без Makefile:
+
+```bash
+docker compose -f deploy/docker-compose.yml up app
+```
+
+### Запустить worker
+
+Worker выполняет мониторинг сохранённых SearchJob и отправку релевантных алертов:
+
+```bash
+make worker
+```
+
+Эквивалентная команда без Makefile:
+
+```bash
+docker compose -f deploy/docker-compose.yml up worker
+```
+
+> ⚠️ При первом запуске worker инициализирует baseline для поисков и не отправляет алерты по уже существующим объявлениям. Алерты появляются только для новых объявлений после baseline.
+
+### Запустить Telegram command bot
+
+Telegram command bot запускается отдельным сервисом, принимает команды Telegram и управляет SearchJob в базе данных. Он не запускает мониторинг, не парсит Avito напрямую и не открывает порты.
+
+```bash
+make bot
+```
+
+Эквивалентная команда без Makefile:
+
+```bash
+docker compose -f deploy/docker-compose.yml up telegram_bot
+```
+
+Логи и рестарт Telegram bot:
+
+```bash
+make bot-logs
+make bot-restart
+```
+
+## Ручной локальный запуск
+```bash
 pip install -r requirements.txt
 playwright install chromium
 alembic upgrade head
