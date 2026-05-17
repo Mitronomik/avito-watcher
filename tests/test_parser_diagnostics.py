@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from bs4 import BeautifulSoup
 
 from app import cli
 from app.models.alert_sent import AlertSent
@@ -292,32 +293,20 @@ def test_extract_address_keeps_raw_card_text_unchanged():
     assert text == "1-к. квартира, 32 м²\nСанкт-Петербург, Невский проспект, 5\n"
 
 
-class _FakeLocator:
-    def __init__(self, text: str = ""):
-        self.first = self
-        self._text = text
-
-    async def count(self):
-        return 1 if self._text else 0
-
-    async def text_content(self):
-        return self._text
-
-
-class _FakeCardWithAddressMarker:
-    def locator(self, selector: str):
-        if selector == '[data-marker="item-address"]':
-            return _FakeLocator("  Казань, ул. Баумана, 7  ")
-        return _FakeLocator()
-
-
 def test_extract_structured_address_prefers_card_marker():
-    result = asyncio.run(
-        AvitoParser._extract_structured_address(_FakeCardWithAddressMarker())
+    soup = BeautifulSoup(
+        """
+        <div data-marker="item">
+          <span data-marker="item-address">  Казань, ул. Баумана, 7  </span>
+        </div>
+        """,
+        "lxml",
     )
+    tag = soup.select_one('[data-marker="item"]')
+
+    result = AvitoParser._extract_structured_address_bs(tag)
 
     assert result == "Казань, ул. Баумана, 7"
-
 
 
 def test_parse_published_at_russian_labels():
@@ -349,17 +338,19 @@ def test_extract_published_label_keeps_raw_text_unchanged():
     assert text == "1-к. квартира\nСегодня 12:34\n"
 
 
-class _FakeCardWithPublicationMarker:
-    def locator(self, selector: str):
-        if selector == '[data-marker*="item-date"]':
-            return _FakeLocator("Вчера 09:10")
-        return _FakeLocator()
-
-
 def test_extract_structured_published_label_prefers_marker_over_fallback_text():
-    result = asyncio.run(
-        AvitoParser._extract_structured_published_label(_FakeCardWithPublicationMarker())
+    soup = BeautifulSoup(
+        """
+        <div data-marker="item">
+          <span data-marker="item-date">Вчера 09:10</span>
+          <span>Сегодня 12:34</span>
+        </div>
+        """,
+        "lxml",
     )
+    tag = soup.select_one('[data-marker="item"]')
+
+    result = AvitoParser._extract_structured_published_label_bs(tag)
 
     assert result == "Вчера 09:10"
 
@@ -369,47 +360,52 @@ def test_unknown_published_label_returns_none_without_exception():
     assert AvitoParser._parse_published_at("непонятная дата", datetime(2026, 5, 17)) is None
 
 
-class _FakeBodyLocator:
-    def __init__(self, text: str):
-        self.first = self
-        self._text = text
+# Missing-card classification is now handled inline by fetch_search_cards after
+# BeautifulSoup parses fetched HTML, so these tests exercise that real code path
+# instead of the removed Playwright page helper.
+def test_missing_cards_flow_detects_possible_captcha_or_block():
+    parser = AvitoParser()
+    html = """
+    <html>
+      <head><title>Доступ ограничен</title></head>
+      <body>Подтвердите, что вы не робот</body>
+    </html>
+    """
 
-    async def text_content(self):
-        return self._text
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        with pytest.raises(ParserError) as exc_info:
+            asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry"))
 
-
-class _FakePageForMissingCards:
-    def __init__(self, title: str, body_text: str):
-        self._title = title
-        self._body_text = body_text
-
-    async def title(self):
-        return self._title
-
-    def locator(self, selector: str):
-        assert selector == "body"
-        return _FakeBodyLocator(self._body_text)
+    assert exc_info.value.error_type == ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK
 
 
-def test_classify_missing_cards_detects_possible_captcha_or_block():
-    page = _FakePageForMissingCards("Доступ ограничен", "Подтвердите, что вы не робот")
+def test_missing_cards_flow_detects_empty_results():
+    parser = AvitoParser()
+    html = """
+    <html>
+      <head><title>Avito</title></head>
+      <body>Ничего не найдено. Попробуйте изменить параметры поиска</body>
+    </html>
+    """
 
-    error = asyncio.run(AvitoParser._classify_missing_cards(page))
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        with pytest.raises(ParserError) as exc_info:
+            asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry"))
 
-    assert error.error_type == ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK
-
-
-def test_classify_missing_cards_detects_empty_results():
-    page = _FakePageForMissingCards("Avito", "Ничего не найдено. Попробуйте изменить параметры поиска")
-
-    error = asyncio.run(AvitoParser._classify_missing_cards(page))
-
-    assert error.error_type == ParserErrorType.EMPTY_RESULTS
+    assert exc_info.value.error_type == ParserErrorType.EMPTY_RESULTS
 
 
-def test_classify_missing_cards_defaults_to_layout_changed():
-    page = _FakePageForMissingCards("Avito", "Unexpected page without cards")
+def test_missing_cards_flow_defaults_to_layout_changed():
+    parser = AvitoParser()
+    html = """
+    <html>
+      <head><title>Avito</title></head>
+      <body>Unexpected page without cards</body>
+    </html>
+    """
 
-    error = asyncio.run(AvitoParser._classify_missing_cards(page))
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        with pytest.raises(ParserError) as exc_info:
+            asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry"))
 
-    assert error.error_type == ParserErrorType.LAYOUT_CHANGED
+    assert exc_info.value.error_type == ParserErrorType.LAYOUT_CHANGED

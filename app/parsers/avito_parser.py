@@ -219,13 +219,13 @@ class AvitoParser:
             text = card.get_text(separator=" ", strip=True)
             price = self._extract_price(text)
 
-            address = await self._extract_structured_address_bs(card)
+            address = self._extract_structured_address_bs(card)
             if not address:
                 address = self._extract_address_from_text(text)
 
             external_id = self._extract_external_id(href, idx)
 
-            published_label = await self._extract_structured_published_label_bs(card)
+            published_label = self._extract_structured_published_label_bs(card)
             if not published_label:
                 published_label = self._extract_published_label(text)
             published_at = self._parse_published_at(published_label, self._now())
@@ -246,25 +246,6 @@ class AvitoParser:
             )
 
         return result
-
-    @classmethod
-    async def _classify_missing_cards(cls, page) -> ParserError:
-        title = await page.title()
-        body_text = (await page.locator("body").first.text_content()) or ""
-        if cls._looks_like_captcha_or_block(title, body_text):
-            return ParserError(
-                ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK,
-                "Search page content looks like captcha, robot check, or access block",
-            )
-        if cls._looks_like_empty_results(body_text):
-            return ParserError(
-                ParserErrorType.EMPTY_RESULTS,
-                "Avito search page loaded but reports empty results",
-            )
-        return ParserError(
-            ParserErrorType.LAYOUT_CHANGED,
-            "No Avito search result cards found without opening listing pages",
-        )
 
     @staticmethod
     def _validate_search_url(search_url: str) -> None:
@@ -328,20 +309,7 @@ class AvitoParser:
         return re.sub(r"\s+", " ", text).strip(" ,;•·")
 
     @classmethod
-    async def _extract_structured_address(cls, card) -> str:
-        for selector in ADDRESS_MARKER_SELECTORS:
-            locator = card.locator(selector).first
-            if not await locator.count():
-                continue
-
-            text = cls._normalize_text_line((await locator.text_content()) or "")
-            if text:
-                return text
-
-        return ""
-
-    @classmethod
-    async def _extract_structured_address_bs(cls, card: "Tag") -> str:
+    def _extract_structured_address_bs(cls, card: "Tag") -> str:
         for selector in ADDRESS_MARKER_SELECTORS:
             element = card.select_one(selector)
             if element is None:
@@ -390,18 +358,7 @@ class AvitoParser:
         return value.astimezone(UTC).replace(tzinfo=None)
 
     @classmethod
-    async def _extract_structured_published_label(cls, card) -> str:
-        for selector in PUBLICATION_MARKER_SELECTORS:
-            locator = card.locator(selector).first
-            if not await locator.count():
-                continue
-            label = cls._extract_published_label((await locator.text_content()) or "")
-            if label:
-                return label
-        return ""
-
-    @classmethod
-    async def _extract_structured_published_label_bs(cls, card: "Tag") -> str:
+    def _extract_structured_published_label_bs(cls, card: "Tag") -> str:
         for selector in PUBLICATION_MARKER_SELECTORS:
             element = card.select_one(selector)
             if element is None:
