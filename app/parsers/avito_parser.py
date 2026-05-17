@@ -2,14 +2,17 @@ import hashlib
 import re
 from datetime import UTC, datetime, timedelta
 from enum import Enum
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 from urllib.parse import urljoin, urlparse
 
-from app.core.config import settings
 from app.parsers.browser_engine import fetch_with_camoufox, fetch_with_nodriver
 from app.parsers.errors import ParserError, ParserErrorType
 from app.parsers.proxy_manager import ProxyManager
 from app.parsers.schemas import ListingCard
+
+if TYPE_CHECKING:
+    from bs4.element import Tag
 
 
 CARD_LIMIT = 30
@@ -197,66 +200,52 @@ class AvitoParser:
                 "Avito search page loaded but reports empty results",
             )
 
-        # NOTE: The rest of the card extraction loop references `page` (Playwright locators).
-        # We cannot use BeautifulSoup selectors as a drop-in because the existing code uses
-        # async Playwright locator API (card.locator(), await link_locator.get_attribute(), etc.)
-        # Therefore: keep the original Playwright page open for card extraction,
-        # but reuse the already-fetched HTML by checking cards count via soup first.
-        cards_count = len(soup.select('[data-marker="item"]'))
-        if cards_count == 0:
+        raw_cards = soup.select(CARD_SELECTOR)
+        if not raw_cards:
             raise ParserError(
                 ParserErrorType.LAYOUT_CHANGED,
                 "No Avito search result cards found in fetched HTML",
             )
 
-        # Re-open a minimal Playwright page to extract structured card data
-        # (reuses existing locator-based extraction logic unchanged)
-        from playwright.async_api import async_playwright as _apw
-        async with _apw() as p:
-            browser = await p.chromium.launch(headless=settings.scrape_headless)
-            try:
-                page = await browser.new_page()
-                await page.set_content(page_html, wait_until="domcontentloaded")
+        result: list[ListingCard] = []
 
-                cards = await page.locator(CARD_SELECTOR).all()
-                result: list[ListingCard] = []
+        for idx, card in enumerate(raw_cards[:CARD_LIMIT]):
+            a_tag = card.select_one("a[href]")
+            href = a_tag.get("href") if a_tag else None
 
-                for idx, card in enumerate(cards[:CARD_LIMIT]):
-                    link_locator = card.locator("a").first
-                    href = await link_locator.get_attribute("href") if await link_locator.count() else None
+            h3_tag = card.select_one("h3") or card.select_one('[itemprop="name"]')
+            title = h3_tag.get_text(strip=True) if h3_tag else ""
 
-                    title_locator = card.locator("h3").first
-                    title = await title_locator.text_content() if await title_locator.count() else ""
+            text = card.get_text(separator=" ", strip=True)
+            price = self._extract_price(text)
 
-                    text = (await card.text_content()) or ""
-                    price = self._extract_price(text)
-                    address = await self._extract_structured_address(card)
-                    if not address:
-                        address = self._extract_address_from_text(text)
-                    external_id = self._extract_external_id(href, idx)
-                    published_label = await self._extract_structured_published_label(card)
-                    if not published_label:
-                        published_label = self._extract_published_label(text)
-                    published_at = self._parse_published_at(published_label, self._now())
+            address = await self._extract_structured_address_bs(card)
+            if not address:
+                address = self._extract_address_from_text(text)
 
-                    result.append(
-                        ListingCard(
-                            external_id=external_id,
-                            url=urljoin("https://www.avito.ru", href or ""),
-                            title=(title or "").strip(),
-                            price=price,
-                            address=address,
-                            area_m2=self._extract_area_m2(text),
-                            rooms=self._extract_rooms(text),
-                            published_label=published_label,
-                            published_at=published_at,
-                            raw={"position": idx, "text": text[:1000]},
-                        )
-                    )
+            external_id = self._extract_external_id(href, idx)
 
-                return result
-            finally:
-                await browser.close()
+            published_label = await self._extract_structured_published_label_bs(card)
+            if not published_label:
+                published_label = self._extract_published_label(text)
+            published_at = self._parse_published_at(published_label, self._now())
+
+            result.append(
+                ListingCard(
+                    external_id=external_id,
+                    url=urljoin("https://www.avito.ru", href or ""),
+                    title=title,
+                    price=price,
+                    address=address,
+                    area_m2=self._extract_area_m2(text),
+                    rooms=self._extract_rooms(text),
+                    published_label=published_label,
+                    published_at=published_at,
+                    raw={"position": idx, "text": text[:1000]},
+                )
+            )
+
+        return result
 
     @classmethod
     async def _classify_missing_cards(cls, page) -> ParserError:
@@ -352,6 +341,19 @@ class AvitoParser:
         return ""
 
     @classmethod
+    async def _extract_structured_address_bs(cls, card: "Tag") -> str:
+        for selector in ADDRESS_MARKER_SELECTORS:
+            element = card.select_one(selector)
+            if element is None:
+                continue
+
+            text = cls._normalize_text_line(element.get_text(separator=" ", strip=True))
+            if text:
+                return text
+
+        return ""
+
+    @classmethod
     def _extract_address_from_text(cls, text: str) -> str:
         for raw_line in text.splitlines():
             line = cls._normalize_text_line(raw_line)
@@ -394,6 +396,17 @@ class AvitoParser:
             if not await locator.count():
                 continue
             label = cls._extract_published_label((await locator.text_content()) or "")
+            if label:
+                return label
+        return ""
+
+    @classmethod
+    async def _extract_structured_published_label_bs(cls, card: "Tag") -> str:
+        for selector in PUBLICATION_MARKER_SELECTORS:
+            element = card.select_one(selector)
+            if element is None:
+                continue
+            label = cls._extract_published_label(element.get_text(separator=" ", strip=True))
             if label:
                 return label
         return ""
