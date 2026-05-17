@@ -1,7 +1,7 @@
 """Proxy pool with round-robin selection and exponential-backoff quarantine."""
 from __future__ import annotations
 
-import asyncio
+import threading
 import time
 from dataclasses import dataclass
 from typing import List, Optional
@@ -38,16 +38,16 @@ class ProxyManager:
     ) -> None:
         self._proxies = [_ProxyEntry(url=u) for u in proxy_urls]
         self._quarantine_seconds = quarantine_seconds
-        self._lock = asyncio.Lock()
+        self._lock = threading.Lock()
         self._index = 0
 
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
 
-    async def get_proxy(self) -> Optional[str]:
+    def get_proxy(self) -> Optional[str]:
         """Return next available proxy URL, or None if all are quarantined."""
-        async with self._lock:
+        with self._lock:
             available = [p for p in self._proxies if p.is_available]
             if not available:
                 return None
@@ -55,17 +55,17 @@ class ProxyManager:
             self._index += 1
             return entry.url
 
-    async def report_success(self, proxy_url: str) -> None:
+    def report_success(self, proxy_url: str) -> None:
         """Decrease failure counter for proxy_url (min 0)."""
-        async with self._lock:
+        with self._lock:
             for p in self._proxies:
                 if p.url == proxy_url:
                     p.failures = max(0, p.failures - 1)
                     return
 
-    async def report_failure(self, proxy_url: str) -> None:
+    def report_failure(self, proxy_url: str) -> None:
         """Increment failure counter and quarantine proxy_url."""
-        async with self._lock:
+        with self._lock:
             for p in self._proxies:
                 if p.url == proxy_url:
                     p.failures += 1
