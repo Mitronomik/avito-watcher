@@ -1,20 +1,19 @@
 import hashlib
 import re
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from zoneinfo import ZoneInfo
 from urllib.parse import urljoin, urlparse
 
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-from playwright.async_api import async_playwright
-
 from app.core.config import settings
+from app.parsers.browser_engine import fetch_with_camoufox, fetch_with_nodriver
 from app.parsers.errors import ParserError, ParserErrorType
+from app.parsers.proxy_manager import ProxyManager
 from app.parsers.schemas import ListingCard
 
 
 CARD_LIMIT = 30
 CARD_SELECTOR = '[data-marker="item"]'
-CARD_WAIT_TIMEOUT_MS = 10000
 AVITO_HOST_SUFFIX = "avito.ru"
 BLOCK_KEYWORDS = (
     "captcha",
@@ -99,39 +98,125 @@ PUBLICATION_PATTERNS = (
 )
 
 
+class _Engine(Enum):
+    NODRIVER = "nodriver"
+    CAMOUFOX = "camoufox"
+
+
 class AvitoParser:
-    def __init__(self, now_func=None) -> None:
+    def __init__(self, now_func=None, proxy_manager: ProxyManager | None = None) -> None:
         self.now_func = now_func or (lambda: datetime.now(UTC))
+        self._proxy_manager = proxy_manager
+        self._prefer_engine = _Engine.NODRIVER
 
     def _now(self) -> datetime:
         return self.now_func()
 
+    async def _try_engine(self, url: str, proxy_url: str | None, engine: _Engine) -> dict:
+        if engine == _Engine.NODRIVER:
+            return await fetch_with_nodriver(url, proxy_url)
+        return await fetch_with_camoufox(url, proxy_url)
+
+    async def _fetch_page_html(self, url: str) -> str:
+        """Fetch raw HTML using stealth engine with Nodriver→Camoufox fallback.
+
+        Uses proxy from ProxyManager if configured (opt-in via PROXY_URLS env var).
+        Falls back to direct (no-proxy) connection when PROXY_URLS is unset.
+        Raises ParserError(POSSIBLE_CAPTCHA_OR_BLOCK) if all attempts blocked.
+        """
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
+
+        proxy_url: str | None = None
+        if self._proxy_manager:
+            proxy_url = await self._proxy_manager.get_proxy()
+
+        # First attempt
+        result = await self._try_engine(url, proxy_url, self._prefer_engine)
+        if result["ok"]:
+            if proxy_url and self._proxy_manager:
+                await self._proxy_manager.report_success(proxy_url)
+            return result["html"]
+
+        _log.warning(
+            "avito_parser: %s blocked (error_type=%s), switching engine",
+            self._prefer_engine.value,
+            result.get("error_type"),
+        )
+        if proxy_url and self._proxy_manager:
+            await self._proxy_manager.report_failure(proxy_url)
+            proxy_url = await self._proxy_manager.get_proxy()
+
+        fallback = (
+            _Engine.CAMOUFOX
+            if self._prefer_engine == _Engine.NODRIVER
+            else _Engine.NODRIVER
+        )
+
+        # Fallback attempt
+        result2 = await self._try_engine(url, proxy_url, fallback)
+        if result2["ok"]:
+            if proxy_url and self._proxy_manager:
+                await self._proxy_manager.report_success(proxy_url)
+            self._prefer_engine = fallback
+            return result2["html"]
+
+        if proxy_url and self._proxy_manager:
+            await self._proxy_manager.report_failure(proxy_url)
+
+        raise ParserError(
+            ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK,
+            "All stealth engines blocked (nodriver + camoufox)",
+        )
+
     async def fetch_search_cards(self, search_url: str) -> list[ListingCard]:
         self._validate_search_url(search_url)
 
-        async with async_playwright() as p:
+        # Fetch HTML via stealth engine (nodriver → camoufox fallback)
+        # _fetch_page_html raises ParserError on block/timeout
+        page_html: str = await self._fetch_page_html(search_url)
+
+        # Parse the returned HTML with BeautifulSoup
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(page_html, "lxml")
+
+        # Check for block/captcha in fetched HTML
+        body_text = soup.get_text(separator=" ", strip=True)
+        title_tag = soup.find("title")
+        title = title_tag.get_text(strip=True) if title_tag else ""
+
+        if self._looks_like_captcha_or_block(title, body_text):
+            raise ParserError(
+                ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK,
+                "Search page content looks like captcha, robot check, or access block",
+            )
+
+        if self._looks_like_empty_results(body_text):
+            raise ParserError(
+                ParserErrorType.EMPTY_RESULTS,
+                "Avito search page loaded but reports empty results",
+            )
+
+        # NOTE: The rest of the card extraction loop references `page` (Playwright locators).
+        # We cannot use BeautifulSoup selectors as a drop-in because the existing code uses
+        # async Playwright locator API (card.locator(), await link_locator.get_attribute(), etc.)
+        # Therefore: keep the original Playwright page open for card extraction,
+        # but reuse the already-fetched HTML by checking cards count via soup first.
+        cards_count = len(soup.select('[data-marker="item"]'))
+        if cards_count == 0:
+            raise ParserError(
+                ParserErrorType.LAYOUT_CHANGED,
+                "No Avito search result cards found in fetched HTML",
+            )
+
+        # Re-open a minimal Playwright page to extract structured card data
+        # (reuses existing locator-based extraction logic unchanged)
+        from playwright.async_api import async_playwright as _apw
+        async with _apw() as p:
             browser = await p.chromium.launch(headless=settings.scrape_headless)
             try:
                 page = await browser.new_page()
-                try:
-                    await page.goto(
-                        search_url,
-                        wait_until="domcontentloaded",
-                        timeout=settings.scrape_timeout_ms,
-                    )
-                except PlaywrightTimeoutError as exc:
-                    raise ParserError(
-                        ParserErrorType.NAVIGATION_TIMEOUT,
-                        f"Timed out while navigating to Avito search page after {settings.scrape_timeout_ms} ms",
-                    ) from exc
-
-                try:
-                    await page.wait_for_selector(
-                        CARD_SELECTOR,
-                        timeout=min(settings.scrape_timeout_ms, CARD_WAIT_TIMEOUT_MS),
-                    )
-                except PlaywrightTimeoutError as exc:
-                    raise await self._classify_missing_cards(page) from exc
+                await page.set_content(page_html, wait_until="domcontentloaded")
 
                 title = await page.title()
                 body_text = (await page.locator("body").first.text_content()) or ""
