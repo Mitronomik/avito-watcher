@@ -22,8 +22,8 @@ def test_fetch_search_cards_parses_real_card_html():
           <a href="/moskva/kvartiry/some-advert_987654321">
             <h3>2-к. квартира, 54,3 м², 5/9 эт.</h3>
           </a>
+          <span data-marker="item-price">5 000 000 ₽</span>
           <span>ул. Ленина, 10</span>
-          <span>5 000 000 ₽</span>
           <span data-marker="item-date">Сегодня 10:30</span>
         </div>
       </body>
