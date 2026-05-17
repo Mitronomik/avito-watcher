@@ -132,3 +132,65 @@ def test_dry_run_search_reports_classified_parser_error(monkeypatch, capsys):
     assert output["cards"] == []
     assert output["error_type"] == "invalid_url"
     assert output["error"].startswith("invalid_url:")
+
+
+def test_extract_area_m2_from_russian_card_text_variants():
+    assert AvitoParser._extract_area_m2("1-к. квартира, 32 м², 5/9 эт.") == 32.0
+    assert AvitoParser._extract_area_m2("Квартира 32,5 м² рядом с метро") == 32.5
+    assert AvitoParser._extract_area_m2("Апартаменты 32.5 м²") == 32.5
+    assert AvitoParser._extract_area_m2("Коммерческое помещение 32 кв. м") == 32.0
+
+
+def test_extract_rooms_from_russian_card_text_variants():
+    assert AvitoParser._extract_rooms("1-к. квартира, 32 м²") == "1-к."
+    assert AvitoParser._extract_rooms("2-к. квартира, 45 м²") == "2-к."
+    assert AvitoParser._extract_rooms("3-к. квартира, 68 м²") == "3-к."
+    assert AvitoParser._extract_rooms("4-к. квартира, 90 м²") == "4-к."
+    assert AvitoParser._extract_rooms("Студия, 25 м²") == "студия"
+    assert AvitoParser._extract_rooms("Апартаменты, 40 м²") == "апартаменты"
+
+
+def test_extract_address_from_conservative_russian_card_text():
+    text = """
+    2-к. квартира, 45 м², 7/12 эт.
+    12 500 000 ₽
+    Москва, ул. Ленина, 10
+    Вчера 18:20
+    """
+
+    assert AvitoParser._extract_address_from_text(text) == "Москва, ул. Ленина, 10"
+
+
+def test_extract_address_keeps_raw_card_text_unchanged():
+    text = "1-к. квартира, 32 м²\nСанкт-Петербург, Невский проспект, 5\n"
+
+    AvitoParser._extract_address_from_text(text)
+
+    assert text == "1-к. квартира, 32 м²\nСанкт-Петербург, Невский проспект, 5\n"
+
+
+class _FakeLocator:
+    def __init__(self, text: str = ""):
+        self.first = self
+        self._text = text
+
+    async def count(self):
+        return 1 if self._text else 0
+
+    async def text_content(self):
+        return self._text
+
+
+class _FakeCardWithAddressMarker:
+    def locator(self, selector: str):
+        if selector == '[data-marker="item-address"]':
+            return _FakeLocator("  Казань, ул. Баумана, 7  ")
+        return _FakeLocator()
+
+
+def test_extract_structured_address_prefers_card_marker():
+    result = asyncio.run(
+        AvitoParser._extract_structured_address(_FakeCardWithAddressMarker())
+    )
+
+    assert result == "Казань, ул. Баумана, 7"

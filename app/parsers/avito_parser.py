@@ -31,6 +31,39 @@ EMPTY_RESULTS_KEYWORDS = (
     "объявлений не найдено",
     "попробуйте изменить параметры поиска",
 )
+ADDRESS_MARKER_SELECTORS = (
+    '[data-marker="item-address"]',
+    '[data-marker="item-location"]',
+    '[data-marker*="address"]',
+    '[data-marker*="location"]',
+)
+ADDRESS_HINTS = (
+    "ул.",
+    "улица",
+    "проспект",
+    "пр-т",
+    "шоссе",
+    "пер.",
+    "переулок",
+    "бульвар",
+    "наб.",
+    "набережная",
+    "площадь",
+    "пл.",
+    "проезд",
+    "тупик",
+    "аллея",
+    "линия",
+    "мкр",
+    "микрорайон",
+    "район",
+    "р-н",
+    "метро",
+    "м.",
+    "жк",
+)
+AREA_RE = re.compile(r"(?<!\d)(\d+(?:[,.]\d+)?)\s*(?:м²|кв\.?\s*м)(?!\w)", re.IGNORECASE)
+ROOMS_RE = re.compile(r"(?<!\d)([1-4])\s*-\s*к\.", re.IGNORECASE)
 
 
 class AvitoParser:
@@ -86,6 +119,9 @@ class AvitoParser:
 
                     text = (await card.text_content()) or ""
                     price = self._extract_price(text)
+                    address = await self._extract_structured_address(card)
+                    if not address:
+                        address = self._extract_address_from_text(text)
                     external_id = self._extract_external_id(href, idx)
 
                     result.append(
@@ -94,6 +130,9 @@ class AvitoParser:
                             url=urljoin("https://www.avito.ru", href or ""),
                             title=(title or "").strip(),
                             price=price,
+                            address=address,
+                            area_m2=self._extract_area_m2(text),
+                            rooms=self._extract_rooms(text),
                             raw={"position": idx, "text": text[:1000]},
                         )
                     )
@@ -136,6 +175,69 @@ class AvitoParser:
 
         digits = re.sub(r"\D", "", match.group(1))
         return float(digits) if digits else None
+
+    @staticmethod
+    def _extract_area_m2(text: str) -> float | None:
+        match = AREA_RE.search(text)
+        if not match:
+            return None
+
+        return float(match.group(1).replace(",", "."))
+
+    @staticmethod
+    def _extract_rooms(text: str) -> str:
+        match = ROOMS_RE.search(text)
+        if match:
+            return f"{match.group(1)}-к."
+
+        lowered = text.lower()
+        if "студия" in lowered:
+            return "студия"
+        if "апартаменты" in lowered:
+            return "апартаменты"
+
+        return ""
+
+    @staticmethod
+    def _normalize_text_line(text: str) -> str:
+        return re.sub(r"\s+", " ", text).strip(" ,;•·")
+
+    @classmethod
+    async def _extract_structured_address(cls, card) -> str:
+        for selector in ADDRESS_MARKER_SELECTORS:
+            locator = card.locator(selector).first
+            if not await locator.count():
+                continue
+
+            text = cls._normalize_text_line((await locator.text_content()) or "")
+            if text:
+                return text
+
+        return ""
+
+    @classmethod
+    def _extract_address_from_text(cls, text: str) -> str:
+        for raw_line in text.splitlines():
+            line = cls._normalize_text_line(raw_line)
+            lowered = line.lower()
+            if not line or len(line) > 160:
+                continue
+            if "₽" in line or AREA_RE.search(line) or ROOMS_RE.search(line):
+                continue
+            if any(hint in lowered for hint in ADDRESS_HINTS):
+                return line
+
+        match = re.search(
+            r"((?:[А-ЯЁ][а-яё-]+,\s*)?(?:ул\.|улица|проспект|пр-т|шоссе|пер\.|"
+            r"переулок|бульвар|наб\.|набережная|площадь|пл\.|проезд|мкр|"
+            r"микрорайон)\s+[^\n,;•]{2,80}(?:,\s*\d+[А-Яа-яA-Za-z/-]*)?)",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return ""
+
+        return cls._normalize_text_line(match.group(1))
 
     @staticmethod
     def _extract_external_id(href: str | None, idx: int) -> str:
