@@ -1,11 +1,8 @@
-import pytest
-
 from app.parsers.browser_engine import _is_blocked, _nodriver_proxy_args
 
 
 def test_nodriver_proxy_args_no_proxy():
-    with pytest.raises(TypeError):
-        _nodriver_proxy_args(None)
+    assert _nodriver_proxy_args(None) == []
 
 
 def test_nodriver_proxy_args_plain_proxy():

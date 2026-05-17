@@ -38,8 +38,10 @@ def _parse_proxy_url(proxy_url: str) -> dict:
     return {"server": proxy_url}
 
 
-def _nodriver_proxy_args(proxy_url: str) -> list[str]:
+def _nodriver_proxy_args(proxy_url: str | None) -> list[str]:
     """Return --proxy-server arg list for nodriver launch."""
+    if proxy_url is None:
+        return []
     if "@" in proxy_url:
         # strip auth from URL for the flag; auth handled by CDP handler
         proto, rest = proxy_url.split("://", 1)
