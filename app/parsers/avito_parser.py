@@ -132,13 +132,13 @@ class AvitoParser:
 
         proxy_url: str | None = None
         if self._proxy_manager:
-            proxy_url = await self._proxy_manager.get_proxy()
+            proxy_url = self._proxy_manager.get_proxy()
 
         # First attempt
         result = await self._try_engine(url, proxy_url, self._prefer_engine)
         if result["ok"]:
             if proxy_url and self._proxy_manager:
-                await self._proxy_manager.report_success(proxy_url)
+                self._proxy_manager.report_success(proxy_url)
             return result["html"]
 
         _log.warning(
@@ -147,8 +147,8 @@ class AvitoParser:
             result.get("error_type"),
         )
         if proxy_url and self._proxy_manager:
-            await self._proxy_manager.report_failure(proxy_url)
-            proxy_url = await self._proxy_manager.get_proxy()
+            self._proxy_manager.report_failure(proxy_url)
+            proxy_url = self._proxy_manager.get_proxy()
 
         fallback = (
             _Engine.CAMOUFOX
@@ -160,12 +160,12 @@ class AvitoParser:
         result2 = await self._try_engine(url, proxy_url, fallback)
         if result2["ok"]:
             if proxy_url and self._proxy_manager:
-                await self._proxy_manager.report_success(proxy_url)
+                self._proxy_manager.report_success(proxy_url)
             self._prefer_engine = fallback
             return result2["html"]
 
         if proxy_url and self._proxy_manager:
-            await self._proxy_manager.report_failure(proxy_url)
+            self._proxy_manager.report_failure(proxy_url)
 
         raise ParserError(
             ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK,
