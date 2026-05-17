@@ -31,4 +31,18 @@ uvicorn app.main:app --reload
 python -m app.cli seed-search --name test --url 'https://www.avito.ru/all/kvartiry/prodam-ASgBAgICAUSSA8YQ'
 python -m app.cli run-once
 python -m app.cli run-all
+python -m app.cli telegram-bot
 ```
+
+## Telegram-команды
+```text
+/start
+/help
+/add <name> <url>
+/list
+/pause <search_id>
+/resume <search_id>
+/status
+```
+
+Telegram-команды управляют SearchJob в базе данных и не запускают мониторинг или парсинг Avito.
