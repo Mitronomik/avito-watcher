@@ -11,6 +11,8 @@ class ListingSnapshot(Base):
     external_id: Mapped[str] = mapped_column(String(128), index=True)
     title: Mapped[str] = mapped_column(String(1024), default="")
     price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    published_label: Mapped[str] = mapped_column(String(255), default="")
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
     screenshot_path: Mapped[str] = mapped_column(String(1024), default="")
     observed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

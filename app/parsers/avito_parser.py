@@ -1,5 +1,7 @@
 import hashlib
 import re
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 from urllib.parse import urljoin, urlparse
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -64,9 +66,44 @@ ADDRESS_HINTS = (
 )
 AREA_RE = re.compile(r"(?<!\d)(\d+(?:[,.]\d+)?)\s*(?:м²|кв\.?\s*м)(?!\w)", re.IGNORECASE)
 ROOMS_RE = re.compile(r"(?<!\d)([1-4])\s*-\s*к\.", re.IGNORECASE)
+PUBLICATION_MARKER_SELECTORS = (
+    '[data-marker*="item-date"]',
+    '[data-marker*="date"]',
+    '[data-marker*="time"]',
+)
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+MONTHS_RU = {
+    "января": 1,
+    "февраля": 2,
+    "марта": 3,
+    "апреля": 4,
+    "мая": 5,
+    "июня": 6,
+    "июля": 7,
+    "августа": 8,
+    "сентября": 9,
+    "октября": 10,
+    "ноября": 11,
+    "декабря": 12,
+}
+PUBLICATION_PATTERNS = (
+    re.compile(r"(?:сегодня|вчера)\s*(?:в\s*)?\d{1,2}:\d{2}", re.IGNORECASE),
+    re.compile(r"\d+\s*(?:час|часа|часов|минуту|минуты|минут)\s+назад", re.IGNORECASE),
+    re.compile(
+        r"\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|"
+        r"сентября|октября|ноября|декабря)(?:\s*(?:в\s*)?\d{1,2}:\d{2})?",
+        re.IGNORECASE,
+    ),
+)
 
 
 class AvitoParser:
+    def __init__(self, now_func=None) -> None:
+        self.now_func = now_func or (lambda: datetime.now(UTC))
+
+    def _now(self) -> datetime:
+        return self.now_func()
+
     async def fetch_search_cards(self, search_url: str) -> list[ListingCard]:
         self._validate_search_url(search_url)
 
@@ -123,6 +160,10 @@ class AvitoParser:
                     if not address:
                         address = self._extract_address_from_text(text)
                     external_id = self._extract_external_id(href, idx)
+                    published_label = await self._extract_structured_published_label(card)
+                    if not published_label:
+                        published_label = self._extract_published_label(text)
+                    published_at = self._parse_published_at(published_label, self._now())
 
                     result.append(
                         ListingCard(
@@ -133,6 +174,8 @@ class AvitoParser:
                             address=address,
                             area_m2=self._extract_area_m2(text),
                             rooms=self._extract_rooms(text),
+                            published_label=published_label,
+                            published_at=published_at,
                             raw={"position": idx, "text": text[:1000]},
                         )
                     )
@@ -238,6 +281,92 @@ class AvitoParser:
             return ""
 
         return cls._normalize_text_line(match.group(1))
+
+
+    @staticmethod
+    def _to_moscow(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC).astimezone(MOSCOW_TZ)
+        return value.astimezone(MOSCOW_TZ)
+
+    @staticmethod
+    def _to_naive_utc(value: datetime) -> datetime:
+        # Store Avito publication timestamps as naive UTC datetimes, matching other DB timestamps.
+        return value.astimezone(UTC).replace(tzinfo=None)
+
+    @classmethod
+    async def _extract_structured_published_label(cls, card) -> str:
+        for selector in PUBLICATION_MARKER_SELECTORS:
+            locator = card.locator(selector).first
+            if not await locator.count():
+                continue
+            label = cls._extract_published_label((await locator.text_content()) or "")
+            if label:
+                return label
+        return ""
+
+    @classmethod
+    def _extract_published_label(cls, text: str) -> str:
+        normalized = cls._normalize_text_line(text)
+        if not normalized:
+            return ""
+        for pattern in PUBLICATION_PATTERNS:
+            match = pattern.search(normalized)
+            if match:
+                return cls._normalize_text_line(match.group(0))
+        return ""
+
+    @classmethod
+    def _parse_published_at(cls, label: str, now: datetime) -> datetime | None:
+        label = cls._normalize_text_line(label).lower()
+        if not label:
+            return None
+
+        now_msk = cls._to_moscow(now)
+
+        relative_match = re.fullmatch(
+            r"(\d+)\s*(час|часа|часов|минуту|минуты|минут)\s+назад", label
+        )
+        if relative_match:
+            amount = int(relative_match.group(1))
+            unit = relative_match.group(2)
+            delta = timedelta(hours=amount) if unit.startswith("час") else timedelta(minutes=amount)
+            return cls._to_naive_utc(now_msk - delta)
+
+        today_yesterday_match = re.fullmatch(
+            r"(сегодня|вчера)\s*(?:в\s*)?(\d{1,2}):(\d{2})", label
+        )
+        if today_yesterday_match:
+            day_word, hour, minute = today_yesterday_match.groups()
+            day = now_msk.date()
+            if day_word == "вчера":
+                day -= timedelta(days=1)
+            local_dt = datetime(
+                day.year, day.month, day.day, int(hour), int(minute), tzinfo=MOSCOW_TZ
+            )
+            return cls._to_naive_utc(local_dt)
+
+        month_match = re.fullmatch(
+            r"(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|"
+            r"сентября|октября|ноября|декабря)(?:\s*(?:в\s*)?(\d{1,2}):(\d{2}))?",
+            label,
+        )
+        if month_match:
+            day_text, month_text, hour_text, minute_text = month_match.groups()
+            day = int(day_text)
+            month = MONTHS_RU[month_text]
+            year = now_msk.year
+            hour = int(hour_text) if hour_text is not None else 0
+            minute = int(minute_text) if minute_text is not None else 0
+            try:
+                local_dt = datetime(year, month, day, hour, minute, tzinfo=MOSCOW_TZ)
+            except ValueError:
+                return None
+            if local_dt > now_msk + timedelta(days=1):
+                local_dt = local_dt.replace(year=year - 1)
+            return cls._to_naive_utc(local_dt)
+
+        return None
 
     @staticmethod
     def _extract_external_id(href: str | None, idx: int) -> str:

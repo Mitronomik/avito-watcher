@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import UTC, datetime
 
 import pytest
 
@@ -89,6 +90,8 @@ def test_dry_run_search_prints_card_diagnostics_without_side_effects(
                     title=f"Listing {idx}",
                     price=float(idx),
                     url=f"https://www.avito.ru/item_{idx}",
+                    published_label="Сегодня 12:34",
+                    published_at=datetime(2026, 5, 17, 9, 34, 0),
                 )
                 for idx in range(6)
             ]
@@ -108,6 +111,8 @@ def test_dry_run_search_prints_card_diagnostics_without_side_effects(
         "title": "Listing 0",
         "price": 0.0,
         "url": "https://www.avito.ru/item_0",
+        "published_label": "Сегодня 12:34",
+        "published_at": "2026-05-17T09:34:00",
     }
     assert scalar_count(db_session, Listing) == 0
     assert scalar_count(db_session, ListingSnapshot) == 0
@@ -194,3 +199,52 @@ def test_extract_structured_address_prefers_card_marker():
     )
 
     assert result == "Казань, ул. Баумана, 7"
+
+
+
+def test_parse_published_at_russian_labels():
+    now = datetime(2026, 5, 17, 15, 0, 0, tzinfo=UTC)  # 18:00 Europe/Moscow.
+
+    cases = {
+        "Сегодня 12:34": datetime(2026, 5, 17, 9, 34, 0),
+        "сегодня в 12:34": datetime(2026, 5, 17, 9, 34, 0),
+        "Вчера 09:10": datetime(2026, 5, 16, 6, 10, 0),
+        "вчера в 09:10": datetime(2026, 5, 16, 6, 10, 0),
+        "2 часа назад": datetime(2026, 5, 17, 13, 0, 0),
+        "1 час назад": datetime(2026, 5, 17, 14, 0, 0),
+        "30 минут назад": datetime(2026, 5, 17, 14, 30, 0),
+        "1 минуту назад": datetime(2026, 5, 17, 14, 59, 0),
+        "17 мая": datetime(2026, 5, 16, 21, 0, 0),
+        "17 мая 14:20": datetime(2026, 5, 17, 11, 20, 0),
+        "17 мая в 14:20": datetime(2026, 5, 17, 11, 20, 0),
+    }
+
+    for label, expected in cases.items():
+        assert AvitoParser._parse_published_at(label, now) == expected
+
+
+def test_extract_published_label_keeps_raw_text_unchanged():
+    text = "1-к. квартира\nСегодня 12:34\n"
+
+    assert AvitoParser._extract_published_label(text) == "Сегодня 12:34"
+    assert text == "1-к. квартира\nСегодня 12:34\n"
+
+
+class _FakeCardWithPublicationMarker:
+    def locator(self, selector: str):
+        if selector == '[data-marker*="item-date"]':
+            return _FakeLocator("Вчера 09:10")
+        return _FakeLocator()
+
+
+def test_extract_structured_published_label_prefers_marker_over_fallback_text():
+    result = asyncio.run(
+        AvitoParser._extract_structured_published_label(_FakeCardWithPublicationMarker())
+    )
+
+    assert result == "Вчера 09:10"
+
+
+def test_unknown_published_label_returns_none_without_exception():
+    assert AvitoParser._extract_published_label("Адрес рядом с метро") == ""
+    assert AvitoParser._parse_published_at("непонятная дата", datetime(2026, 5, 17)) is None

@@ -16,6 +16,8 @@ def _card_to_dry_run_json(card) -> dict:
         "title": card.title,
         "price": card.price,
         "url": card.url,
+        "published_label": card.published_label,
+        "published_at": card.published_at.isoformat() if card.published_at else None,
     }
 
 

@@ -15,6 +15,8 @@ class Listing(Base):
     address: Mapped[str] = mapped_column(String(1024), default="")
     area_m2: Mapped[float | None] = mapped_column(Float, nullable=True)
     rooms: Mapped[str] = mapped_column(String(64), default="")
+    published_label: Mapped[str] = mapped_column(String(255), default="")
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
