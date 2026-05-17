@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,7 @@ from app.repositories.search_repository import SearchRepository
 from app.utils.formatting import build_listing_message
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+logger = logging.getLogger(__name__)
 
 
 def _as_float(value: object) -> float | None:
@@ -354,6 +356,7 @@ class MonitorService:
                 try:
                     result = asyncio.run(self.process_search(db, search))
                 except Exception as exc:
+                    logger.exception("search check failed", extra={"search": search.name})
                     result = {"search": search.name, "error": str(exc)}
                 else:
                     result["search"] = search.name

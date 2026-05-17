@@ -13,6 +13,8 @@ from app.parsers.schemas import ListingCard
 
 
 CARD_LIMIT = 30
+CARD_SELECTOR = '[data-marker="item"]'
+CARD_WAIT_TIMEOUT_MS = 10000
 AVITO_HOST_SUFFIX = "avito.ru"
 BLOCK_KEYWORDS = (
     "captcha",
@@ -123,7 +125,13 @@ class AvitoParser:
                         f"Timed out while navigating to Avito search page after {settings.scrape_timeout_ms} ms",
                     ) from exc
 
-                await page.wait_for_timeout(2000)
+                try:
+                    await page.wait_for_selector(
+                        CARD_SELECTOR,
+                        timeout=min(settings.scrape_timeout_ms, CARD_WAIT_TIMEOUT_MS),
+                    )
+                except PlaywrightTimeoutError as exc:
+                    raise await self._classify_missing_cards(page) from exc
 
                 title = await page.title()
                 body_text = (await page.locator("body").first.text_content()) or ""
@@ -133,17 +141,9 @@ class AvitoParser:
                         "Search page content looks like captcha, robot check, or access block",
                     )
 
-                cards = await page.locator('[data-marker="item"]').all()
+                cards = await page.locator(CARD_SELECTOR).all()
                 if not cards:
-                    error_type = (
-                        ParserErrorType.EMPTY_RESULTS
-                        if self._looks_like_empty_results(body_text)
-                        else ParserErrorType.LAYOUT_CHANGED
-                    )
-                    raise ParserError(
-                        error_type,
-                        "No Avito search result cards found without opening listing pages",
-                    )
+                    raise await self._classify_missing_cards(page)
 
                 result: list[ListingCard] = []
 
@@ -183,6 +183,25 @@ class AvitoParser:
                 return result
             finally:
                 await browser.close()
+
+    @classmethod
+    async def _classify_missing_cards(cls, page) -> ParserError:
+        title = await page.title()
+        body_text = (await page.locator("body").first.text_content()) or ""
+        if cls._looks_like_captcha_or_block(title, body_text):
+            return ParserError(
+                ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK,
+                "Search page content looks like captcha, robot check, or access block",
+            )
+        if cls._looks_like_empty_results(body_text):
+            return ParserError(
+                ParserErrorType.EMPTY_RESULTS,
+                "Avito search page loaded but reports empty results",
+            )
+        return ParserError(
+            ParserErrorType.LAYOUT_CHANGED,
+            "No Avito search result cards found without opening listing pages",
+        )
 
     @staticmethod
     def _validate_search_url(search_url: str) -> None:
