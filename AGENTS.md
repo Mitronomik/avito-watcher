@@ -11,6 +11,8 @@ The service must:
 - evaluate listings with rule-based filters and optional LLM scoring;
 - send relevant alerts to Telegram;
 - avoid aggressive scraping, captcha bypassing, personal data harvesting, or hidden-data collection.
+- use proxy rotation and stealth browser only to avoid IP-level blocks,
+  not to bypass content access controls or rate-limit restrictions.
 
 ## Architecture rules
 
@@ -27,9 +29,16 @@ Do not run monitoring twice from both API and worker.
 
 - Never send alerts during first baseline initialization.
 - Do not scrape too frequently.
-- Do not add captcha bypass, proxy rotation, fingerprint spoofing, or phone scraping.
-- Do not collect seller phone numbers or private personal data.
-- Do not open every listing page unless explicitly required by a task.
+- Do not harvest seller phone numbers or private personal data.
+- Do not open every listing page — only the search/listing-feed URLs.
+- Proxy rotation and stealth browser configuration are ALLOWED and REQUIRED
+  because Avito blocks datacenter IPs at the network level; without mobile Russian
+  proxies the service cannot function. The feature must be opt-in via the PROXY_URLS
+  environment variable and must default to no-proxy mode when the variable is unset.
+- Fingerprint-neutral browser launch (nodriver / camoufox) is ALLOWED as a
+  replacement for the current plain Playwright launch. It does not bypass any
+  specific CAPTCHA challenge — it only makes the browser appear as a normal user.
+- Explicit CAPTCHA-solving services (2captcha, CapSolver, etc.) remain PROHIBITED.
 
 ## Coding rules
 
