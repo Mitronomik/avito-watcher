@@ -15,6 +15,89 @@ from app.repositories.search_repository import SearchRepository
 from app.utils.formatting import build_listing_message
 
 
+def _as_float(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_keywords(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [item.strip().lower() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip().lower() for item in value if str(item).strip()]
+    return []
+
+
+def _raw_text(raw: dict) -> str:
+    parts = []
+    for value in raw.values():
+        if isinstance(value, (str, int, float)):
+            parts.append(str(value))
+    return " ".join(parts)
+
+
+def _listing_text(card: ListingCard) -> str:
+    return " ".join(
+        part
+        for part in (card.title, card.address, card.rooms, _raw_text(card.raw))
+        if part
+    ).lower()
+
+
+def passes_rule_filters(card: ListingCard, filters: dict | None) -> bool:
+    filters = filters or {}
+    price = _as_float(card.price)
+    area = _as_float(card.area_m2)
+
+    min_price = _as_float(filters.get("min_price"))
+    if min_price is not None and (price is None or price < min_price):
+        return False
+
+    max_price = _as_float(filters.get("max_price"))
+    if max_price is not None and (price is None or price > max_price):
+        return False
+
+    min_area = _as_float(filters.get("min_area"))
+    if min_area is not None and (area is None or area < min_area):
+        return False
+
+    max_area = _as_float(filters.get("max_area"))
+    if max_area is not None and (area is None or area > max_area):
+        return False
+
+    text = _listing_text(card)
+    include_keywords = _as_keywords(filters.get("include_keywords"))
+    if include_keywords and not any(keyword in text for keyword in include_keywords):
+        return False
+
+    exclude_keywords = _as_keywords(filters.get("exclude_keywords"))
+    if exclude_keywords and any(keyword in text for keyword in exclude_keywords):
+        return False
+
+    location_text = " ".join(
+        part
+        for part in (
+            card.address,
+            str(card.raw.get("address", "")),
+            str(card.raw.get("location", "")),
+        )
+        if part
+    ).lower()
+    location_keywords = _as_keywords(filters.get("location_keywords"))
+    if location_keywords and not any(
+        keyword in location_text for keyword in location_keywords
+    ):
+        return False
+
+    return True
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
@@ -37,7 +120,9 @@ class MonitorService:
 
         try:
             cards = await self.parser.fetch_search_cards(search.source_url)
-            result = await self._process_cards(db, cards, baseline_run)
+            result = await self._process_cards(
+                db, cards, baseline_run, search.filters_json
+            )
 
             if baseline_run:
                 search_repo.mark_baseline_initialized(search, checked_at)
@@ -50,7 +135,9 @@ class MonitorService:
         except Exception as exc:
             db.rollback()
             failed_at = _utcnow()
-            persistent_search = search_repo.get(search.id) if search.id is not None else search
+            persistent_search = (
+                search_repo.get(search.id) if search.id is not None else search
+            )
             if persistent_search is None:
                 raise
             search_repo.record_failed_check(persistent_search, failed_at, str(exc))
@@ -64,13 +151,21 @@ class MonitorService:
             raise ValueError(f"Search job {search_job_id} not found")
         return await self.process_search(db, search)
 
-    async def _process_cards(self, db: Session, cards: list[ListingCard], baseline_run: bool) -> dict:
+    async def _process_cards(
+        self,
+        db: Session,
+        cards: list[ListingCard],
+        baseline_run: bool,
+        filters: dict | None,
+    ) -> dict:
         listing_repo = ListingRepository(db)
         alert_repo = AlertRepository(db)
 
         created = 0
         alerted = 0
         price_changed = 0
+        filtered = 0
+        scored = 0
 
         for card in cards:
             now = _utcnow()
@@ -123,6 +218,11 @@ class MonitorService:
             if baseline_run:
                 continue
 
+            if not passes_rule_filters(card, filters):
+                filtered += 1
+                continue
+
+            scored += 1
             try:
                 llm = await self.scorer.score(card)
             except Exception as exc:
@@ -148,13 +248,17 @@ class MonitorService:
                 llm.get("summary", ""),
             )
             await self.notifier.send_listing_alert(message)
-            alert_repo.create(listing_external_id=card.external_id, dedupe_key=dedupe_key)
+            alert_repo.create(
+                listing_external_id=card.external_id, dedupe_key=dedupe_key
+            )
             alerted += 1
 
         return {
             "created": created,
             "alerted": alerted,
             "price_changed": price_changed,
+            "filtered": filtered,
+            "scored": scored,
             "total_seen": len(cards),
         }
 
