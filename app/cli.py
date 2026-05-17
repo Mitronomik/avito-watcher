@@ -1,5 +1,6 @@
 import argparse
 import json
+from app.bot.telegram_commands import build_telegram_application
 from app.db.init_db import init_db
 from app.db.session import SessionLocal
 from app.repositories.search_repository import SearchRepository
@@ -37,6 +38,13 @@ def cmd_run_all(args) -> None:
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def cmd_run_telegram_bot(args) -> None:
+    del args
+    init_db()
+    application = build_telegram_application()
+    application.run_polling()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="avito-watcher")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -53,6 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_all = sub.add_parser("run-all", help="Run all configured searches")
     run_all.set_defaults(func=cmd_run_all)
+
+    telegram_bot = sub.add_parser("telegram-bot", help="Run Telegram command bot")
+    telegram_bot.set_defaults(func=cmd_run_telegram_bot)
 
     return parser
 
