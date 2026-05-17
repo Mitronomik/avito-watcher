@@ -1,10 +1,54 @@
 import argparse
+import asyncio
 import json
 from app.bot.telegram_commands import build_telegram_application
+from app.parsers.avito_parser import AvitoParser
+from app.parsers.errors import ParserError
 from app.db.init_db import init_db
 from app.db.session import SessionLocal
 from app.repositories.search_repository import SearchRepository
 from app.services.monitor_service import MonitorService
+
+
+def _card_to_dry_run_json(card) -> dict:
+    return {
+        "external_id": card.external_id,
+        "title": card.title,
+        "price": card.price,
+        "url": card.url,
+    }
+
+
+async def _dry_run_search(url: str) -> dict:
+    try:
+        cards = await AvitoParser().fetch_search_cards(url)
+    except ParserError as exc:
+        return {
+            "ok": False,
+            "total_cards": 0,
+            "cards": [],
+            "error_type": exc.error_type.value,
+            "error": str(exc),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "total_cards": 0,
+            "cards": [],
+            "error_type": "unexpected_error",
+            "error": str(exc),
+        }
+
+    return {
+        "ok": True,
+        "total_cards": len(cards),
+        "cards": [_card_to_dry_run_json(card) for card in cards[:5]],
+    }
+
+
+def cmd_dry_run_search(args) -> None:
+    result = asyncio.run(_dry_run_search(args.url))
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def cmd_seed_search(args) -> None:
@@ -61,6 +105,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_all = sub.add_parser("run-all", help="Run all configured searches")
     run_all.set_defaults(func=cmd_run_all)
+
+    dry_run = sub.add_parser("dry-run-search", help="Fetch and print Avito search parser diagnostics without side effects")
+    dry_run.add_argument("--url", required=True)
+    dry_run.set_defaults(func=cmd_dry_run_search)
 
     telegram_bot = sub.add_parser("telegram-bot", help="Run Telegram command bot")
     telegram_bot.set_defaults(func=cmd_run_telegram_bot)
