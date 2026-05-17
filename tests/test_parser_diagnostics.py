@@ -1,6 +1,7 @@
 import asyncio
 import json
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -45,6 +46,71 @@ def test_parser_detects_block_markers_without_listing_page_navigation():
 
 def test_parser_detects_empty_results_text_without_listing_page_navigation():
     assert AvitoParser._looks_like_empty_results("Ничего не найдено по вашему запросу")
+
+
+def test_fetch_search_cards_raises_possible_captcha_or_block_from_captcha_html():
+    parser = AvitoParser()
+    captcha_html = """
+    <html>
+      <head><title>Проверка безопасности</title></head>
+      <body>Подтвердите, что вы не робот</body>
+    </html>
+    """
+
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=captcha_html)):
+        with pytest.raises(ParserError) as exc_info:
+            asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry"))
+
+    assert exc_info.value.error_type == ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK
+
+
+def test_fetch_search_cards_raises_empty_results_from_empty_results_html():
+    parser = AvitoParser()
+    empty_results_html = """
+    <html>
+      <head><title>Avito</title></head>
+      <body>Ничего не найдено. Попробуйте изменить параметры поиска.</body>
+    </html>
+    """
+
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=empty_results_html)):
+        with pytest.raises(ParserError) as exc_info:
+            asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry"))
+
+    assert exc_info.value.error_type == ParserErrorType.EMPTY_RESULTS
+
+
+def test_fetch_search_cards_raises_layout_changed_from_valid_html_without_item_cards():
+    parser = AvitoParser()
+    no_cards_html = """
+    <html>
+      <head><title>Avito</title></head>
+      <body><main><section>Свежие объявления рядом с вами</section></main></body>
+    </html>
+    """
+
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=no_cards_html)):
+        with pytest.raises(ParserError) as exc_info:
+            asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry"))
+
+    assert exc_info.value.error_type == ParserErrorType.LAYOUT_CHANGED
+
+
+def test_fetch_page_html_raises_possible_captcha_or_block_when_all_engines_fail():
+    parser = AvitoParser()
+    try_engine = AsyncMock(
+        side_effect=[
+            {"ok": False, "error_type": "possible_captcha_or_block", "html": ""},
+            {"ok": False, "error_type": "possible_captcha_or_block", "html": ""},
+        ]
+    )
+
+    with patch.object(parser, "_try_engine", new=try_engine):
+        with pytest.raises(ParserError) as exc_info:
+            asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+
+    assert exc_info.value.error_type == ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK
+    assert try_engine.await_count == 2
 
 
 def test_parser_preserves_sha256_external_id_fallback():
