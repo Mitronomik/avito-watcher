@@ -14,6 +14,7 @@ class SearchJob(Base):
     source_url: Mapped[str] = mapped_column(String(2048), nullable=False)
     filters_json: Mapped[dict] = mapped_column(JSON, default=dict)
     poll_interval_sec: Mapped[int] = mapped_column(Integer, default=180)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     baseline_initialized: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     baseline_initialized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 
@@ -51,11 +52,30 @@ def card(external_id: str, price: float = 100.0) -> ListingCard:
     )
 
 
-def make_search(db_session, name: str = "test", source_url: str = "https://www.avito.ru/test"):
+def make_search(
+    db_session,
+    name: str = "test",
+    source_url: str = "https://www.avito.ru/test",
+    poll_interval_sec: int = 180,
+):
     repo = SearchRepository(db_session)
-    search = repo.create(name=name, source_url=source_url)
+    search = repo.create(name=name, source_url=source_url, poll_interval_sec=poll_interval_sec)
     db_session.commit()
     return search
+
+
+
+def patch_session_local(monkeypatch, db_session):
+    import app.services.monitor_service as monitor_module
+
+    class FakeSessionLocal:
+        def __enter__(self):
+            return db_session
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(monitor_module, "SessionLocal", lambda: FakeSessionLocal())
 
 
 def scalar_count(db_session, model) -> int:
@@ -240,3 +260,76 @@ def test_run_all_searches_records_one_failure_and_continues_next_search(monkeypa
     assert first.last_error == "parser failed"
     assert second.baseline_initialized is True
     assert second.fail_count == 0
+
+
+def test_run_all_searches_skips_inactive_search(monkeypatch, db_session):
+    search = make_search(db_session)
+    SearchRepository(db_session).deactivate(search)
+    db_session.commit()
+    patch_session_local(monkeypatch, db_session)
+    parser = FakeParser([[card("1")]])
+
+    result = MonitorService(parser=parser, scorer=FakeScorer(), notifier=FakeNotifier()).run_all_searches()
+
+    assert result == []
+    assert parser.calls == 0
+    assert scalar_count(db_session, Listing) == 0
+
+
+def test_run_all_searches_skips_active_search_scheduled_in_future(monkeypatch, db_session):
+    search = make_search(db_session)
+    search.next_run_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=5)
+    db_session.commit()
+    patch_session_local(monkeypatch, db_session)
+    parser = FakeParser([[card("1")]])
+
+    result = MonitorService(parser=parser, scorer=FakeScorer(), notifier=FakeNotifier()).run_all_searches()
+
+    assert result == []
+    assert parser.calls == 0
+    assert scalar_count(db_session, Listing) == 0
+
+
+def test_run_all_searches_processes_active_search_with_null_next_run(monkeypatch, db_session):
+    search = make_search(db_session)
+    assert search.next_run_at is None
+    patch_session_local(monkeypatch, db_session)
+    parser = FakeParser([[card("1")]])
+
+    result = MonitorService(parser=parser, scorer=FakeScorer(), notifier=FakeNotifier()).run_all_searches()
+
+    assert parser.calls == 1
+    assert result[0]["search"] == search.name
+    assert result[0]["baseline_run"] is True
+    assert scalar_count(db_session, Listing) == 1
+
+
+def test_run_all_searches_processes_active_search_scheduled_in_past(monkeypatch, db_session):
+    search = make_search(db_session)
+    search.next_run_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=5)
+    db_session.commit()
+    patch_session_local(monkeypatch, db_session)
+    parser = FakeParser([[card("1")]])
+
+    result = MonitorService(parser=parser, scorer=FakeScorer(), notifier=FakeNotifier()).run_all_searches()
+
+    assert parser.calls == 1
+    assert result[0]["search"] == search.name
+    assert result[0]["baseline_run"] is True
+    assert scalar_count(db_session, Listing) == 1
+
+
+def test_successful_run_updates_next_run_at(monkeypatch, db_session):
+    search = make_search(db_session, poll_interval_sec=45)
+    patch_session_local(monkeypatch, db_session)
+
+    result = MonitorService(
+        parser=FakeParser([[card("1")]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    ).run_all_searches()
+
+    db_session.refresh(search)
+    assert result[0]["search"] == search.name
+    assert search.last_success_at is not None
+    assert search.next_run_at == search.last_success_at + timedelta(seconds=45)

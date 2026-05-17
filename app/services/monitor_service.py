@@ -165,7 +165,7 @@ class MonitorService:
     def run_all_searches(self) -> list[dict]:
         with SessionLocal() as db:
             repo = SearchRepository(db)
-            searches = repo.list_active()
+            searches = repo.list_due_active(_utcnow())
             results = []
             for search in searches:
                 try:
