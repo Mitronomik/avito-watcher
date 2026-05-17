@@ -78,7 +78,9 @@ async def fetch_with_nodriver(url: str, proxy_url: Optional[str]) -> dict:
 
     browser = None
     try:
-        browser = await uc.start(headless=False, browser_args=args)
+        import os as _os
+        _headless = _os.getenv("APP_ENV", "dev") in ("docker", "prod", "ci")
+        browser = await uc.start(headless=_headless, browser_args=args)
 
         # Set up proxy auth handler if credentials present
         if proxy_url and "@" in proxy_url:
