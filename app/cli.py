@@ -1,13 +1,23 @@
 import argparse
 import asyncio
 import json
+import os
 from app.bot.telegram_commands import build_telegram_application
 from app.parsers.avito_parser import AvitoParser
 from app.parsers.errors import ParserError
+from app.parsers.proxy_manager import ProxyManager
 from app.db.init_db import init_db
 from app.db.session import SessionLocal
 from app.repositories.search_repository import SearchRepository
 from app.services.monitor_service import MonitorService
+
+
+def _build_parser() -> "AvitoParser":
+    """Build AvitoParser with ProxyManager from PROXY_URLS env var (mirrors monitor.py logic)."""
+    raw = os.getenv("PROXY_URLS", "").strip()
+    proxy_urls = [u.strip() for u in raw.split(",") if u.strip()]
+    manager = ProxyManager(proxy_urls) if proxy_urls else None
+    return AvitoParser(proxy_manager=manager)
 
 
 def _card_to_dry_run_json(card) -> dict:
@@ -23,7 +33,7 @@ def _card_to_dry_run_json(card) -> dict:
 
 async def _dry_run_search(url: str) -> dict:
     try:
-        cards = await AvitoParser().fetch_search_cards(url)
+        cards = await _build_parser().fetch_search_cards(url)
     except ParserError as exc:
         return {
             "ok": False,
@@ -69,7 +79,7 @@ def cmd_seed_search(args) -> None:
 
 def cmd_run_once(args) -> None:
     init_db()
-    service = MonitorService()
+    service = MonitorService(parser=_build_parser())
     if args.search_id is not None:
         result = service.run_once(args.search_id)
     else:
@@ -79,7 +89,7 @@ def cmd_run_once(args) -> None:
 
 def cmd_run_all(args) -> None:
     init_db()
-    service = MonitorService()
+    service = MonitorService(parser=_build_parser())
     result = service.run_all_searches()
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
