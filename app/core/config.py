@@ -13,13 +13,15 @@ class Settings(BaseSettings):
     ollama_model: str = "qwen2.5:7b-instruct"
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    api_key: str = ""
+    # Secret key to protect POST /monitor/run. Set API_KEY env var.
+    # If empty, the endpoint is unprotected (dev mode only).
     scrape_headless: bool = True
     scrape_timeout_ms: int = 45000
     scrape_concurrency: int = 2
     proxy_urls: str = ""
-    # Comma-separated mobile proxy URLs, mirrors PROXY_URLS env var.
-    # app/workers/monitor.py reads os.getenv("PROXY_URLS") directly,
-    # but this field documents the variable and enables future config-driven injection.
+    # Comma-separated proxy URLs: http://user:pass@host:port,http://...
+    # Set via PROXY_URLS env var. Used by AvitoParser via _build_parser().
 
 
 settings = Settings()

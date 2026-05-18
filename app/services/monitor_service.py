@@ -276,16 +276,6 @@ class MonitorService:
                 first_seen_at=now,
                 last_seen_at=now,
             )
-            listing_repo.create_snapshot(
-                external_id=card.external_id,
-                title=card.title,
-                price=card.price,
-                published_label=card.published_label,
-                published_at=card.published_at,
-                payload_json=card.raw,
-                screenshot_path="",
-                observed_at=now,
-            )
             created += 1
 
             if baseline_run:
@@ -308,6 +298,17 @@ class MonitorService:
                     "summary": f"LLM scoring unavailable: {exc}",
                     "tags": ["llm_error"],
                 }
+
+            listing_repo.create_snapshot(
+                external_id=card.external_id,
+                title=card.title,
+                price=card.price,
+                published_label=card.published_label,
+                published_at=card.published_at,
+                payload_json={**card.raw, "llm_score": llm},
+                screenshot_path="",
+                observed_at=now,
+            )
 
             dedupe_key = f"telegram:new:{card.external_id}"
             if alert_repo.exists_by_dedupe_key(dedupe_key):
