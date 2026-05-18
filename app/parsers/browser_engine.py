@@ -251,7 +251,13 @@ async def fetch_with_camoufox(url: str, proxy_url: Optional[str]) -> dict:
     proxy_cfg = _parse_proxy_url(proxy_url) if proxy_url else None
 
     try:
-        async with AsyncCamoufox(headless="virtual", proxy=proxy_cfg) as browser:
+        import os as _os_cf
+        _cf_headless = (
+            False
+            if _os_cf.getenv("SCRAPE_HEADLESS", "false").lower() not in ("true", "1")
+            else "virtual"
+        )
+        async with AsyncCamoufox(headless=_cf_headless, proxy=proxy_cfg) as browser:
             page = await browser.new_page()
 
             # Inject stealth patches before any navigation
