@@ -35,6 +35,8 @@ def run_monitor_cycle(parser: AvitoParser) -> list[dict]:
     service = MonitorService(parser=parser)
     results = service.run_all_searches()
     logger.info("monitor cycle completed", extra={"results": results})
+    if parser._proxy_manager is not None:
+        logger.info("proxy pool stats: %s", parser._proxy_manager.stats())
     return results
 
 

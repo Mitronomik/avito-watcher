@@ -79,7 +79,7 @@ async def fetch_with_nodriver(url: str, proxy_url: Optional[str]) -> dict:
     browser = None
     try:
         import os as _os
-        _headless = _os.getenv("APP_ENV", "dev") in ("docker", "prod", "ci")
+        _headless = _os.getenv("SCRAPE_HEADLESS", "false").lower() in ("true", "1")
         browser = await uc.start(headless=_headless, browser_args=args)
 
         # Warmup: land on homepage first to build cookies.

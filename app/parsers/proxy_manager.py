@@ -40,6 +40,10 @@ class ProxyManager:
         self._quarantine_seconds = quarantine_seconds
         self._lock = threading.Lock()
         self._index = 0
+        # Observability counters — cumulative since process start
+        self._hits: int = 0          # total successful proxy uses
+        self._failures: int = 0      # total failures reported
+        self._quarantine_events: int = 0  # total times any proxy was quarantined
 
     # ------------------------------------------------------------------
     # Public interface
@@ -53,6 +57,7 @@ class ProxyManager:
                 return None
             entry = available[self._index % len(available)]
             self._index += 1
+            self._hits += 1
             return entry.url
 
     def report_success(self, proxy_url: str) -> None:
@@ -72,6 +77,8 @@ class ProxyManager:
                     multiplier = min(p.failures, 3)
                     delay = self._quarantine_seconds * multiplier
                     p.quarantine_until = time.monotonic() + delay
+                    self._failures += 1
+                    self._quarantine_events += 1
                     return
 
     @property
@@ -81,3 +88,15 @@ class ProxyManager:
     @property
     def available_count(self) -> int:
         return sum(1 for p in self._proxies if p.is_available)
+
+    def stats(self) -> dict:
+        """Return current pool health snapshot for logging/metrics."""
+        with self._lock:
+            return {
+                "total": self.total,
+                "available": self.available_count,
+                "quarantined": self.total - self.available_count,
+                "hits": self._hits,
+                "failures": self._failures,
+                "quarantine_events": self._quarantine_events,
+            }
