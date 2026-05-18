@@ -344,22 +344,40 @@ class MonitorService:
         }
 
     def run_once(self, search_job_id: int) -> dict:
-        with SessionLocal() as db:
-            return asyncio.run(self.process_search_by_id(db, search_job_id))
+        """Run a single search job synchronously (one event loop, one browser session)."""
+        loop = asyncio.new_event_loop()
+        try:
+            with SessionLocal() as db:
+                return loop.run_until_complete(self.process_search_by_id(db, search_job_id))
+        finally:
+            loop.close()
 
     def run_all_searches(self) -> list[dict]:
+        """Run all due searches sequentially in a single event loop.
+
+        Using a single loop (instead of one runner per search) means the
+        AvitoParser reuses the same browser session across searches in one cycle,
+        avoiding N concurrent Chromium processes.
+        """
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self._run_all_searches_async())
+        finally:
+            loop.close()
+
+    async def _run_all_searches_async(self) -> list[dict]:
+        """Async core of run_all_searches — runs all due searches sequentially."""
         with SessionLocal() as db:
             repo = SearchRepository(db)
             searches = repo.list_due_active(_utcnow())
             results = []
             for search in searches:
                 try:
-                    result = asyncio.run(self.process_search(db, search))
+                    result = await self.process_search(db, search)
                 except Exception as exc:
                     logger.exception("search check failed", extra={"search": search.name})
                     result = {"search": search.name, "error": str(exc)}
                 else:
                     result["search"] = search.name
                 results.append(result)
-
             return results
