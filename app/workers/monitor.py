@@ -10,7 +10,7 @@ from app.services.monitor_service import MonitorService
 
 logger = logging.getLogger(__name__)
 
-WORKER_CADENCE_SEC = 20
+WORKER_CADENCE_SEC = 60
 WORKER_CADENCE_JITTER_SEC = 2
 
 
