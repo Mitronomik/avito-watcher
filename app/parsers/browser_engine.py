@@ -20,6 +20,79 @@ BLOCK_SIGNALS = (
 )
 
 # ---------------------------------------------------------------------------
+# JS stealth init-script — patches navigator properties detectable by Avito UBA.
+# Applied before any navigation so the very first request is already patched.
+# ---------------------------------------------------------------------------
+_STEALTH_INIT_SCRIPT = """
+(() => {
+  // 1. webdriver — undefined beats false (false itself is detectable)
+  Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
+
+  // 2. plugins — headless has 0; spoof 3 common Chrome plugins
+  const _plugins = [
+    { name: 'PDF Viewer',         filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+    { name: 'Chrome PDF Viewer',  filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+    { name: 'Chromium PDF Viewer',filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+  ];
+  Object.defineProperty(navigator, 'plugins', {
+    get: () => Object.assign(_plugins, { item: i => _plugins[i], refresh: () => {} }),
+    configurable: true,
+  });
+
+  // 3. languages — match proxy locale (Russian)
+  Object.defineProperty(navigator, 'language',  { get: () => 'ru-RU', configurable: true });
+  Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru', 'en-US'], configurable: true });
+
+  // 4. window.chrome — required; headless Chrome has no chrome.runtime.id
+  if (!window.chrome) {
+    window.chrome = {
+      app: { isInstalled: false },
+      runtime: {
+        id: undefined,
+        connect:     () => {},
+        sendMessage: () => {},
+      },
+      loadTimes: () => ({
+        requestTime:   Date.now() / 1000,
+        startLoadTime: Date.now() / 1000,
+        commitLoadTime: Date.now() / 1000,
+        finishLoadTime: 0,
+        firstPaintTime: 0,
+        navigationType: 'Other',
+        wasNpnNegotiated: false,
+      }),
+      csi: () => ({
+        startE:  Date.now(),
+        onloadT: Date.now(),
+        pageT:   3000 + Math.random() * 1000,
+        tran:    15,
+      }),
+    };
+  }
+
+  // 5. permissions — 'notifications' must return real Notification.permission
+  const _origQuery = window.navigator.permissions.query.bind(navigator.permissions);
+  window.navigator.permissions.query = (p) =>
+    p.name === 'notifications'
+      ? Promise.resolve({ state: Notification.permission })
+      : _origQuery(p);
+
+  // 6. WebGL — spoof Intel GPU strings (common Russian laptop)
+  // Patches both WebGLRenderingContext (WebGL1) and WebGL2RenderingContext
+  function _patchWebGL(ctx) {
+    const _getParam = ctx.prototype.getParameter;
+    ctx.prototype.getParameter = function (param) {
+      if (param === 37445) return 'Intel Inc.';
+      if (param === 37446) return 'Intel Iris OpenGL Engine';
+      return _getParam.call(this, param);
+    };
+  }
+  _patchWebGL(WebGLRenderingContext);
+  if (typeof WebGL2RenderingContext !== 'undefined') _patchWebGL(WebGL2RenderingContext);
+})();
+"""
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -81,6 +154,14 @@ async def fetch_with_nodriver(url: str, proxy_url: Optional[str]) -> dict:
         import os as _os
         _headless = _os.getenv("SCRAPE_HEADLESS", "false").lower() in ("true", "1")
         browser = await uc.start(headless=_headless, browser_args=args)
+
+        # Inject stealth script so it runs on every new page before any navigation
+        try:
+            await browser.main_tab.send(
+                uc.cdp.page.add_script_to_evaluate_on_new_document(source=_STEALTH_INIT_SCRIPT)
+            )
+        except Exception as _patch_exc:
+            logger.debug("[browser_engine] nodriver: stealth init-script skipped: %s", _patch_exc)
 
         # Warmup: land on homepage first to build cookies.
         # NOTE: proxy auth handler must be installed AFTER the first navigation
@@ -172,6 +253,17 @@ async def fetch_with_camoufox(url: str, proxy_url: Optional[str]) -> dict:
     try:
         async with AsyncCamoufox(headless="virtual", proxy=proxy_cfg) as browser:
             page = await browser.new_page()
+
+            # Inject stealth patches before any navigation
+            await page.add_init_script(_STEALTH_INIT_SCRIPT)
+
+            # Set geolocation to Saint Petersburg — must match proxy IP region.
+            # Uses standard Playwright BrowserContext API available in camoufox.
+            try:
+                await page.context.grant_permissions(["geolocation"])
+                await page.context.set_geolocation({"latitude": 59.9386, "longitude": 30.3141})
+            except Exception as _geo_exc:
+                logger.debug("[browser_engine] camoufox: geolocation setup skipped: %s", _geo_exc)
 
             # Warmup
             await page.goto("https://www.avito.ru/", wait_until="domcontentloaded")
