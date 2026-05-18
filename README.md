@@ -39,7 +39,7 @@ docker compose -f deploy/docker-compose.yml up -d postgres redis ollama
 
 ### Запустить API
 
-API-сервис запускает только FastAPI/admin-приложение и не выполняет мониторинг Avito:
+API-сервис запускает только FastAPI/admin-приложение и не выполняет автоматический мониторинг Avito. FastAPI нужен для healthcheck, управления поисками и ручных admin-действий:
 
 ```bash
 make api
@@ -53,7 +53,7 @@ docker compose -f deploy/docker-compose.yml up app
 
 ### Запустить worker
 
-Worker выполняет мониторинг сохранённых SearchJob и отправку релевантных алертов:
+Worker — единственный процесс, который автоматически выполняет мониторинг сохранённых SearchJob и отправку релевантных алертов:
 
 ```bash
 make worker
@@ -66,6 +66,15 @@ docker compose -f deploy/docker-compose.yml up worker
 ```
 
 > ⚠️ При первом запуске worker инициализирует baseline для поисков и не отправляет алерты по уже существующим объявлениям. Алерты появляются только для новых объявлений после baseline.
+
+
+### Запустить API + worker
+
+Команда `make up` запускает оба сервиса: FastAPI app и worker. При этом автоматический мониторинг выполняет только worker; FastAPI остаётся API/admin-приложением и не планирует фоновые циклы мониторинга.
+
+```bash
+make up
+```
 
 ### Запустить Telegram command bot
 
@@ -105,6 +114,13 @@ python -m app.cli run-once
 python -m app.cli run-all
 python -m app.cli telegram-bot
 ```
+
+
+## Ручной запуск мониторинга
+
+Эндпоинт `POST /monitor/run` — manual/admin-only запуск одного прохода для первого активного поиска. Он не является scheduler и не запускается FastAPI автоматически; если задан `API_KEY`, запрос должен передавать заголовок `X-API-Key`. Для автоматического мониторинга используйте worker.
+
+CLI-команды `python -m app.cli run-once` и `python -m app.cli run-all` также предназначены для явного ручного запуска.
 
 ## Telegram-команды
 ```text
