@@ -1,7 +1,6 @@
 """Tests for ProxyManager round-robin, quarantine, and observability counters."""
 import time
 
-import pytest
 
 from app.parsers.proxy_manager import ProxyManager
 
