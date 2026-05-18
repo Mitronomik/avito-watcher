@@ -1,9 +1,26 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Security, status
+from fastapi.security import APIKeyHeader
 from sqlalchemy.orm import Session
+
+from app.core.config import settings
 from app.db.session import get_db
 from app.repositories.search_repository import SearchRepository
 from app.schemas.search import SearchCreate
 from app.services.monitor_service import MonitorService
+
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def _require_api_key(key: str | None = Security(_api_key_header)) -> None:
+    """Reject requests if API_KEY is configured and header doesn't match."""
+    if not settings.api_key:
+        return  # API_KEY not set — dev mode, allow all
+    if key != settings.api_key:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid or missing X-API-Key header",
+        )
+
 
 router = APIRouter()
 
@@ -26,7 +43,10 @@ async def create_search(payload: SearchCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/monitor/run")
-async def run_monitor_once(db: Session = Depends(get_db)):
+async def run_monitor_once(
+    db: Session = Depends(get_db),
+    _auth: None = Depends(_require_api_key),
+):
     service = MonitorService()
     repo = SearchRepository(db)
     searches = repo.list_active()

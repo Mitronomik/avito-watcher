@@ -22,6 +22,8 @@ class _ProxyEntry:
 
 class ProxyManager:
     """Round-robin proxy pool with per-IP failure tracking and quarantine.
+    Uses threading.RLock to prevent deadlock when stats() calls properties
+    that may acquire the same lock in the future.
 
     Quarantine duration grows with consecutive failures:
       failures=1 → base_sec * 1
@@ -38,7 +40,7 @@ class ProxyManager:
     ) -> None:
         self._proxies = [_ProxyEntry(url=u) for u in proxy_urls]
         self._quarantine_seconds = quarantine_seconds
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._index = 0
         # Observability counters — cumulative since process start
         self._hits: int = 0          # total successful proxy uses

@@ -125,7 +125,7 @@ def test_first_baseline_run_saves_listings_but_sends_zero_alerts(db_session):
     assert result["filtered"] == 0
     assert result["scored"] == 0
     assert scalar_count(db_session, Listing) == 2
-    assert scalar_count(db_session, ListingSnapshot) == 2
+    assert scalar_count(db_session, ListingSnapshot) == 0
     assert scalar_count(db_session, AlertSent) == 0
     assert notifier.messages == []
     assert scorer.cards == []
@@ -178,7 +178,7 @@ def test_second_run_with_one_new_listing_sends_one_alert(db_session):
     assert result["created"] == 1
     assert result["alerted"] == 1
     assert scalar_count(db_session, Listing) == 2
-    assert scalar_count(db_session, ListingSnapshot) == 2
+    assert scalar_count(db_session, ListingSnapshot) == 1
     assert scalar_count(db_session, AlertSent) == 1
     assert scorer.cards == ["2"]
     assert len(notifier.messages) == 1
@@ -204,7 +204,7 @@ def test_max_price_filters_out_expensive_new_listing(db_session):
     assert result["scored"] == 0
     assert result["alerted"] == 0
     assert scalar_count(db_session, Listing) == 2
-    assert scalar_count(db_session, ListingSnapshot) == 2
+    assert scalar_count(db_session, ListingSnapshot) == 0
     assert scorer.cards == []
     assert notifier.messages == []
 
@@ -232,7 +232,7 @@ def test_min_area_filters_out_too_small_new_listing(db_session):
     assert result["scored"] == 0
     assert result["alerted"] == 0
     assert scalar_count(db_session, Listing) == 2
-    assert scalar_count(db_session, ListingSnapshot) == 2
+    assert scalar_count(db_session, ListingSnapshot) == 0
     assert scorer.cards == []
     assert notifier.messages == []
 
@@ -265,7 +265,7 @@ def test_exclude_keywords_filters_by_title_or_text(db_session):
     assert result["scored"] == 0
     assert result["alerted"] == 0
     assert scalar_count(db_session, Listing) == 2
-    assert scalar_count(db_session, ListingSnapshot) == 2
+    assert scalar_count(db_session, ListingSnapshot) == 0
     assert scorer.cards == []
     assert notifier.messages == []
 
@@ -293,7 +293,7 @@ def test_include_keywords_allows_matching_new_listing(db_session):
     assert result["scored"] == 1
     assert result["alerted"] == 1
     assert scalar_count(db_session, Listing) == 2
-    assert scalar_count(db_session, ListingSnapshot) == 2
+    assert scalar_count(db_session, ListingSnapshot) == 1
     assert scorer.cards == ["2"]
     assert len(notifier.messages) == 1
 
@@ -318,7 +318,7 @@ def test_baseline_ignores_filters_alerting_and_scoring_but_saves_listings(db_ses
     assert result["scored"] == 0
     assert result["alerted"] == 0
     assert scalar_count(db_session, Listing) == 1
-    assert scalar_count(db_session, ListingSnapshot) == 1
+    assert scalar_count(db_session, ListingSnapshot) == 0
     assert scalar_count(db_session, AlertSent) == 0
     assert scorer.cards == []
     assert notifier.messages == []
@@ -339,7 +339,7 @@ def test_existing_listing_price_change_creates_new_snapshot(db_session):
     assert result["price_changed"] == 1
     assert listing.price == 150.0
     assert scalar_count(db_session, Listing) == 1
-    assert scalar_count(db_session, ListingSnapshot) == 2
+    assert scalar_count(db_session, ListingSnapshot) == 1
 
 
 def test_run_all_searches_does_not_create_default_search(monkeypatch, db_session):
@@ -391,7 +391,7 @@ def test_scoring_failure_still_sends_alert_with_fallback_summary(db_session):
     assert search.fail_count == 0
     assert search.last_error == ""
     assert scalar_count(db_session, Listing) == 2
-    assert scalar_count(db_session, ListingSnapshot) == 2
+    assert scalar_count(db_session, ListingSnapshot) == 1
     assert scalar_count(db_session, AlertSent) == 1
     assert len(notifier.messages) == 1
     assert "LLM scoring unavailable: scoring failed" in notifier.messages[0]
@@ -628,7 +628,7 @@ def test_max_age_hours_filters_old_listing(db_session):
     assert result["filtered_by_publication_date"] == 1
     assert result["scored"] == 0
     assert scalar_count(db_session, Listing) == 2
-    assert scalar_count(db_session, ListingSnapshot) == 2
+    assert scalar_count(db_session, ListingSnapshot) == 0
 
 
 def test_published_on_date_allows_matching_moscow_date(db_session):
@@ -704,7 +704,7 @@ def test_baseline_ignores_publication_filters_but_saves_records(db_session):
     assert result["scored"] == 0
     assert result["alerted"] == 0
     assert scalar_count(db_session, Listing) == 1
-    assert scalar_count(db_session, ListingSnapshot) == 1
+    assert scalar_count(db_session, ListingSnapshot) == 0
     assert scorer.cards == []
     assert notifier.messages == []
 
@@ -714,22 +714,27 @@ def test_listing_and_snapshot_store_publication_fields(db_session):
     search = make_search(db_session)
     service = MonitorService(
         parser=FakeParser(
-            [[card("1", published_label="Сегодня 12:34", published_at=published_at)]]
+            [
+                [card("1")],
+                [card("1"), card("2", published_label="Сегодня 12:34", published_at=published_at)],
+            ]
         ),
         scorer=FakeScorer(),
         notifier=FakeNotifier(),
     )
 
     run(service, db_session, search)
+    run(service, db_session, search)
 
-    listing = db_session.scalar(select(Listing).where(Listing.external_id == "1"))
+    listing = db_session.scalar(select(Listing).where(Listing.external_id == "2"))
     snapshot = db_session.scalar(
-        select(ListingSnapshot).where(ListingSnapshot.external_id == "1")
+        select(ListingSnapshot).where(ListingSnapshot.external_id == "2")
     )
     assert listing.published_label == "Сегодня 12:34"
     assert listing.published_at == published_at
     assert snapshot.published_label == "Сегодня 12:34"
     assert snapshot.published_at == published_at
+    assert snapshot.payload_json["llm_score"]["summary"] == "score for 2"
 
 
 def test_existing_listing_updates_publication_fields_when_seen_again(db_session):
