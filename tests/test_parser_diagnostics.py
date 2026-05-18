@@ -215,7 +215,7 @@ def test_dry_run_search_prints_card_diagnostics_without_side_effects(
                 for idx in range(6)
             ]
 
-    monkeypatch.setattr(cli, "AvitoParser", FakeDryRunParser)
+    monkeypatch.setattr(cli, "_build_parser", lambda: FakeDryRunParser())
 
     parser = cli.build_parser()
     args = parser.parse_args(["dry-run-search", "--url", "https://www.avito.ru/test"])
@@ -244,7 +244,7 @@ def test_dry_run_search_reports_classified_parser_error(monkeypatch, capsys):
             assert url == "bad-url"
             raise ParserError(ParserErrorType.INVALID_URL, "search_url must start with http:// or https://")
 
-    monkeypatch.setattr(cli, "AvitoParser", FakeDryRunParser)
+    monkeypatch.setattr(cli, "_build_parser", lambda: FakeDryRunParser())
 
     parser = cli.build_parser()
     args = parser.parse_args(["dry-run-search", "--url", "bad-url"])
