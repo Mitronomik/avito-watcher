@@ -82,28 +82,44 @@ async def fetch_with_nodriver(url: str, proxy_url: Optional[str]) -> dict:
         _headless = _os.getenv("APP_ENV", "dev") in ("docker", "prod", "ci")
         browser = await uc.start(headless=_headless, browser_args=args)
 
-        # Set up proxy auth handler if credentials present
+        # Warmup: land on homepage first to build cookies.
+        # NOTE: proxy auth handler must be installed AFTER the first navigation
+        # because nodriver creates main_tab lazily on the first browser.get() call.
+        # Installing it before that returns None and raises AttributeError.
+        _ = await browser.get("https://www.avito.ru/")
+
+        # Set up proxy auth handler if credentials present.
+        # Tab is now guaranteed to exist after the get() call above.
         if proxy_url and "@" in proxy_url:
             creds_part = proxy_url.split("://", 1)[1].rsplit("@", 1)[0]
             user, password = creds_part.split(":", 1)
             tab = browser.main_tab
-            await tab.send(uc.cdp.fetch.enable(handle_auth_requests=True))
+            if tab is not None:
+                try:
+                    await tab.send(uc.cdp.fetch.enable(handle_auth_requests=True))
 
-            async def _auth_handler(event: uc.cdp.fetch.AuthRequired) -> None:  # type: ignore[name-defined]
-                await tab.send(
-                    uc.cdp.fetch.continue_with_auth(
-                        request_id=event.request_id,
-                        auth_challenge_response=uc.cdp.fetch.AuthChallengeResponse(
-                            response="ProvideCredentials",
-                            username=user,
-                            password=password,
-                        ),
+                    async def _auth_handler(event: uc.cdp.fetch.AuthRequired) -> None:  # type: ignore[name-defined]
+                        await tab.send(
+                            uc.cdp.fetch.continue_with_auth(
+                                request_id=event.request_id,
+                                auth_challenge_response=uc.cdp.fetch.AuthChallengeResponse(
+                                    response="ProvideCredentials",
+                                    username=user,
+                                    password=password,
+                                ),
+                            )
+                        )
+                    tab.add_handler(uc.cdp.fetch.AuthRequired, _auth_handler)
+                except Exception as _auth_exc:
+                    logger.warning(
+                        "[browser_engine] nodriver: proxy auth handler setup failed: %s",
+                        _auth_exc,
                     )
+            else:
+                logger.warning(
+                    "[browser_engine] nodriver: main_tab is None after warmup, "
+                    "proxy auth credentials will not be injected"
                 )
-            tab.add_handler(uc.cdp.fetch.AuthRequired, _auth_handler)
-
-        # Warmup: land on homepage first to build cookies
-        await browser.get("https://www.avito.ru/")
         await asyncio.sleep(random.uniform(2.0, 4.0))
 
         # Target page
