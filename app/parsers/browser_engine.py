@@ -78,7 +78,7 @@ _STEALTH_INIT_SCRIPT = """
       : _origQuery(p);
 
   // 6. WebGL — spoof Intel GPU strings (common Russian laptop)
-  // Patches both WebGLRenderingContext (WebGL1) and WebGL2RenderingContext
+  // Patches both WebGL contexts (v1 and v2)
   function _patchWebGL(ctx) {
     const _getParam = ctx.prototype.getParameter;
     ctx.prototype.getParameter = function (param) {
