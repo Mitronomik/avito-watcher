@@ -36,7 +36,7 @@ async def create_search(payload: SearchCreate, db: Session = Depends(get_db)):
     item = repo.create(
         name=payload.name,
         source_url=str(payload.source_url),
-        filters_json=payload.model_dump(),
+        filters_json=payload.filters_only(),
     )
     db.commit()
     return {"id": item.id, "name": item.name, "source_url": item.source_url}

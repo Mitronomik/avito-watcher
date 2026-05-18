@@ -28,6 +28,20 @@ HELP_TEXT = """Avito Watcher commands:
 /clearfilters <search_id> - clear search filters"""
 
 
+def _is_authorized(update: Update) -> bool:
+    """Return True if the message comes from the configured owner chat.
+
+    If TELEGRAM_CHAT_ID is not set, allows all (dev mode).
+    Compares as strings to handle both int and str chat IDs from env.
+    """
+    if not settings.telegram_chat_id:
+        return True  # unconfigured → dev mode, allow all
+    chat = getattr(update, "effective_chat", None)
+    if chat is None:
+        return not hasattr(update, "effective_chat")
+    return str(chat.id) == str(settings.telegram_chat_id)
+
+
 class TelegramSearchCommandHandlers:
     def __init__(self, session_factory: SessionFactory = SessionLocal) -> None:
         self.session_factory = session_factory
@@ -42,6 +56,9 @@ class TelegramSearchCommandHandlers:
 
     async def add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         args = list(getattr(context, "args", []) or [])
+        if not _is_authorized(update):
+            await _reply(update, "Unauthorized.")
+            return
         if not args:
             await _reply(update, _add_usage())
             return
@@ -82,6 +99,9 @@ class TelegramSearchCommandHandlers:
 
     async def pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         search_id = _parse_search_id(context)
+        if not _is_authorized(update):
+            await _reply(update, "Unauthorized.")
+            return
         if search_id is None:
             await _reply(update, "Usage: /pause <search_id>")
             return
@@ -99,6 +119,9 @@ class TelegramSearchCommandHandlers:
 
     async def resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         search_id = _parse_search_id(context)
+        if not _is_authorized(update):
+            await _reply(update, "Unauthorized.")
+            return
         if search_id is None:
             await _reply(update, "Usage: /resume <search_id>")
             return
@@ -164,6 +187,9 @@ class TelegramSearchCommandHandlers:
 
     async def setfilters(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         args = list(getattr(context, "args", []) or [])
+        if not _is_authorized(update):
+            await _reply(update, "Unauthorized.")
+            return
         search_id = _parse_search_id_from_args(args)
         if search_id is None or len(args) < 2:
             await _reply(update, "Usage: /setfilters <search_id> key=value key=value ...")
@@ -191,6 +217,9 @@ class TelegramSearchCommandHandlers:
 
     async def clearfilters(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         search_id = _parse_search_id(context)
+        if not _is_authorized(update):
+            await _reply(update, "Unauthorized.")
+            return
         if search_id is None:
             await _reply(update, "Usage: /clearfilters <search_id>")
             return
