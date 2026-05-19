@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Download camoufox browser binary.
 # Verify the actual storage path before finalizing the COPY in runtime stage.
 RUN python -m camoufox fetch \
- && python -c "import camoufox, os; p=os.path.expanduser('~/.local/lib/camoufox'); \
+ && python -c "import camoufox, os; p=os.path.expanduser('~/.cache/camoufox'); \
     assert os.path.isdir(p), f'camoufox binary not found at {p!r} — update COPY path in runtime stage'"
 
 # -- Stage 2: runtime -------------------------------------------------------
@@ -50,7 +50,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy camoufox browser binary from builder.
 # If the assert above passed, this path is correct.
-COPY --from=builder /root/.local/lib/camoufox /root/.local/lib/camoufox
+COPY --from=builder /root/.cache/camoufox /root/.cache/camoufox
 
 # nodriver downloads Chromium lazily on first run — no pre-seeding needed.
 
