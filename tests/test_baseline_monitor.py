@@ -35,11 +35,15 @@ class FakeScorer:
 
 
 class FakeNotifier:
+    channel_name = "telegram"
+
     def __init__(self):
         self.messages = []
+        self.channels = [self]
 
-    async def send_listing_alert(self, text: str) -> None:
-        self.messages.append(text)
+    async def send_listing_alert(self, message: str, payload: dict | None = None):
+        self.messages.append(message)
+        return [self.channel_name]
 
 
 def card(
@@ -758,3 +762,31 @@ def test_existing_listing_updates_publication_fields_when_seen_again(db_session)
     listing = db_session.scalar(select(Listing).where(Listing.external_id == "1"))
     assert listing.published_label == "Сегодня 13:10"
     assert listing.published_at == second_published_at
+
+
+def test_channel_specific_dedupe_keys_recorded(db_session):
+    class Channel:
+        def __init__(self, name: str):
+            self.channel_name = name
+
+    class MultiNotifier:
+        def __init__(self):
+            self.channels = [Channel("email"), Channel("jsonl")]
+
+        async def send_listing_alert(self, message: str, payload: dict):
+            return ["email", "jsonl"]
+
+    search = make_search(db_session)
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=MultiNotifier(),
+    )
+
+    run(service, db_session, search)
+    run(service, db_session, search)
+
+    rows = db_session.scalars(select(AlertSent)).all()
+    keys = {row.dedupe_key for row in rows}
+    assert "email:new:2" in keys
+    assert "jsonl:new:2" in keys

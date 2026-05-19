@@ -150,3 +150,21 @@ Telegram-команды управляют SearchJob в базе данных и
 
 Поддерживаемые ключи: `min_price`, `max_price`, `min_area`, `max_area`, `include_keywords`, `exclude_keywords`, `location_keywords`, `max_age_hours`, `published_after`, `published_on_date`, `require_published_at`.
 Для свежих объявлений рекомендуется настройка `max_age_hours=24 require_published_at=true`: она ограничивает выдачу объявлениями с распознанной датой публикации за последние 24 часа.
+
+
+## Каналы алертов
+
+Telegram теперь опциональный: можно запускать доставку без Telegram, например через JSONL + email.
+
+Пример:
+
+```bash
+ALERT_CHANNELS=jsonl,email
+```
+
+Поддерживаемые каналы и порядок задаются в `ALERT_CHANNELS` (например `jsonl,email,telegram`).
+
+- `jsonl` пишет алерты в локальный durable outbox: `JSONL_OUTBOX_PATH` (по умолчанию `./data/alerts.jsonl`).
+- `email` отправляет plain text письма через SMTP (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `EMAIL_FROM`, `EMAIL_TO`).
+- `telegram` включается только при наличии конфигурации и при наличии канала в `ALERT_CHANNELS`.
+
