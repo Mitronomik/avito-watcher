@@ -1,3 +1,4 @@
+import pytest
 import asyncio
 import sys
 from types import ModuleType, SimpleNamespace
@@ -264,3 +265,36 @@ def test_open_camoufox_session_setup_failure_calls_aexit(monkeypatch):
         pass
 
     assert "exit" in events
+
+
+def test_open_nodriver_session_stops_browser_when_setup_fails(monkeypatch):
+    events = []
+
+    class FakeBrowser:
+        def __init__(self):
+            self.main_tab = None
+
+        async def get(self, nav_url):
+            if nav_url == "about:blank":
+                raise RuntimeError("about blank failed")
+            return None
+
+        def stop(self):
+            events.append("stop")
+
+    fake_uc = ModuleType("nodriver")
+
+    async def fake_start(*, headless, browser_args):
+        return FakeBrowser()
+
+    fake_uc.start = fake_start
+    fake_uc.cdp = SimpleNamespace(
+        page=SimpleNamespace(add_script_to_evaluate_on_new_document=lambda source: ("page.script", source)),
+        fetch=SimpleNamespace(AuthRequired="AuthRequired", enable=lambda **kwargs: ("fetch.enable", kwargs), AuthChallengeResponse=lambda **kwargs: kwargs, continue_with_auth=lambda **kwargs: kwargs),
+    )
+    monkeypatch.setitem(sys.modules, "nodriver", fake_uc)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(open_nodriver_session(None))
+
+    assert "stop" in events

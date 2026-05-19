@@ -475,3 +475,31 @@ def test_run_all_searches_without_cycle_hooks(monkeypatch, db_session):
 
     results = service.run_all_searches()
     assert len(results) == 1
+
+
+def test_end_cycle_closes_all_sessions_even_if_one_fails(caplog):
+    parser = AvitoParser()
+
+    class BadSession:
+        async def fetch(self, _url):
+            return {"ok": True, "html": ""}
+
+        async def close(self):
+            raise RuntimeError("close failed")
+
+    closed = []
+
+    class GoodSession:
+        async def fetch(self, _url):
+            return {"ok": True, "html": ""}
+
+        async def close(self):
+            closed.append(True)
+
+    parser._engine_sessions[(_Engine.NODRIVER, None)] = BadSession()
+    parser._engine_sessions[(_Engine.CAMOUFOX, None)] = GoodSession()
+
+    asyncio.run(parser.end_cycle())
+
+    assert closed == [True]
+    assert "failed to close browser session" in caplog.text

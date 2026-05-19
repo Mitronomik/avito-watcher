@@ -134,6 +134,7 @@ class _NodriverSession:
 
     async def fetch(self, url: str) -> dict:
         try:
+            # TODO: Warmup still runs on every fetch for behavior parity; optimize separately with focused tests.
             _ = await self._browser.get("https://www.avito.ru/")
             await asyncio.sleep(random.uniform(2.0, 4.0))
             page = await self._browser.get(url)
@@ -159,6 +160,7 @@ class _CamoufoxSession:
 
     async def fetch(self, url: str) -> dict:
         try:
+            # TODO: Warmup still runs on every fetch for behavior parity; optimize separately with focused tests.
             await self._page.goto("https://www.avito.ru/", wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(2.0, 4.0))
             await self._page.goto(url, wait_until="domcontentloaded")
@@ -186,44 +188,51 @@ async def open_nodriver_session(proxy_url: Optional[str]):
     _headless = _os.getenv("SCRAPE_HEADLESS", "false").lower() in ("true", "1")
     browser = await uc.start(headless=_headless, browser_args=args)
 
-    tab = browser.main_tab
-    if tab is None:
-        _ = await browser.get("about:blank")
+    try:
         tab = browser.main_tab
+        if tab is None:
+            _ = await browser.get("about:blank")
+            tab = browser.main_tab
 
-    if tab is not None:
-        try:
-            await tab.send(uc.cdp.page.add_script_to_evaluate_on_new_document(source=_STEALTH_INIT_SCRIPT))
-        except Exception as _patch_exc:
-            logger.debug("[browser_engine] nodriver: stealth init-script skipped: %s", _patch_exc)
-    else:
-        logger.warning("[browser_engine] nodriver: main_tab is None before warmup, stealth init-script was not injected")
-
-    if proxy_url and "@" in proxy_url:
-        creds_part = proxy_url.split("://", 1)[1].rsplit("@", 1)[0]
-        user, password = creds_part.split(":", 1)
         if tab is not None:
             try:
-                await tab.send(uc.cdp.fetch.enable(handle_auth_requests=True))
-
-                async def _auth_handler(event: uc.cdp.fetch.AuthRequired) -> None:  # type: ignore[name-defined]
-                    await tab.send(
-                        uc.cdp.fetch.continue_with_auth(
-                            request_id=event.request_id,
-                            auth_challenge_response=uc.cdp.fetch.AuthChallengeResponse(
-                                response="ProvideCredentials",
-                                username=user,
-                                password=password,
-                            ),
-                        )
-                    )
-
-                tab.add_handler(uc.cdp.fetch.AuthRequired, _auth_handler)
-            except Exception as _auth_exc:
-                logger.warning("[browser_engine] nodriver: proxy auth handler setup failed: %s", _auth_exc)
+                await tab.send(uc.cdp.page.add_script_to_evaluate_on_new_document(source=_STEALTH_INIT_SCRIPT))
+            except Exception as _patch_exc:
+                logger.debug("[browser_engine] nodriver: stealth init-script skipped: %s", _patch_exc)
         else:
-            logger.warning("[browser_engine] nodriver: main_tab is None before warmup, proxy auth credentials will not be injected")
-    return _NodriverSession(uc, browser)
+            logger.warning("[browser_engine] nodriver: main_tab is None before warmup, stealth init-script was not injected")
+
+        if proxy_url and "@" in proxy_url:
+            creds_part = proxy_url.split("://", 1)[1].rsplit("@", 1)[0]
+            user, password = creds_part.split(":", 1)
+            if tab is not None:
+                try:
+                    await tab.send(uc.cdp.fetch.enable(handle_auth_requests=True))
+
+                    async def _auth_handler(event: uc.cdp.fetch.AuthRequired) -> None:  # type: ignore[name-defined]
+                        await tab.send(
+                            uc.cdp.fetch.continue_with_auth(
+                                request_id=event.request_id,
+                                auth_challenge_response=uc.cdp.fetch.AuthChallengeResponse(
+                                    response="ProvideCredentials",
+                                    username=user,
+                                    password=password,
+                                ),
+                            )
+                        )
+
+                    tab.add_handler(uc.cdp.fetch.AuthRequired, _auth_handler)
+                except Exception as _auth_exc:
+                    logger.warning("[browser_engine] nodriver: proxy auth handler setup failed: %s", _auth_exc)
+            else:
+                logger.warning("[browser_engine] nodriver: main_tab is None before warmup, proxy auth credentials will not be injected")
+        return _NodriverSession(uc, browser)
+    except Exception:
+        try:
+            browser.stop()
+        except Exception:
+            pass
+        raise
 
 
 async def open_camoufox_session(proxy_url: Optional[str]):

@@ -1,8 +1,9 @@
 import hashlib
+import logging
 import re
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 from zoneinfo import ZoneInfo
 from urllib.parse import urljoin, urlparse
 
@@ -64,6 +65,8 @@ PUBLICATION_MARKER_SELECTORS = (
     '[data-marker*="time"]',
 )
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+logger = logging.getLogger(__name__)
+
 MONTHS_RU = {
     "января": 1,
     "февраля": 2,
@@ -89,6 +92,12 @@ PUBLICATION_PATTERNS = (
 )
 
 
+class BrowserSession(Protocol):
+    async def fetch(self, url: str) -> dict: ...
+
+    async def close(self) -> None: ...
+
+
 class _Engine(Enum):
     NODRIVER = "nodriver"
     CAMOUFOX = "camoufox"
@@ -99,7 +108,7 @@ class AvitoParser:
         self.now_func = now_func or (lambda: datetime.now(UTC))
         self._proxy_manager = proxy_manager
         self._prefer_engine = _Engine.NODRIVER
-        self._engine_sessions: dict[tuple[_Engine, str | None], object] = {}
+        self._engine_sessions: dict[tuple[_Engine, str | None], BrowserSession] = {}
         self._cycle_active = False
 
     def _now(self) -> datetime:
@@ -121,7 +130,10 @@ class AvitoParser:
         sessions = list(self._engine_sessions.values())
         self._engine_sessions.clear()
         for session in sessions:
-            await session.close()
+            try:
+                await session.close()
+            except Exception as exc:
+                logger.warning("avito_parser: failed to close browser session: %s", exc)
 
     async def ensure_engine_session(self, engine: _Engine, proxy_url: str | None) -> dict | None:
         if not self._cycle_active:
