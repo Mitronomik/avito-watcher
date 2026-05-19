@@ -845,3 +845,69 @@ def test_google_sheets_dedupe_not_recorded_after_failed_delivery(db_session):
         select(AlertSent).where(AlertSent.dedupe_key == "google_sheets:new:2")
     )
     assert row is None
+
+
+def test_existing_listing_retries_google_sheets_after_previous_failure(db_session):
+    class GoogleFailNotifier:
+        def __init__(self):
+            class Channel:
+                channel_name = "google_sheets"
+
+            self.channels = [Channel()]
+            self.calls = 0
+
+        async def send_listing_alert(self, message: str, payload: dict | None = None):
+            self.calls += 1
+            return []
+
+    class GoogleSuccessNotifier:
+        def __init__(self):
+            class Channel:
+                channel_name = "google_sheets"
+
+            self.channels = [Channel()]
+            self.calls = 0
+
+        async def send_listing_alert(self, message: str, payload: dict | None = None):
+            self.calls += 1
+            return ["google_sheets"]
+
+    search = make_search(db_session)
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1")]]),
+            scorer=FakeScorer(),
+            notifier=FakeNotifier(),
+        ),
+        db_session,
+        search,
+    )
+
+    fail_notifier = GoogleFailNotifier()
+    fail_service = MonitorService(
+        parser=FakeParser([[card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=fail_notifier,
+    )
+    run(fail_service, db_session, search)
+
+    listing = db_session.scalar(select(Listing).where(Listing.external_id == "2"))
+    assert listing is not None
+    fail_row = db_session.scalar(
+        select(AlertSent).where(AlertSent.dedupe_key == "google_sheets:new:2")
+    )
+    assert fail_row is None
+
+    success_notifier = GoogleSuccessNotifier()
+    success_service = MonitorService(
+        parser=FakeParser([[card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=success_notifier,
+    )
+    run(success_service, db_session, search)
+
+    success_row = db_session.scalar(
+        select(AlertSent).where(AlertSent.dedupe_key == "google_sheets:new:2")
+    )
+    assert success_row is not None
+    assert success_notifier.calls == 1
