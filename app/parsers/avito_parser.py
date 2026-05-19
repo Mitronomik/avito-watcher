@@ -114,10 +114,23 @@ class AvitoParser:
     def _now(self) -> datetime:
         return self.now_func()
 
+    async def _evict_engine_session(self, engine: _Engine, proxy_url: str | None) -> None:
+        key = (engine, proxy_url)
+        session = self._engine_sessions.pop(key, None)
+        if session is None:
+            return
+        try:
+            await session.close()
+        except Exception as exc:
+            logger.warning("avito_parser: failed to close browser session: %s", exc)
+
     async def _try_engine(self, url: str, proxy_url: str | None, engine: _Engine) -> dict:
         session = self._engine_sessions.get((engine, proxy_url))
         if session is not None:
-            return await session.fetch(url)
+            result = await session.fetch(url)
+            if not result.get("ok") and result.get("error_type") == "exception":
+                await self._evict_engine_session(engine, proxy_url)
+            return result
         if engine == _Engine.NODRIVER:
             return await fetch_with_nodriver(url, proxy_url)
         return await fetch_with_camoufox(url, proxy_url)
