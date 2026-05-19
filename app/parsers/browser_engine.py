@@ -131,12 +131,24 @@ class _NodriverSession:
     def __init__(self, uc_module, browser):
         self._uc = uc_module
         self._browser = browser
+        self._warmed_up = False
+
+    async def _ensure_warmup(self) -> dict | None:
+        if self._warmed_up:
+            return None
+        try:
+            _ = await self._browser.get("https://www.avito.ru/")
+            await asyncio.sleep(random.uniform(2.0, 4.0))
+            self._warmed_up = True
+            return None
+        except Exception as exc:
+            return {"ok": False, "engine": "nodriver", "error_type": "exception", "error": str(exc)}
 
     async def fetch(self, url: str) -> dict:
         try:
-            # TODO: Warmup still runs on every fetch for behavior parity; optimize separately with focused tests.
-            _ = await self._browser.get("https://www.avito.ru/")
-            await asyncio.sleep(random.uniform(2.0, 4.0))
+            warmup_result = await self._ensure_warmup()
+            if warmup_result is not None:
+                return warmup_result
             page = await self._browser.get(url)
             await asyncio.sleep(random.uniform(3.0, 6.0))
             title: str = await page.evaluate("document.title") or ""
@@ -157,12 +169,24 @@ class _CamoufoxSession:
     def __init__(self, browser, page):
         self._browser = browser
         self._page = page
+        self._warmed_up = False
+
+    async def _ensure_warmup(self) -> dict | None:
+        if self._warmed_up:
+            return None
+        try:
+            await self._page.goto("https://www.avito.ru/", wait_until="domcontentloaded")
+            await asyncio.sleep(random.uniform(2.0, 4.0))
+            self._warmed_up = True
+            return None
+        except Exception as exc:
+            return {"ok": False, "engine": "camoufox", "error_type": "exception", "error": str(exc)}
 
     async def fetch(self, url: str) -> dict:
         try:
-            # TODO: Warmup still runs on every fetch for behavior parity; optimize separately with focused tests.
-            await self._page.goto("https://www.avito.ru/", wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(2.0, 4.0))
+            warmup_result = await self._ensure_warmup()
+            if warmup_result is not None:
+                return warmup_result
             await self._page.goto(url, wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(3.0, 6.0))
             title = await self._page.title() or ""

@@ -5,7 +5,14 @@ from types import ModuleType, SimpleNamespace
 
 from app.parsers.block_signals import looks_like_block_or_captcha
 from app.parsers.browser_engine import _is_blocked, _nodriver_proxy_args, _parse_proxy_url
-from app.parsers.browser_engine import fetch_with_nodriver, open_camoufox_session, open_nodriver_session
+from app.parsers.browser_engine import (
+    _CamoufoxSession,
+    _NodriverSession,
+    fetch_with_camoufox,
+    fetch_with_nodriver,
+    open_camoufox_session,
+    open_nodriver_session,
+)
 
 
 def test_nodriver_proxy_args_no_proxy():
@@ -298,3 +305,160 @@ def test_open_nodriver_session_stops_browser_when_setup_fails(monkeypatch):
         asyncio.run(open_nodriver_session(None))
 
     assert "stop" in events
+
+
+def test_nodriver_session_warmup_runs_once_per_session(monkeypatch):
+    events = []
+
+    class FakePage:
+        async def evaluate(self, script):
+            if script == "document.title":
+                return "Avito"
+            if script == "document.body.innerText":
+                return ""
+            if "querySelectorAll" in script:
+                return 2
+            return None
+
+        async def get_content(self):
+            return "<html></html>"
+
+    class FakeBrowser:
+        async def get(self, nav_url):
+            events.append(nav_url)
+            return FakePage()
+
+        def stop(self):
+            return None
+
+    async def _fast_sleep(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.parsers.browser_engine.asyncio.sleep", _fast_sleep)
+    session = _NodriverSession(uc_module=SimpleNamespace(), browser=FakeBrowser())
+
+    first = asyncio.run(session.fetch("https://www.avito.ru/a"))
+    second = asyncio.run(session.fetch("https://www.avito.ru/b"))
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert events == [
+        "https://www.avito.ru/",
+        "https://www.avito.ru/a",
+        "https://www.avito.ru/b",
+    ]
+
+
+def test_camoufox_session_warmup_runs_once_per_session(monkeypatch):
+    events = []
+
+    class FakeLocator:
+        @property
+        def first(self):
+            return self
+
+        async def text_content(self):
+            return ""
+
+        async def count(self):
+            return 3
+
+    class FakePage:
+        async def goto(self, url, wait_until):
+            events.append((url, wait_until))
+
+        async def title(self):
+            return "Avito"
+
+        def locator(self, _selector):
+            return FakeLocator()
+
+        async def content(self):
+            return "<html></html>"
+
+    class FakeBrowser:
+        async def __aexit__(self, *_args):
+            return None
+
+    async def _fast_sleep(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.parsers.browser_engine.asyncio.sleep", _fast_sleep)
+    session = _CamoufoxSession(browser=FakeBrowser(), page=FakePage())
+
+    first = asyncio.run(session.fetch("https://www.avito.ru/a"))
+    second = asyncio.run(session.fetch("https://www.avito.ru/b"))
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert events == [
+        ("https://www.avito.ru/", "domcontentloaded"),
+        ("https://www.avito.ru/a", "domcontentloaded"),
+        ("https://www.avito.ru/b", "domcontentloaded"),
+    ]
+
+
+def test_nodriver_warmup_failure_returns_controlled_result(monkeypatch):
+    class BrokenBrowser:
+        async def get(self, url):
+            if url == "https://www.avito.ru/":
+                raise RuntimeError("warmup failed")
+            return None
+
+        def stop(self):
+            return None
+
+    session = _NodriverSession(uc_module=SimpleNamespace(), browser=BrokenBrowser())
+    result = asyncio.run(session.fetch("https://www.avito.ru/a"))
+
+    assert result["ok"] is False
+    assert result["engine"] == "nodriver"
+    assert result["error_type"] == "exception"
+    assert "warmup failed" in result["error"]
+
+
+def test_fetch_with_nodriver_closes_session_after_one_call(monkeypatch):
+    events = []
+
+    class FakeSession:
+        async def fetch(self, _url):
+            return {"ok": True, "engine": "nodriver", "html": "<html></html>", "cards_count": 1}
+
+        async def close(self):
+            events.append("closed")
+
+    fake_uc = ModuleType("nodriver")
+    monkeypatch.setitem(sys.modules, "nodriver", fake_uc)
+
+    async def fake_open(_proxy):
+        return FakeSession()
+
+    monkeypatch.setattr("app.parsers.browser_engine.open_nodriver_session", fake_open)
+    result = asyncio.run(fetch_with_nodriver("https://www.avito.ru/a", None))
+
+    assert result["ok"] is True
+    assert events == ["closed"]
+
+
+def test_fetch_with_camoufox_closes_session_after_one_call(monkeypatch):
+    events = []
+
+    class FakeSession:
+        async def fetch(self, _url):
+            return {"ok": True, "engine": "camoufox", "html": "<html></html>", "cards_count": 1}
+
+        async def close(self):
+            events.append("closed")
+
+    fake_mod = ModuleType("camoufox.async_api")
+    fake_mod.AsyncCamoufox = object()
+    monkeypatch.setitem(sys.modules, "camoufox.async_api", fake_mod)
+
+    async def fake_open(_proxy):
+        return FakeSession()
+
+    monkeypatch.setattr("app.parsers.browser_engine.open_camoufox_session", fake_open)
+    result = asyncio.run(fetch_with_camoufox("https://www.avito.ru/a", None))
+
+    assert result["ok"] is True
+    assert events == ["closed"]
