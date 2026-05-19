@@ -911,3 +911,142 @@ def test_existing_listing_retries_google_sheets_after_previous_failure(db_sessio
     )
     assert success_row is not None
     assert success_notifier.calls == 1
+
+
+def test_retry_sends_only_pending_channels(db_session):
+    class Channel:
+        def __init__(self, name: str, should_succeed: bool):
+            self.channel_name = name
+            self.should_succeed = should_succeed
+            self.calls = 0
+
+        async def send_listing_alert(self, message: str, payload: dict | None = None):
+            self.calls += 1
+            if self.should_succeed:
+                return True
+            raise RuntimeError(f"{self.channel_name} failed")
+
+    class MultiNotifier:
+        def __init__(self, email_success: bool, sheets_success: bool):
+            self.email = Channel("email", email_success)
+            self.sheets = Channel("google_sheets", sheets_success)
+            self.channels = [self.email, self.sheets]
+
+    search = make_search(db_session)
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1")]]),
+            scorer=FakeScorer(),
+            notifier=FakeNotifier(),
+        ),
+        db_session,
+        search,
+    )
+
+    first_notifier = MultiNotifier(email_success=True, sheets_success=False)
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1"), card("2")]]),
+            scorer=FakeScorer(),
+            notifier=first_notifier,
+        ),
+        db_session,
+        search,
+    )
+    assert first_notifier.email.calls == 1
+    assert first_notifier.sheets.calls == 1
+
+    second_notifier = MultiNotifier(email_success=True, sheets_success=True)
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1"), card("2")]]),
+            scorer=FakeScorer(),
+            notifier=second_notifier,
+        ),
+        db_session,
+        search,
+    )
+    assert second_notifier.email.calls == 0
+    assert second_notifier.sheets.calls == 1
+
+
+def test_baseline_listing_price_change_creates_snapshot_without_new_alert(db_session):
+    search = make_search(db_session)
+    notifier = FakeNotifier()
+
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1", price=100.0)]]),
+            scorer=FakeScorer(),
+            notifier=notifier,
+        ),
+        db_session,
+        search,
+    )
+    result = run(
+        MonitorService(
+            parser=FakeParser([[card("1", price=130.0)]]),
+            scorer=FakeScorer(),
+            notifier=notifier,
+        ),
+        db_session,
+        search,
+    )
+
+    assert result["price_changed"] == 1
+    assert result["alerted"] == 0
+    assert scalar_count(db_session, ListingSnapshot) == 1
+    assert scalar_count(db_session, AlertSent) == 0
+
+
+def test_filtered_listing_not_alerted_later_after_price_change_snapshot(db_session):
+    search = make_search(db_session, filters_json={"max_price": 100.0})
+
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1", price=50.0)]]),
+            scorer=FakeScorer(),
+            notifier=FakeNotifier(),
+        ),
+        db_session,
+        search,
+    )
+
+    first_result = run(
+        MonitorService(
+            parser=FakeParser([[card("1", price=50.0), card("2", price=150.0)]]),
+            scorer=FakeScorer(),
+            notifier=FakeNotifier(),
+        ),
+        db_session,
+        search,
+    )
+    assert first_result["filtered"] == 1
+    assert scalar_count(db_session, AlertSent) == 0
+
+    class GoogleSuccessNotifier:
+        def __init__(self):
+            class Channel:
+                channel_name = "google_sheets"
+                calls = 0
+
+                async def send_listing_alert(self, message: str, payload: dict | None = None):
+                    self.calls += 1
+                    return True
+
+            self.channel = Channel()
+            self.channels = [self.channel]
+
+    notifier = GoogleSuccessNotifier()
+    second_result = run(
+        MonitorService(
+            parser=FakeParser([[card("1", price=50.0), card("2", price=160.0)]]),
+            scorer=FakeScorer(),
+            notifier=notifier,
+        ),
+        db_session,
+        search,
+    )
+    assert second_result["price_changed"] == 1
+    assert second_result["alerted"] == 0
+    assert notifier.channel.calls == 0

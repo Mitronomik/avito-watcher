@@ -196,6 +196,57 @@ class MonitorService:
         return CompositeNotifier(channels)
 
 
+    def _build_alert_payload(self, card: ListingCard, summary: str, score, tags: list) -> dict:
+        return {
+            "search_name": card.raw.get("search_name", ""),
+            "external_id": card.external_id,
+            "title": card.title,
+            "price": card.price,
+            "area_m2": card.area_m2,
+            "rooms": card.rooms,
+            "address": card.address,
+            "published_label": card.published_label,
+            "published_at": card.published_at.isoformat() if card.published_at else None,
+            "url": card.url,
+            "summary": summary,
+            "score": score,
+            "tags": tags,
+        }
+
+    def _retry_context_from_snapshot(self, db: Session, card: ListingCard) -> tuple[str, dict] | None:
+        snapshot = (
+            db.query(ListingSnapshot)
+            .filter(ListingSnapshot.external_id == card.external_id)
+            .order_by(ListingSnapshot.id.desc())
+            .first()
+        )
+        if snapshot is None:
+            return None
+        llm = snapshot.payload_json.get("llm_score") if isinstance(snapshot.payload_json, dict) else None
+        if not isinstance(llm, dict):
+            return None
+
+        summary = llm.get("summary", "")
+        payload = self._build_alert_payload(
+            card=card,
+            summary=summary,
+            score=llm.get("score"),
+            tags=llm.get("tags", []),
+        )
+        message = build_listing_message(
+            {
+                "title": card.title,
+                "price": card.price,
+                "address": card.address,
+                "area_m2": card.area_m2,
+                "rooms": card.rooms,
+                "published_label": card.published_label,
+                "url": card.url,
+            },
+            summary,
+        )
+        return message, payload
+
     async def _deliver_pending_alerts(
         self,
         alert_repo: AlertRepository,
@@ -214,8 +265,29 @@ class MonitorService:
         if not pending_channels:
             return False
 
-        successful = await self.notifier.send_listing_alert(message, payload)
-        successful = [name for name in successful if name in pending_channels]
+        channels = getattr(self.notifier, "channels", [self.notifier])
+        if all(hasattr(channel, "send_listing_alert") for channel in channels):
+            channel_map = {
+                channel.channel_name: channel
+                for channel in channels
+                if channel.channel_name in pending_channels
+            }
+            successful = []
+            for channel_name in pending_channels:
+                channel = channel_map.get(channel_name)
+                if channel is None:
+                    continue
+                try:
+                    delivered = await channel.send_listing_alert(message, payload)
+                except Exception:
+                    logger.exception("Alert channel failed", extra={"channel": channel_name})
+                    continue
+                if delivered is False:
+                    continue
+                successful.append(channel_name)
+        else:
+            successful = await self.notifier.send_listing_alert(message, payload)
+            successful = [name for name in successful if name in pending_channels]
         for channel_name in successful:
             alert_repo.create(
                 listing_external_id=card.external_id,
@@ -314,39 +386,11 @@ class MonitorService:
                 if baseline_run:
                     continue
 
-                has_snapshot = db.query(ListingSnapshot).filter(
-                    ListingSnapshot.external_id == card.external_id
-                ).first() is not None
-                if not has_snapshot:
+                retry_context = self._retry_context_from_snapshot(db, card)
+                if retry_context is None:
                     continue
 
-                message = build_listing_message(
-                    {
-                        "title": card.title,
-                        "price": card.price,
-                        "address": card.address,
-                        "area_m2": card.area_m2,
-                        "rooms": card.rooms,
-                        "published_label": card.published_label,
-                        "url": card.url,
-                    },
-                    "",
-                )
-                payload = {
-                    "search_name": card.raw.get("search_name", ""),
-                    "external_id": card.external_id,
-                    "title": card.title,
-                    "price": card.price,
-                    "area_m2": card.area_m2,
-                    "rooms": card.rooms,
-                    "address": card.address,
-                    "published_label": card.published_label,
-                    "published_at": card.published_at.isoformat() if card.published_at else None,
-                    "url": card.url,
-                    "summary": "",
-                    "score": None,
-                    "tags": [],
-                }
+                message, payload = retry_context
                 sent = await self._deliver_pending_alerts(alert_repo, card, message, payload)
                 if sent:
                     alerted += 1
@@ -412,21 +456,12 @@ class MonitorService:
                 },
                 llm.get("summary", ""),
             )
-            payload = {
-                "search_name": card.raw.get("search_name", ""),
-                "external_id": card.external_id,
-                "title": card.title,
-                "price": card.price,
-                "area_m2": card.area_m2,
-                "rooms": card.rooms,
-                "address": card.address,
-                "published_label": card.published_label,
-                "published_at": card.published_at.isoformat() if card.published_at else None,
-                "url": card.url,
-                "summary": llm.get("summary", ""),
-                "score": llm.get("score"),
-                "tags": llm.get("tags", []),
-            }
+            payload = self._build_alert_payload(
+                card=card,
+                summary=llm.get("summary", ""),
+                score=llm.get("score"),
+                tags=llm.get("tags", []),
+            )
 
             sent = await self._deliver_pending_alerts(alert_repo, card, message, payload)
             if sent:
