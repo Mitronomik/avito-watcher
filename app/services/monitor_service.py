@@ -6,8 +6,12 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from app.agents.scorer import ListingScorer
+from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.search_job import SearchJob
+from app.notifiers.composite import CompositeNotifier
+from app.notifiers.email import EmailNotifier
+from app.notifiers.jsonl_outbox import JsonlOutboxNotifier
 from app.notifiers.telegram import TelegramNotifier
 from app.parsers.avito_parser import AvitoParser
 from app.parsers.schemas import ListingCard
@@ -164,16 +168,28 @@ class MonitorService:
         self,
         parser: AvitoParser | None = None,
         scorer: ListingScorer | None = None,
-        notifier: TelegramNotifier | None = None,
+        notifier: CompositeNotifier | None = None,
         now_func=None,
     ) -> None:
         self.parser = parser or AvitoParser()
         self.scorer = scorer or ListingScorer()
-        self.notifier = notifier or TelegramNotifier()
+        self.notifier = notifier or self._build_notifier()
         self.now_func = now_func or _utcnow
 
     def _now(self) -> datetime:
         return _as_utc_naive(self.now_func())
+
+    def _build_notifier(self) -> CompositeNotifier:
+        configured = [item.strip().lower() for item in settings.alert_channels.split(",") if item.strip()]
+        channels = []
+        for name in configured:
+            if name == "telegram":
+                channels.append(TelegramNotifier())
+            elif name == "email":
+                channels.append(EmailNotifier())
+            elif name == "jsonl":
+                channels.append(JsonlOutboxNotifier())
+        return CompositeNotifier(channels)
 
     async def process_search(self, db: Session, search: SearchJob) -> dict:
         search_repo = SearchRepository(db)
@@ -310,10 +326,6 @@ class MonitorService:
                 observed_at=now,
             )
 
-            dedupe_key = f"telegram:new:{card.external_id}"
-            if alert_repo.exists_by_dedupe_key(dedupe_key):
-                continue
-
             message = build_listing_message(
                 {
                     "title": card.title,
@@ -326,11 +338,40 @@ class MonitorService:
                 },
                 llm.get("summary", ""),
             )
-            await self.notifier.send_listing_alert(message)
-            alert_repo.create(
-                listing_external_id=card.external_id, dedupe_key=dedupe_key
-            )
-            alerted += 1
+            payload = {
+                "external_id": card.external_id,
+                "title": card.title,
+                "price": card.price,
+                "address": card.address,
+                "area_m2": card.area_m2,
+                "rooms": card.rooms,
+                "published_label": card.published_label,
+                "url": card.url,
+                "llm_summary": llm.get("summary", ""),
+                "search_name": card.raw.get("search_name", ""),
+            }
+
+            notifier_channels = getattr(self.notifier, "channels", [self.notifier])
+            channel_names = [ch.channel_name for ch in notifier_channels]
+            pending_channels = []
+            for channel_name in channel_names:
+                dedupe_key = f"{channel_name}:new:{card.external_id}"
+                if not alert_repo.exists_by_dedupe_key(dedupe_key):
+                    pending_channels.append(channel_name)
+
+            if not pending_channels:
+                continue
+
+            successful = await self.notifier.send_listing_alert(message, payload)
+            successful = [name for name in successful if name in pending_channels]
+            for channel_name in successful:
+                alert_repo.create(
+                    listing_external_id=card.external_id,
+                    dedupe_key=f"{channel_name}:new:{card.external_id}",
+                    channel=channel_name,
+                )
+            if successful:
+                alerted += 1
 
         filtered = filtered_by_rules + filtered_by_publication_date
         return {

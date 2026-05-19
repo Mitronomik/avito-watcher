@@ -19,6 +19,16 @@ class Settings(BaseSettings):
     scrape_timeout_ms: int = 45000
     scrape_concurrency: int = 2
     proxy_urls: str = ""
+    alert_channels: str = "jsonl,telegram"
+    email_enabled: bool = False
+    smtp_host: str = ""
+    smtp_port: int = 465
+    smtp_username: str = ""
+    smtp_password: str = ""
+    email_from: str = ""
+    email_to: str = ""
+    jsonl_outbox_enabled: bool = True
+    jsonl_outbox_path: str = "./data/alerts.jsonl"
     # Comma-separated proxy URLs: http://user:pass@host:port,http://...
     # Set via PROXY_URLS env var. Used by AvitoParser via _build_parser().
 
