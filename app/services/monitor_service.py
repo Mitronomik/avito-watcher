@@ -11,6 +11,7 @@ from app.db.session import SessionLocal
 from app.models.search_job import SearchJob
 from app.notifiers.composite import CompositeNotifier
 from app.notifiers.email import EmailNotifier
+from app.notifiers.google_sheets_webhook import GoogleSheetsWebhookNotifier
 from app.notifiers.jsonl_outbox import JsonlOutboxNotifier
 from app.notifiers.telegram import TelegramNotifier
 from app.parsers.avito_parser import AvitoParser
@@ -189,6 +190,8 @@ class MonitorService:
                 channels.append(EmailNotifier())
             elif name == "jsonl":
                 channels.append(JsonlOutboxNotifier())
+            elif name == "google_sheets":
+                channels.append(GoogleSheetsWebhookNotifier())
         return CompositeNotifier(channels)
 
     async def process_search(self, db: Session, search: SearchJob) -> dict:
@@ -339,16 +342,19 @@ class MonitorService:
                 llm.get("summary", ""),
             )
             payload = {
+                "search_name": card.raw.get("search_name", ""),
                 "external_id": card.external_id,
                 "title": card.title,
                 "price": card.price,
-                "address": card.address,
                 "area_m2": card.area_m2,
                 "rooms": card.rooms,
+                "address": card.address,
                 "published_label": card.published_label,
+                "published_at": card.published_at.isoformat() if card.published_at else None,
                 "url": card.url,
-                "llm_summary": llm.get("summary", ""),
-                "search_name": card.raw.get("search_name", ""),
+                "summary": llm.get("summary", ""),
+                "score": llm.get("score"),
+                "tags": llm.get("tags", []),
             }
 
             notifier_channels = getattr(self.notifier, "channels", [self.notifier])

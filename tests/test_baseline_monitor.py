@@ -790,3 +790,58 @@ def test_channel_specific_dedupe_keys_recorded(db_session):
     keys = {row.dedupe_key for row in rows}
     assert "email:new:2" in keys
     assert "jsonl:new:2" in keys
+
+
+def test_google_sheets_dedupe_recorded_after_success(db_session):
+    class GoogleOnlyNotifier:
+        def __init__(self):
+            class Channel:
+                channel_name = "google_sheets"
+
+            self.channels = [Channel()]
+
+        async def send_listing_alert(self, message: str, payload: dict | None = None):
+            return ["google_sheets"]
+
+    search = make_search(db_session)
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=GoogleOnlyNotifier(),
+    )
+
+    run(service, db_session, search)
+    run(service, db_session, search)
+
+    row = db_session.scalar(
+        select(AlertSent).where(AlertSent.dedupe_key == "google_sheets:new:2")
+    )
+    assert row is not None
+
+
+def test_google_sheets_dedupe_not_recorded_after_failed_delivery(db_session):
+    class GoogleFailNotifier:
+        def __init__(self):
+            class Channel:
+                channel_name = "google_sheets"
+
+            self.channels = [Channel()]
+
+        async def send_listing_alert(self, message: str, payload: dict | None = None):
+            return []
+
+    search = make_search(db_session)
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=GoogleFailNotifier(),
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["alerted"] == 0
+    row = db_session.scalar(
+        select(AlertSent).where(AlertSent.dedupe_key == "google_sheets:new:2")
+    )
+    assert row is None

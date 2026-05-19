@@ -167,4 +167,56 @@ ALERT_CHANNELS=jsonl,email
 - `jsonl` пишет алерты в локальный durable outbox: `JSONL_OUTBOX_PATH` (по умолчанию `./data/alerts.jsonl`).
 - `email` отправляет plain text письма через SMTP (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `EMAIL_FROM`, `EMAIL_TO`).
 - `telegram` включается только при наличии конфигурации и при наличии канала в `ALERT_CHANNELS`.
+- `google_sheets` отправляет JSON webhook в Apps Script (`GOOGLE_SHEETS_WEBHOOK_URL`, `GOOGLE_SHEETS_WEBHOOK_SECRET`, `GOOGLE_SHEETS_WEBHOOK_TIMEOUT_SEC`).
 
+
+
+## Google Sheets webhook alerts
+
+Telegram опционален: можно использовать только Google Sheets webhook-канал через `ALERT_CHANNELS=google_sheets`.
+
+Пример `doPost(e)` для Google Apps Script:
+
+```javascript
+function doPost(e) {
+  const data = JSON.parse(e.postData.contents || '{}');
+  const expectedSecret = PropertiesService.getScriptProperties().getProperty('WEBHOOK_SECRET');
+  if (!expectedSecret || data.secret !== expectedSecret) {
+    return ContentService.createTextOutput(JSON.stringify({ ok: false, error: 'forbidden' }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('alerts');
+  sheet.appendRow([
+    data.sent_at || '',
+    data.search_name || '',
+    data.external_id || '',
+    data.title || '',
+    data.price || '',
+    data.area_m2 || '',
+    data.rooms || '',
+    data.address || '',
+    data.published_label || '',
+    data.published_at || '',
+    data.url || '',
+    data.summary || '',
+    data.score || '',
+    JSON.stringify(data.tags || []),
+    data.message || ''
+  ]);
+
+  return ContentService.createTextOutput(JSON.stringify({ ok: true }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+```
+
+Деплой Apps Script webhook:
+- `Deploy` → `New deployment` → `Web app`
+- `Execute as`: `Me`
+- `Who has access`: `Anyone`
+
+`GOOGLE_SHEETS_WEBHOOK_SECRET` защищает endpoint и должен проверяться в `doPost`.
+
+Ожидаемые колонки листа: `sent_at`, `search_name`, `external_id`, `title`, `price`, `area_m2`, `rooms`, `address`, `published_label`, `published_at`, `url`, `summary`, `score`, `tags`, `message`.
+
+Не коммитьте webhook URL и secret в репозиторий.
