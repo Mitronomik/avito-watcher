@@ -199,6 +199,74 @@ def test_fetch_page_html_cycle_mode_nodriver_session_open_failure_falls_back(mon
     html = asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
     assert html == "<html></html>"
     assert parser._prefer_engine == _Engine.CAMOUFOX
+
+
+def test_fetch_page_html_cycle_mode_evicts_broken_cached_session_and_falls_back(caplog):
+    parser = AvitoParser()
+    parser._cycle_active = True
+
+    class BrokenSession:
+        async def fetch(self, _url):
+            return {"ok": False, "error_type": "exception", "error": "boom"}
+
+        async def close(self):
+            raise RuntimeError("close failed")
+
+    class GoodSession:
+        async def fetch(self, _url):
+            return {"ok": True, "html": "<html>ok</html>"}
+
+        async def close(self):
+            return None
+
+    parser._engine_sessions[(_Engine.NODRIVER, None)] = BrokenSession()
+    parser._engine_sessions[(_Engine.CAMOUFOX, None)] = GoodSession()
+
+    html = asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+
+    assert html == "<html>ok</html>"
+    assert parser._prefer_engine == _Engine.CAMOUFOX
+    assert (_Engine.NODRIVER, None) not in parser._engine_sessions
+    assert "failed to close browser session" in caplog.text
+
+
+def test_ensure_engine_session_can_open_fresh_session_after_eviction(monkeypatch):
+    parser = AvitoParser()
+    parser._cycle_active = True
+
+    class BrokenSession:
+        async def fetch(self, _url):
+            return {"ok": False, "error_type": "exception", "error": "boom"}
+
+        async def close(self):
+            return None
+
+    class OpenedSession:
+        async def fetch(self, _url):
+            return {"ok": True, "html": "<html>fresh</html>"}
+
+        async def close(self):
+            return None
+
+    parser._engine_sessions[(_Engine.NODRIVER, None)] = BrokenSession()
+
+    opened = []
+
+    async def open_nodriver(_proxy):
+        opened.append(True)
+        return OpenedSession()
+
+    monkeypatch.setattr("app.parsers.avito_parser.open_nodriver_session", open_nodriver)
+
+    result = asyncio.run(parser._try_engine("https://www.avito.ru/moskva/kvartiry", None, _Engine.NODRIVER))
+    assert result["ok"] is False
+    assert (_Engine.NODRIVER, None) not in parser._engine_sessions
+
+    setup_error = asyncio.run(parser.ensure_engine_session(_Engine.NODRIVER, None))
+    assert setup_error is None
+    assert opened == [True]
+    assert (_Engine.NODRIVER, None) in parser._engine_sessions
+
 def test_monitor_records_parser_error_type_in_last_error(db_session):
     search = make_search(db_session)
     service = MonitorService(
