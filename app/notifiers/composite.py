@@ -13,9 +13,11 @@ class CompositeNotifier:
         successful: list[str] = []
         for channel in self.channels:
             try:
-                await channel.send_listing_alert(message, payload)
+                delivered = await channel.send_listing_alert(message, payload)
             except Exception:
                 logger.exception("Alert channel failed", extra={"channel": channel.channel_name})
+                continue
+            if delivered is False:
                 continue
             successful.append(channel.channel_name)
         return successful

@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     email_from: str = ""
     email_to: str = ""
+    google_sheets_webhook_enabled: bool = False
+    google_sheets_webhook_url: str = ""
+    google_sheets_webhook_secret: str = ""
+    google_sheets_webhook_timeout_sec: int = 15
     jsonl_outbox_enabled: bool = True
     jsonl_outbox_path: str = "./data/alerts.jsonl"
     # Comma-separated proxy URLs: http://user:pass@host:port,http://...

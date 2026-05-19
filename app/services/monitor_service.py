@@ -9,8 +9,10 @@ from app.agents.scorer import ListingScorer
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.search_job import SearchJob
+from app.models.listing_snapshot import ListingSnapshot
 from app.notifiers.composite import CompositeNotifier
 from app.notifiers.email import EmailNotifier
+from app.notifiers.google_sheets_webhook import GoogleSheetsWebhookNotifier
 from app.notifiers.jsonl_outbox import JsonlOutboxNotifier
 from app.notifiers.telegram import TelegramNotifier
 from app.parsers.avito_parser import AvitoParser
@@ -189,7 +191,116 @@ class MonitorService:
                 channels.append(EmailNotifier())
             elif name == "jsonl":
                 channels.append(JsonlOutboxNotifier())
+            elif name == "google_sheets":
+                channels.append(GoogleSheetsWebhookNotifier())
         return CompositeNotifier(channels)
+
+
+    def _build_alert_payload(self, card: ListingCard, summary: str, score, tags: list) -> dict:
+        return {
+            "search_name": card.raw.get("search_name", ""),
+            "external_id": card.external_id,
+            "title": card.title,
+            "price": card.price,
+            "area_m2": card.area_m2,
+            "rooms": card.rooms,
+            "address": card.address,
+            "published_label": card.published_label,
+            "published_at": card.published_at.isoformat() if card.published_at else None,
+            "url": card.url,
+            "summary": summary,
+            "score": score,
+            "tags": tags,
+        }
+
+    def _retry_context_from_snapshot(self, db: Session, card: ListingCard) -> tuple[str, dict] | None:
+        snapshots = (
+            db.query(ListingSnapshot)
+            .filter(ListingSnapshot.external_id == card.external_id)
+            .order_by(ListingSnapshot.id.desc())
+            .all()
+        )
+        llm = None
+        for snapshot in snapshots:
+            if not isinstance(snapshot.payload_json, dict):
+                continue
+            candidate = snapshot.payload_json.get("llm_score")
+            if isinstance(candidate, dict):
+                llm = candidate
+                break
+        if llm is None:
+            return None
+
+        summary = llm.get("summary", "")
+        payload = self._build_alert_payload(
+            card=card,
+            summary=summary,
+            score=llm.get("score"),
+            tags=llm.get("tags", []),
+        )
+        message = build_listing_message(
+            {
+                "title": card.title,
+                "price": card.price,
+                "address": card.address,
+                "area_m2": card.area_m2,
+                "rooms": card.rooms,
+                "published_label": card.published_label,
+                "url": card.url,
+            },
+            summary,
+        )
+        return message, payload
+
+    async def _deliver_pending_alerts(
+        self,
+        alert_repo: AlertRepository,
+        card: ListingCard,
+        message: str,
+        payload: dict,
+    ) -> bool:
+        notifier_channels = getattr(self.notifier, "channels", [self.notifier])
+        channel_names = [ch.channel_name for ch in notifier_channels]
+        pending_channels = []
+        for channel_name in channel_names:
+            dedupe_key = f"{channel_name}:new:{card.external_id}"
+            if not alert_repo.exists_by_dedupe_key(dedupe_key):
+                pending_channels.append(channel_name)
+
+        if not pending_channels:
+            return False
+
+        channels = getattr(self.notifier, "channels", [self.notifier])
+        if all(hasattr(channel, "send_listing_alert") for channel in channels):
+            channel_map = {
+                channel.channel_name: channel
+                for channel in channels
+                if channel.channel_name in pending_channels
+            }
+            successful = []
+            for channel_name in pending_channels:
+                channel = channel_map.get(channel_name)
+                if channel is None:
+                    continue
+                try:
+                    delivered = await channel.send_listing_alert(message, payload)
+                except Exception:
+                    logger.exception("Alert channel failed", extra={"channel": channel_name})
+                    continue
+                if delivered is False:
+                    continue
+                successful.append(channel_name)
+        else:
+            successful = await self.notifier.send_listing_alert(message, payload)
+            successful = [name for name in successful if name in pending_channels]
+        for channel_name in successful:
+            alert_repo.create(
+                listing_external_id=card.external_id,
+                dedupe_key=f"{channel_name}:new:{card.external_id}",
+                channel=channel_name,
+            )
+
+        return bool(successful)
 
     async def process_search(self, db: Session, search: SearchJob) -> dict:
         search_repo = SearchRepository(db)
@@ -277,6 +388,18 @@ class MonitorService:
                     )
                     price_changed += 1
 
+                if baseline_run:
+                    continue
+
+                retry_context = self._retry_context_from_snapshot(db, card)
+                if retry_context is None:
+                    continue
+
+                message, payload = retry_context
+                sent = await self._deliver_pending_alerts(alert_repo, card, message, payload)
+                if sent:
+                    alerted += 1
+
                 continue
 
             listing_repo.create_listing(
@@ -338,39 +461,15 @@ class MonitorService:
                 },
                 llm.get("summary", ""),
             )
-            payload = {
-                "external_id": card.external_id,
-                "title": card.title,
-                "price": card.price,
-                "address": card.address,
-                "area_m2": card.area_m2,
-                "rooms": card.rooms,
-                "published_label": card.published_label,
-                "url": card.url,
-                "llm_summary": llm.get("summary", ""),
-                "search_name": card.raw.get("search_name", ""),
-            }
+            payload = self._build_alert_payload(
+                card=card,
+                summary=llm.get("summary", ""),
+                score=llm.get("score"),
+                tags=llm.get("tags", []),
+            )
 
-            notifier_channels = getattr(self.notifier, "channels", [self.notifier])
-            channel_names = [ch.channel_name for ch in notifier_channels]
-            pending_channels = []
-            for channel_name in channel_names:
-                dedupe_key = f"{channel_name}:new:{card.external_id}"
-                if not alert_repo.exists_by_dedupe_key(dedupe_key):
-                    pending_channels.append(channel_name)
-
-            if not pending_channels:
-                continue
-
-            successful = await self.notifier.send_listing_alert(message, payload)
-            successful = [name for name in successful if name in pending_channels]
-            for channel_name in successful:
-                alert_repo.create(
-                    listing_external_id=card.external_id,
-                    dedupe_key=f"{channel_name}:new:{card.external_id}",
-                    channel=channel_name,
-                )
-            if successful:
+            sent = await self._deliver_pending_alerts(alert_repo, card, message, payload)
+            if sent:
                 alerted += 1
 
         filtered = filtered_by_rules + filtered_by_publication_date

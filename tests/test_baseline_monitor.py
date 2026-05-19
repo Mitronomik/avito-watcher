@@ -790,3 +790,335 @@ def test_channel_specific_dedupe_keys_recorded(db_session):
     keys = {row.dedupe_key for row in rows}
     assert "email:new:2" in keys
     assert "jsonl:new:2" in keys
+
+
+def test_google_sheets_dedupe_recorded_after_success(db_session):
+    class GoogleOnlyNotifier:
+        def __init__(self):
+            class Channel:
+                channel_name = "google_sheets"
+
+            self.channels = [Channel()]
+
+        async def send_listing_alert(self, message: str, payload: dict | None = None):
+            return ["google_sheets"]
+
+    search = make_search(db_session)
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=GoogleOnlyNotifier(),
+    )
+
+    run(service, db_session, search)
+    run(service, db_session, search)
+
+    row = db_session.scalar(
+        select(AlertSent).where(AlertSent.dedupe_key == "google_sheets:new:2")
+    )
+    assert row is not None
+
+
+def test_google_sheets_dedupe_not_recorded_after_failed_delivery(db_session):
+    class GoogleFailNotifier:
+        def __init__(self):
+            class Channel:
+                channel_name = "google_sheets"
+
+            self.channels = [Channel()]
+
+        async def send_listing_alert(self, message: str, payload: dict | None = None):
+            return []
+
+    search = make_search(db_session)
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=GoogleFailNotifier(),
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["alerted"] == 0
+    row = db_session.scalar(
+        select(AlertSent).where(AlertSent.dedupe_key == "google_sheets:new:2")
+    )
+    assert row is None
+
+
+def test_existing_listing_retries_google_sheets_after_previous_failure(db_session):
+    class GoogleFailNotifier:
+        def __init__(self):
+            class Channel:
+                channel_name = "google_sheets"
+
+            self.channels = [Channel()]
+            self.calls = 0
+
+        async def send_listing_alert(self, message: str, payload: dict | None = None):
+            self.calls += 1
+            return []
+
+    class GoogleSuccessNotifier:
+        def __init__(self):
+            class Channel:
+                channel_name = "google_sheets"
+
+            self.channels = [Channel()]
+            self.calls = 0
+
+        async def send_listing_alert(self, message: str, payload: dict | None = None):
+            self.calls += 1
+            return ["google_sheets"]
+
+    search = make_search(db_session)
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1")]]),
+            scorer=FakeScorer(),
+            notifier=FakeNotifier(),
+        ),
+        db_session,
+        search,
+    )
+
+    fail_notifier = GoogleFailNotifier()
+    fail_service = MonitorService(
+        parser=FakeParser([[card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=fail_notifier,
+    )
+    run(fail_service, db_session, search)
+
+    listing = db_session.scalar(select(Listing).where(Listing.external_id == "2"))
+    assert listing is not None
+    fail_row = db_session.scalar(
+        select(AlertSent).where(AlertSent.dedupe_key == "google_sheets:new:2")
+    )
+    assert fail_row is None
+
+    success_notifier = GoogleSuccessNotifier()
+    success_service = MonitorService(
+        parser=FakeParser([[card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=success_notifier,
+    )
+    run(success_service, db_session, search)
+
+    success_row = db_session.scalar(
+        select(AlertSent).where(AlertSent.dedupe_key == "google_sheets:new:2")
+    )
+    assert success_row is not None
+    assert success_notifier.calls == 1
+
+
+def test_retry_sends_only_pending_channels(db_session):
+    class Channel:
+        def __init__(self, name: str, should_succeed: bool):
+            self.channel_name = name
+            self.should_succeed = should_succeed
+            self.calls = 0
+
+        async def send_listing_alert(self, message: str, payload: dict | None = None):
+            self.calls += 1
+            if self.should_succeed:
+                return True
+            raise RuntimeError(f"{self.channel_name} failed")
+
+    class MultiNotifier:
+        def __init__(self, email_success: bool, sheets_success: bool):
+            self.email = Channel("email", email_success)
+            self.sheets = Channel("google_sheets", sheets_success)
+            self.channels = [self.email, self.sheets]
+
+    search = make_search(db_session)
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1")]]),
+            scorer=FakeScorer(),
+            notifier=FakeNotifier(),
+        ),
+        db_session,
+        search,
+    )
+
+    first_notifier = MultiNotifier(email_success=True, sheets_success=False)
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1"), card("2")]]),
+            scorer=FakeScorer(),
+            notifier=first_notifier,
+        ),
+        db_session,
+        search,
+    )
+    assert first_notifier.email.calls == 1
+    assert first_notifier.sheets.calls == 1
+
+    second_notifier = MultiNotifier(email_success=True, sheets_success=True)
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1"), card("2")]]),
+            scorer=FakeScorer(),
+            notifier=second_notifier,
+        ),
+        db_session,
+        search,
+    )
+    assert second_notifier.email.calls == 0
+    assert second_notifier.sheets.calls == 1
+
+
+def test_baseline_listing_price_change_creates_snapshot_without_new_alert(db_session):
+    search = make_search(db_session)
+    notifier = FakeNotifier()
+
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1", price=100.0)]]),
+            scorer=FakeScorer(),
+            notifier=notifier,
+        ),
+        db_session,
+        search,
+    )
+    result = run(
+        MonitorService(
+            parser=FakeParser([[card("1", price=130.0)]]),
+            scorer=FakeScorer(),
+            notifier=notifier,
+        ),
+        db_session,
+        search,
+    )
+
+    assert result["price_changed"] == 1
+    assert result["alerted"] == 0
+    assert scalar_count(db_session, ListingSnapshot) == 1
+    assert scalar_count(db_session, AlertSent) == 0
+
+
+def test_filtered_listing_not_alerted_later_after_price_change_snapshot(db_session):
+    search = make_search(db_session, filters_json={"max_price": 100.0})
+
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1", price=50.0)]]),
+            scorer=FakeScorer(),
+            notifier=FakeNotifier(),
+        ),
+        db_session,
+        search,
+    )
+
+    first_result = run(
+        MonitorService(
+            parser=FakeParser([[card("1", price=50.0), card("2", price=150.0)]]),
+            scorer=FakeScorer(),
+            notifier=FakeNotifier(),
+        ),
+        db_session,
+        search,
+    )
+    assert first_result["filtered"] == 1
+    assert scalar_count(db_session, AlertSent) == 0
+
+    class GoogleSuccessNotifier:
+        def __init__(self):
+            class Channel:
+                channel_name = "google_sheets"
+                calls = 0
+
+                async def send_listing_alert(self, message: str, payload: dict | None = None):
+                    self.calls += 1
+                    return True
+
+            self.channel = Channel()
+            self.channels = [self.channel]
+
+    notifier = GoogleSuccessNotifier()
+    second_result = run(
+        MonitorService(
+            parser=FakeParser([[card("1", price=50.0), card("2", price=160.0)]]),
+            scorer=FakeScorer(),
+            notifier=notifier,
+        ),
+        db_session,
+        search,
+    )
+    assert second_result["price_changed"] == 1
+    assert second_result["alerted"] == 0
+    assert notifier.channel.calls == 0
+
+
+def test_retry_uses_latest_scored_snapshot_when_newer_price_snapshot_has_no_llm(db_session):
+    class Channel:
+        def __init__(self, name: str, should_succeed: bool):
+            self.channel_name = name
+            self.should_succeed = should_succeed
+            self.calls = 0
+
+        async def send_listing_alert(self, message: str, payload: dict | None = None):
+            self.calls += 1
+            if self.should_succeed:
+                return True
+            raise RuntimeError(f"{self.channel_name} failed")
+
+    class MultiNotifier:
+        def __init__(self, email_success: bool, sheets_success: bool):
+            self.email = Channel("email", email_success)
+            self.sheets = Channel("google_sheets", sheets_success)
+            self.channels = [self.email, self.sheets]
+
+    search = make_search(db_session)
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1")]]),
+            scorer=FakeScorer(),
+            notifier=FakeNotifier(),
+        ),
+        db_session,
+        search,
+    )
+
+    first_notifier = MultiNotifier(email_success=True, sheets_success=False)
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1"), card("2", price=200.0)]]),
+            scorer=FakeScorer(),
+            notifier=first_notifier,
+        ),
+        db_session,
+        search,
+    )
+    assert first_notifier.email.calls == 1
+    assert first_notifier.sheets.calls == 1
+
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1"), card("2", price=220.0)]]),
+            scorer=FakeScorer(),
+            notifier=FakeNotifier(),
+        ),
+        db_session,
+        search,
+    )
+
+    retry_notifier = MultiNotifier(email_success=True, sheets_success=True)
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1"), card("2", price=220.0)]]),
+            scorer=FakeScorer(),
+            notifier=retry_notifier,
+        ),
+        db_session,
+        search,
+    )
+
+    row = db_session.scalar(
+        select(AlertSent).where(AlertSent.dedupe_key == "google_sheets:new:2")
+    )
+    assert row is not None
+    assert retry_notifier.email.calls == 0
+    assert retry_notifier.sheets.calls == 1

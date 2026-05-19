@@ -2,8 +2,12 @@ import asyncio
 import json
 from pathlib import Path
 
+import httpx
+import pytest
+
 from app.notifiers.composite import CompositeNotifier
 from app.notifiers.email import EmailNotifier
+from app.notifiers.google_sheets_webhook import GoogleSheetsWebhookNotifier
 from app.notifiers.jsonl_outbox import JsonlOutboxNotifier
 
 
@@ -78,3 +82,86 @@ def test_composite_continues_when_one_channel_fails():
     notifier = CompositeNotifier([Bad(), Ok()])
     sent = asyncio.run(notifier.send_listing_alert("msg", {}))
     assert sent == ["jsonl"]
+
+
+def test_google_sheets_webhook_noop_when_disabled():
+    notifier = GoogleSheetsWebhookNotifier(enabled=False, webhook_url="https://example.com")
+    asyncio.run(notifier.send_listing_alert("hello", {}))
+
+
+def test_google_sheets_webhook_posts_expected_json(monkeypatch):
+    captured = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(handler)
+
+    class FakeClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    import app.notifiers.google_sheets_webhook as module
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", FakeClient)
+    notifier = GoogleSheetsWebhookNotifier(
+        enabled=True,
+        webhook_url="https://example.com/webhook",
+        secret="top",
+        timeout_sec=5,
+    )
+    payload = {"search_name": "s", "external_id": "1", "title": "T", "price": 10, "area_m2": 20, "rooms": "2", "address": "A", "published_label": "today", "published_at": "2025-01-01T00:00:00", "url": "u", "summary": "sum", "score": 90, "tags": ["hot"]}
+    asyncio.run(notifier.send_listing_alert("msg", payload))
+
+    assert captured["url"] == "https://example.com/webhook"
+    assert captured["body"]["secret"] == "top"
+    assert captured["body"]["external_id"] == "1"
+    assert captured["body"]["message"] == "msg"
+    assert "sent_at" in captured["body"]
+
+
+def test_google_sheets_webhook_raises_on_non_2xx(monkeypatch):
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"ok": True})
+
+    transport = httpx.MockTransport(handler)
+
+    class FakeClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    import app.notifiers.google_sheets_webhook as module
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", FakeClient)
+    notifier = GoogleSheetsWebhookNotifier(enabled=True, webhook_url="https://example.com")
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(notifier.send_listing_alert("msg", {}))
+
+
+def test_google_sheets_webhook_raises_on_ok_false(monkeypatch):
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": False})
+
+    transport = httpx.MockTransport(handler)
+
+    class FakeClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    import app.notifiers.google_sheets_webhook as module
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", FakeClient)
+    notifier = GoogleSheetsWebhookNotifier(enabled=True, webhook_url="https://example.com")
+    with pytest.raises(RuntimeError, match="ok=false"):
+        asyncio.run(notifier.send_listing_alert("msg", {}))
+
+
+def test_composite_does_not_mark_google_sheets_success_when_disabled():
+    notifier = CompositeNotifier([GoogleSheetsWebhookNotifier(enabled=False, webhook_url="https://example.com")])
+    sent = asyncio.run(notifier.send_listing_alert("msg", {}))
+    assert sent == []
