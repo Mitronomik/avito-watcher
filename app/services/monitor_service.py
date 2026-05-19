@@ -496,9 +496,9 @@ class MonitorService:
     def run_all_searches(self) -> list[dict]:
         """Run all due searches sequentially in a single event loop.
 
-        Using a single loop (instead of one runner per search) means the
-        AvitoParser reuses the same browser session across searches in one cycle,
-        avoiding N concurrent Chromium processes.
+        Using a single loop (instead of one runner per search) executes
+        searches sequentially in one asyncio cycle and avoids running them
+        concurrently from this service method.
         """
         loop = asyncio.new_event_loop()
         try:
