@@ -125,118 +125,118 @@ def _nodriver_proxy_args(proxy_url: str | None) -> list[str]:
     return [f"--proxy-server={scheme}://{hostport}"]
 
 
+
+
+class _NodriverSession:
+    def __init__(self, uc_module, browser):
+        self._uc = uc_module
+        self._browser = browser
+
+    async def fetch(self, url: str) -> dict:
+        try:
+            _ = await self._browser.get("https://www.avito.ru/")
+            await asyncio.sleep(random.uniform(2.0, 4.0))
+            page = await self._browser.get(url)
+            await asyncio.sleep(random.uniform(3.0, 6.0))
+            title: str = await page.evaluate("document.title") or ""
+            body: str = await page.evaluate("document.body.innerText") or ""
+            html: str = await page.get_content() or ""
+            if _is_blocked(title, body):
+                return {"ok": False, "engine": "nodriver", "error_type": "possible_captcha_or_block"}
+            cards_count: int = await page.evaluate("document.querySelectorAll('[data-marker=\"item\"]').length")
+            return {"ok": True, "engine": "nodriver", "html": html, "cards_count": cards_count}
+        except Exception as exc:
+            return {"ok": False, "engine": "nodriver", "error_type": "exception", "error": str(exc)}
+
+    def close(self) -> None:
+        self._browser.stop()
+
+
+class _CamoufoxSession:
+    def __init__(self, browser, page):
+        self._browser = browser
+        self._page = page
+
+    async def fetch(self, url: str) -> dict:
+        try:
+            await self._page.goto("https://www.avito.ru/", wait_until="domcontentloaded")
+            await asyncio.sleep(random.uniform(2.0, 4.0))
+            await self._page.goto(url, wait_until="domcontentloaded")
+            await asyncio.sleep(random.uniform(3.0, 6.0))
+            title = await self._page.title() or ""
+            body = (await self._page.locator("body").first.text_content()) or ""
+            html = await self._page.content() or ""
+            if _is_blocked(title, body):
+                return {"ok": False, "engine": "camoufox", "error_type": "possible_captcha_or_block"}
+            cards_count = await self._page.locator('[data-marker="item"]').count()
+            return {"ok": True, "engine": "camoufox", "html": html, "cards_count": cards_count}
+        except Exception as exc:
+            return {"ok": False, "engine": "camoufox", "error_type": "exception", "error": str(exc)}
+
+    async def close(self) -> None:
+        await self._browser.__aexit__(None, None, None)
+
+
+async def open_nodriver_session(proxy_url: Optional[str]):
+    import nodriver as uc  # noqa: PLC0415
+    args=["--lang=ru-RU","--window-size=1920,1080","--disable-blink-features=AutomationControlled"]
+    if proxy_url:
+        args.extend(_nodriver_proxy_args(proxy_url))
+    import os as _os
+    _headless = _os.getenv("SCRAPE_HEADLESS", "false").lower() in ("true", "1")
+    browser = await uc.start(headless=_headless, browser_args=args)
+    tab = browser.main_tab
+    if tab is None:
+        _ = await browser.get("about:blank")
+        tab = browser.main_tab
+    if tab is not None:
+        await tab.send(uc.cdp.page.add_script_to_evaluate_on_new_document(source=_STEALTH_INIT_SCRIPT))
+    if proxy_url and "@" in proxy_url and tab is not None:
+        creds_part = proxy_url.split("://", 1)[1].rsplit("@", 1)[0]
+        user, password = creds_part.split(":", 1)
+        await tab.send(uc.cdp.fetch.enable(handle_auth_requests=True))
+        async def _auth_handler(event: uc.cdp.fetch.AuthRequired) -> None:  # type: ignore[name-defined]
+            await tab.send(uc.cdp.fetch.continue_with_auth(request_id=event.request_id,auth_challenge_response=uc.cdp.fetch.AuthChallengeResponse(response="ProvideCredentials",username=user,password=password)))
+        tab.add_handler(uc.cdp.fetch.AuthRequired, _auth_handler)
+    return _NodriverSession(uc, browser)
+
+
+async def open_camoufox_session(proxy_url: Optional[str]):
+    from camoufox.async_api import AsyncCamoufox  # noqa: PLC0415
+    proxy_cfg = _parse_proxy_url(proxy_url) if proxy_url else None
+    import os as _os_cf
+    _cf_headless = "virtual" if _os_cf.getenv("SCRAPE_HEADLESS", "false").lower() in ("true", "1") else False
+    browser_cm = AsyncCamoufox(headless=_cf_headless, proxy=proxy_cfg)
+    browser = await browser_cm.__aenter__()
+    page = await browser.new_page()
+    await page.add_init_script(_STEALTH_INIT_SCRIPT)
+    return _CamoufoxSession(browser_cm, page)
+
 # ---------------------------------------------------------------------------
 # nodriver backend
 # ---------------------------------------------------------------------------
 
 async def fetch_with_nodriver(url: str, proxy_url: Optional[str]) -> dict:
-    """Fetch url with nodriver (Chrome/CDP, no WebDriver flag).
-
-    Returns dict with keys: ok, engine, html (on success) or error_type, error (on failure).
-    """
+    """Fetch url with nodriver (Chrome/CDP, no WebDriver flag)."""
     try:
-        import nodriver as uc  # noqa: PLC0415
+        import nodriver as uc  # noqa: PLC0415,F401
     except ImportError:
-        return {"ok": False, "engine": "nodriver",
-                "error_type": "import_error",
-                "error": "nodriver not installed. Run: pip install nodriver"}
+        return {"ok": False, "engine": "nodriver", "error_type": "import_error", "error": "nodriver not installed. Run: pip install nodriver"}
 
-    args = [
-        "--lang=ru-RU",
-        "--window-size=1920,1080",
-        "--disable-blink-features=AutomationControlled",
-    ]
-    if proxy_url:
-        args.extend(_nodriver_proxy_args(proxy_url))
-
-    browser = None
+    session = None
     try:
-        import os as _os
-        _headless = _os.getenv("SCRAPE_HEADLESS", "false").lower() in ("true", "1")
-        browser = await uc.start(headless=_headless, browser_args=args)
-
-        # Ensure we have a tab object before any network navigation.
-        # If main_tab is not ready right after start, create a local about:blank tab first.
-        tab = browser.main_tab
-        if tab is None:
-            _ = await browser.get("about:blank")
-            tab = browser.main_tab
-
-        # Inject stealth script so it runs on every new page before any avito.ru navigation.
-        if tab is not None:
-            try:
-                await tab.send(
-                    uc.cdp.page.add_script_to_evaluate_on_new_document(source=_STEALTH_INIT_SCRIPT)
-                )
-            except Exception as _patch_exc:
-                logger.debug("[browser_engine] nodriver: stealth init-script skipped: %s", _patch_exc)
-        else:
-            logger.warning(
-                "[browser_engine] nodriver: main_tab is None before warmup, "
-                "stealth init-script was not injected"
-            )
-
-        # Set up proxy auth handler if credentials present.
-        # Must be installed before the first avito.ru navigation.
-        if proxy_url and "@" in proxy_url:
-            creds_part = proxy_url.split("://", 1)[1].rsplit("@", 1)[0]
-            user, password = creds_part.split(":", 1)
-            if tab is not None:
-                try:
-                    await tab.send(uc.cdp.fetch.enable(handle_auth_requests=True))
-
-                    async def _auth_handler(event: uc.cdp.fetch.AuthRequired) -> None:  # type: ignore[name-defined]
-                        await tab.send(
-                            uc.cdp.fetch.continue_with_auth(
-                                request_id=event.request_id,
-                                auth_challenge_response=uc.cdp.fetch.AuthChallengeResponse(
-                                    response="ProvideCredentials",
-                                    username=user,
-                                    password=password,
-                                ),
-                            )
-                        )
-                    tab.add_handler(uc.cdp.fetch.AuthRequired, _auth_handler)
-                except Exception as _auth_exc:
-                    logger.warning(
-                        "[browser_engine] nodriver: proxy auth handler setup failed: %s",
-                        _auth_exc,
-                    )
-            else:
-                logger.warning(
-                    "[browser_engine] nodriver: main_tab is None before warmup, "
-                    "proxy auth credentials will not be injected"
-                )
-
-        # Warmup: land on homepage first to build cookies.
-        _ = await browser.get("https://www.avito.ru/")
-        await asyncio.sleep(random.uniform(2.0, 4.0))
-
-        # Target page
-        page = await browser.get(url)
-        await asyncio.sleep(random.uniform(3.0, 6.0))
-
-        title: str = await page.evaluate("document.title") or ""
-        body: str = await page.evaluate("document.body.innerText") or ""
-        html: str = await page.get_content() or ""
-
-        if _is_blocked(title, body):
-            logger.warning("[browser_engine] nodriver: block detected title=%r", title[:80])
-            return {"ok": False, "engine": "nodriver", "error_type": "possible_captcha_or_block"}
-
-        cards_count: int = await page.evaluate(
-            "document.querySelectorAll('[data-marker=\"item\"]').length"
-        )
-        logger.info("[browser_engine] nodriver: ok, cards=%d", cards_count)
-        return {"ok": True, "engine": "nodriver", "html": html, "cards_count": cards_count}
-
+        session = await open_nodriver_session(proxy_url)
+        result = await session.fetch(url)
+        if result.get("ok"):
+            logger.info("[browser_engine] nodriver: ok, cards=%d", result.get("cards_count", 0))
+        return result
     except Exception as exc:
         logger.warning("[browser_engine] nodriver exception: %s", exc)
         return {"ok": False, "engine": "nodriver", "error_type": "exception", "error": str(exc)}
     finally:
-        if browser is not None:
+        if session is not None:
             try:
-                browser.stop()
+                session.close()
             except Exception:
                 pass
 
@@ -251,51 +251,27 @@ async def fetch_with_camoufox(url: str, proxy_url: Optional[str]) -> dict:
     Returns same schema as fetch_with_nodriver.
     """
     try:
-        from camoufox.async_api import AsyncCamoufox  # noqa: PLC0415
+        __import__("camoufox.async_api")
     except ImportError:
         return {"ok": False, "engine": "camoufox",
                 "error_type": "import_error",
                 "error": "camoufox not installed. Run: pip install 'camoufox[geoip]' && python -m camoufox fetch"}
 
-    proxy_cfg = _parse_proxy_url(proxy_url) if proxy_url else None
-
+    session = None
     try:
-        import os as _os_cf
-        _cf_headless = "virtual" if _os_cf.getenv("SCRAPE_HEADLESS", "false").lower() in ("true", "1") else False
-        async with AsyncCamoufox(headless=_cf_headless, proxy=proxy_cfg) as browser:
-            page = await browser.new_page()
+        session = await open_camoufox_session(proxy_url)
 
-            # Inject stealth patches before any navigation
-            await page.add_init_script(_STEALTH_INIT_SCRIPT)
-
-            # Set geolocation to Saint Petersburg — must match proxy IP region.
-            # Uses standard Playwright BrowserContext API available in camoufox.
-            try:
-                await page.context.grant_permissions(["geolocation"])
-                await page.context.set_geolocation({"latitude": 59.9386, "longitude": 30.3141})
-            except Exception as _geo_exc:
-                logger.debug("[browser_engine] camoufox: geolocation setup skipped: %s", _geo_exc)
-
-            # Warmup
-            await page.goto("https://www.avito.ru/", wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(2.0, 4.0))
-
-            # Target page
-            await page.goto(url, wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(3.0, 6.0))
-
-            title: str = await page.title() or ""
-            body: str = (await page.locator("body").first.text_content()) or ""
-            html: str = await page.content() or ""
-
-            if _is_blocked(title, body):
-                logger.warning("[browser_engine] camoufox: block detected title=%r", title[:80])
-                return {"ok": False, "engine": "camoufox", "error_type": "possible_captcha_or_block"}
-
-            cards_count: int = await page.locator('[data-marker="item"]').count()
-            logger.info("[browser_engine] camoufox: ok, cards=%d", cards_count)
-            return {"ok": True, "engine": "camoufox", "html": html, "cards_count": cards_count}
+        result = await session.fetch(url)
+        if result.get("ok"):
+            logger.info("[browser_engine] camoufox: ok, cards=%d", result.get("cards_count", 0))
+        return result
 
     except Exception as exc:
         logger.warning("[browser_engine] camoufox exception: %s", exc)
         return {"ok": False, "engine": "camoufox", "error_type": "exception", "error": str(exc)}
+    finally:
+        if session is not None:
+            try:
+                await session.close()
+            except Exception:
+                pass

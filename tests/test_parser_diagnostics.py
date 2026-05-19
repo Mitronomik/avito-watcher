@@ -19,6 +19,7 @@ from tests.test_baseline_monitor import (
     FakeParser,
     FakeScorer,
     make_search,
+    patch_session_local,
     scalar_count,
 )
 
@@ -409,3 +410,29 @@ def test_missing_cards_flow_defaults_to_layout_changed():
             asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry"))
 
     assert exc_info.value.error_type == ParserErrorType.LAYOUT_CHANGED
+
+def test_run_all_searches_wraps_parser_cycle_hooks_on_exception(monkeypatch, db_session):
+    class ParserWithCycle:
+        def __init__(self):
+            self.begin_calls = 0
+            self.end_calls = 0
+
+        async def begin_cycle(self):
+            self.begin_calls += 1
+
+        async def end_cycle(self):
+            self.end_calls += 1
+
+        async def fetch_search_cards(self, _search_url):
+            raise RuntimeError("boom")
+
+    parser = ParserWithCycle()
+    service = MonitorService(parser=parser, scorer=FakeScorer(), notifier=FakeNotifier())
+    make_search(db_session, name="boom")
+    patch_session_local(monkeypatch, db_session)
+
+    results = service.run_all_searches()
+
+    assert len(results) == 1
+    assert parser.begin_calls == 1
+    assert parser.end_calls == 1

@@ -16,6 +16,12 @@ class FakeParser:
         self.batches = list(batches)
         self.calls = 0
 
+    async def begin_cycle(self):
+        return None
+
+    async def end_cycle(self):
+        return None
+
     async def fetch_search_cards(self, search_url: str):
         self.calls += 1
         assert search_url

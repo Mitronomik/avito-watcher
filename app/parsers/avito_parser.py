@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from urllib.parse import urljoin, urlparse
 
 from app.parsers.block_signals import looks_like_block_or_captcha
-from app.parsers.browser_engine import fetch_with_camoufox, fetch_with_nodriver
+from app.parsers.browser_engine import fetch_with_camoufox, fetch_with_nodriver, open_camoufox_session, open_nodriver_session
 from app.parsers.errors import ParserError, ParserErrorType
 from app.parsers.proxy_manager import ProxyManager
 from app.parsers.schemas import ListingCard
@@ -99,14 +99,45 @@ class AvitoParser:
         self.now_func = now_func or (lambda: datetime.now(UTC))
         self._proxy_manager = proxy_manager
         self._prefer_engine = _Engine.NODRIVER
+        self._engine_sessions: dict[tuple[_Engine, str | None], object] = {}
+        self._cycle_active = False
 
     def _now(self) -> datetime:
         return self.now_func()
 
     async def _try_engine(self, url: str, proxy_url: str | None, engine: _Engine) -> dict:
+        session = self._engine_sessions.get((engine, proxy_url))
+        if session is not None:
+            return await session.fetch(url)
         if engine == _Engine.NODRIVER:
             return await fetch_with_nodriver(url, proxy_url)
         return await fetch_with_camoufox(url, proxy_url)
+
+    async def begin_cycle(self) -> None:
+        self._cycle_active = True
+
+    async def end_cycle(self) -> None:
+        self._cycle_active = False
+        sessions = list(self._engine_sessions.values())
+        self._engine_sessions.clear()
+        for session in sessions:
+            close = getattr(session, "close", None)
+            if close is None:
+                continue
+            result = close()
+            if hasattr(result, "__await__"):
+                await result
+
+    async def ensure_engine_session(self, engine: _Engine, proxy_url: str | None) -> None:
+        if not self._cycle_active:
+            return
+        key = (engine, proxy_url)
+        if key in self._engine_sessions:
+            return
+        if engine == _Engine.NODRIVER:
+            self._engine_sessions[key] = await open_nodriver_session(proxy_url)
+        else:
+            self._engine_sessions[key] = await open_camoufox_session(proxy_url)
 
     async def _fetch_page_html(self, url: str) -> str:
         """Fetch raw HTML using stealth engine with Nodriver→Camoufox fallback.
@@ -123,6 +154,7 @@ class AvitoParser:
             proxy_url = self._proxy_manager.get_proxy()
 
         # First attempt
+        await self.ensure_engine_session(self._prefer_engine, proxy_url)
         result = await self._try_engine(url, proxy_url, self._prefer_engine)
         if result["ok"]:
             if proxy_url and self._proxy_manager:
@@ -145,6 +177,7 @@ class AvitoParser:
         )
 
         # Fallback attempt
+        await self.ensure_engine_session(fallback, proxy_url)
         result2 = await self._try_engine(url, proxy_url, fallback)
         if result2["ok"]:
             if proxy_url and self._proxy_manager:

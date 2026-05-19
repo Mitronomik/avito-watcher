@@ -508,17 +508,21 @@ class MonitorService:
 
     async def _run_all_searches_async(self) -> list[dict]:
         """Async core of run_all_searches — runs all due searches sequentially."""
-        with SessionLocal() as db:
-            repo = SearchRepository(db)
-            searches = repo.list_due_active(_utcnow())
-            results = []
-            for search in searches:
-                try:
-                    result = await self.process_search(db, search)
-                except Exception as exc:
-                    logger.exception("search check failed", extra={"search": search.name})
-                    result = {"search": search.name, "error": str(exc)}
-                else:
-                    result["search"] = search.name
-                results.append(result)
-            return results
+        await self.parser.begin_cycle()
+        try:
+            with SessionLocal() as db:
+                repo = SearchRepository(db)
+                searches = repo.list_due_active(_utcnow())
+                results = []
+                for search in searches:
+                    try:
+                        result = await self.process_search(db, search)
+                    except Exception as exc:
+                        logger.exception("search check failed", extra={"search": search.name})
+                        result = {"search": search.name, "error": str(exc)}
+                    else:
+                        result["search"] = search.name
+                    results.append(result)
+                return results
+        finally:
+            await self.parser.end_cycle()
