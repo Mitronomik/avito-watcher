@@ -155,20 +155,26 @@ async def fetch_with_nodriver(url: str, proxy_url: Optional[str]) -> dict:
         _headless = _os.getenv("SCRAPE_HEADLESS", "false").lower() in ("true", "1")
         browser = await uc.start(headless=_headless, browser_args=args)
 
-        # Inject stealth script so it runs on every new page before any navigation
-        try:
-            await browser.main_tab.send(
-                uc.cdp.page.add_script_to_evaluate_on_new_document(source=_STEALTH_INIT_SCRIPT)
-            )
-        except Exception as _patch_exc:
-            logger.debug("[browser_engine] nodriver: stealth init-script skipped: %s", _patch_exc)
-
         # Ensure we have a tab object before any network navigation.
         # If main_tab is not ready right after start, create a local about:blank tab first.
         tab = browser.main_tab
         if tab is None:
             _ = await browser.get("about:blank")
             tab = browser.main_tab
+
+        # Inject stealth script so it runs on every new page before any avito.ru navigation.
+        if tab is not None:
+            try:
+                await tab.send(
+                    uc.cdp.page.add_script_to_evaluate_on_new_document(source=_STEALTH_INIT_SCRIPT)
+                )
+            except Exception as _patch_exc:
+                logger.debug("[browser_engine] nodriver: stealth init-script skipped: %s", _patch_exc)
+        else:
+            logger.warning(
+                "[browser_engine] nodriver: main_tab is None before warmup, "
+                "stealth init-script was not injected"
+            )
 
         # Set up proxy auth handler if credentials present.
         # Must be installed before the first avito.ru navigation.

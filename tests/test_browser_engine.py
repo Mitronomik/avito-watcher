@@ -68,6 +68,8 @@ def test_nodriver_proxy_auth_is_configured_before_first_avito_navigation(monkeyp
 
     class FakeTab:
         async def send(self, command):
+            if command[0] == "page.script":
+                events.append("page.script")
             if command[0] == "fetch.enable":
                 events.append("fetch.enable")
             return None
@@ -130,5 +132,7 @@ def test_nodriver_proxy_auth_is_configured_before_first_avito_navigation(monkeyp
     )
 
     assert result["ok"] is True
+    assert "page.script" in events
     assert "fetch.enable" in events
+    assert events.index("page.script") < events.index("nav:https://www.avito.ru/")
     assert events.index("fetch.enable") < events.index("nav:https://www.avito.ru/")
