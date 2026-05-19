@@ -155,26 +155,32 @@ async def fetch_with_nodriver(url: str, proxy_url: Optional[str]) -> dict:
         _headless = _os.getenv("SCRAPE_HEADLESS", "false").lower() in ("true", "1")
         browser = await uc.start(headless=_headless, browser_args=args)
 
-        # Inject stealth script so it runs on every new page before any navigation
-        try:
-            await browser.main_tab.send(
-                uc.cdp.page.add_script_to_evaluate_on_new_document(source=_STEALTH_INIT_SCRIPT)
-            )
-        except Exception as _patch_exc:
-            logger.debug("[browser_engine] nodriver: stealth init-script skipped: %s", _patch_exc)
+        # Ensure we have a tab object before any network navigation.
+        # If main_tab is not ready right after start, create a local about:blank tab first.
+        tab = browser.main_tab
+        if tab is None:
+            _ = await browser.get("about:blank")
+            tab = browser.main_tab
 
-        # Warmup: land on homepage first to build cookies.
-        # NOTE: proxy auth handler must be installed AFTER the first navigation
-        # because nodriver creates main_tab lazily on the first browser.get() call.
-        # Installing it before that returns None and raises AttributeError.
-        _ = await browser.get("https://www.avito.ru/")
+        # Inject stealth script so it runs on every new page before any avito.ru navigation.
+        if tab is not None:
+            try:
+                await tab.send(
+                    uc.cdp.page.add_script_to_evaluate_on_new_document(source=_STEALTH_INIT_SCRIPT)
+                )
+            except Exception as _patch_exc:
+                logger.debug("[browser_engine] nodriver: stealth init-script skipped: %s", _patch_exc)
+        else:
+            logger.warning(
+                "[browser_engine] nodriver: main_tab is None before warmup, "
+                "stealth init-script was not injected"
+            )
 
         # Set up proxy auth handler if credentials present.
-        # Tab is now guaranteed to exist after the get() call above.
+        # Must be installed before the first avito.ru navigation.
         if proxy_url and "@" in proxy_url:
             creds_part = proxy_url.split("://", 1)[1].rsplit("@", 1)[0]
             user, password = creds_part.split(":", 1)
-            tab = browser.main_tab
             if tab is not None:
                 try:
                     await tab.send(uc.cdp.fetch.enable(handle_auth_requests=True))
@@ -198,9 +204,12 @@ async def fetch_with_nodriver(url: str, proxy_url: Optional[str]) -> dict:
                     )
             else:
                 logger.warning(
-                    "[browser_engine] nodriver: main_tab is None after warmup, "
+                    "[browser_engine] nodriver: main_tab is None before warmup, "
                     "proxy auth credentials will not be injected"
                 )
+
+        # Warmup: land on homepage first to build cookies.
+        _ = await browser.get("https://www.avito.ru/")
         await asyncio.sleep(random.uniform(2.0, 4.0))
 
         # Target page
