@@ -214,16 +214,21 @@ class MonitorService:
         }
 
     def _retry_context_from_snapshot(self, db: Session, card: ListingCard) -> tuple[str, dict] | None:
-        snapshot = (
+        snapshots = (
             db.query(ListingSnapshot)
             .filter(ListingSnapshot.external_id == card.external_id)
             .order_by(ListingSnapshot.id.desc())
-            .first()
+            .all()
         )
-        if snapshot is None:
-            return None
-        llm = snapshot.payload_json.get("llm_score") if isinstance(snapshot.payload_json, dict) else None
-        if not isinstance(llm, dict):
+        llm = None
+        for snapshot in snapshots:
+            if not isinstance(snapshot.payload_json, dict):
+                continue
+            candidate = snapshot.payload_json.get("llm_score")
+            if isinstance(candidate, dict):
+                llm = candidate
+                break
+        if llm is None:
             return None
 
         summary = llm.get("summary", "")

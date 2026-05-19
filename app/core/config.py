@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     scrape_timeout_ms: int = 45000
     scrape_concurrency: int = 2
     proxy_urls: str = ""
-    alert_channels: str = "telegram"
+    alert_channels: str = "jsonl,telegram"
     email_enabled: bool = False
     smtp_host: str = ""
     smtp_port: int = 465

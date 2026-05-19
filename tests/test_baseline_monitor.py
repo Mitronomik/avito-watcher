@@ -1050,3 +1050,75 @@ def test_filtered_listing_not_alerted_later_after_price_change_snapshot(db_sessi
     assert second_result["price_changed"] == 1
     assert second_result["alerted"] == 0
     assert notifier.channel.calls == 0
+
+
+def test_retry_uses_latest_scored_snapshot_when_newer_price_snapshot_has_no_llm(db_session):
+    class Channel:
+        def __init__(self, name: str, should_succeed: bool):
+            self.channel_name = name
+            self.should_succeed = should_succeed
+            self.calls = 0
+
+        async def send_listing_alert(self, message: str, payload: dict | None = None):
+            self.calls += 1
+            if self.should_succeed:
+                return True
+            raise RuntimeError(f"{self.channel_name} failed")
+
+    class MultiNotifier:
+        def __init__(self, email_success: bool, sheets_success: bool):
+            self.email = Channel("email", email_success)
+            self.sheets = Channel("google_sheets", sheets_success)
+            self.channels = [self.email, self.sheets]
+
+    search = make_search(db_session)
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1")]]),
+            scorer=FakeScorer(),
+            notifier=FakeNotifier(),
+        ),
+        db_session,
+        search,
+    )
+
+    first_notifier = MultiNotifier(email_success=True, sheets_success=False)
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1"), card("2", price=200.0)]]),
+            scorer=FakeScorer(),
+            notifier=first_notifier,
+        ),
+        db_session,
+        search,
+    )
+    assert first_notifier.email.calls == 1
+    assert first_notifier.sheets.calls == 1
+
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1"), card("2", price=220.0)]]),
+            scorer=FakeScorer(),
+            notifier=FakeNotifier(),
+        ),
+        db_session,
+        search,
+    )
+
+    retry_notifier = MultiNotifier(email_success=True, sheets_success=True)
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1"), card("2", price=220.0)]]),
+            scorer=FakeScorer(),
+            notifier=retry_notifier,
+        ),
+        db_session,
+        search,
+    )
+
+    row = db_session.scalar(
+        select(AlertSent).where(AlertSent.dedupe_key == "google_sheets:new:2")
+    )
+    assert row is not None
+    assert retry_notifier.email.calls == 0
+    assert retry_notifier.sheets.calls == 1
