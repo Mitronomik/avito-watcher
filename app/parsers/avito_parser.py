@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 from urllib.parse import urljoin, urlparse
 
+from app.parsers.block_signals import looks_like_block_or_captcha
 from app.parsers.browser_engine import fetch_with_camoufox, fetch_with_nodriver
 from app.parsers.errors import ParserError, ParserErrorType
 from app.parsers.proxy_manager import ProxyManager
@@ -18,19 +19,6 @@ if TYPE_CHECKING:
 CARD_LIMIT = 30
 CARD_SELECTOR = '[data-marker="item"]'
 AVITO_HOST_SUFFIX = "avito.ru"
-BLOCK_KEYWORDS = (
-    "captcha",
-    "капча",
-    "подтвердите, что вы не робот",
-    "проверка безопасности",
-    "доступ ограничен",
-    "доступ заблокирован",
-    "слишком много запросов",
-    "too many requests",
-    "access denied",
-    "verify you are human",
-    "robot check",
-)
 EMPTY_RESULTS_KEYWORDS = (
     "ничего не найдено",
     "нет результатов",
@@ -265,8 +253,7 @@ class AvitoParser:
 
     @staticmethod
     def _looks_like_captcha_or_block(title: str, body_text: str) -> bool:
-        content = f"{title}\n{body_text}".lower()
-        return any(keyword in content for keyword in BLOCK_KEYWORDS)
+        return looks_like_block_or_captcha(title, body_text)
 
     @staticmethod
     def _looks_like_empty_results(body_text: str) -> bool:

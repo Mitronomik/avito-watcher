@@ -2,6 +2,7 @@ import asyncio
 import sys
 from types import ModuleType, SimpleNamespace
 
+from app.parsers.block_signals import looks_like_block_or_captcha
 from app.parsers.browser_engine import _is_blocked, _nodriver_proxy_args, _parse_proxy_url
 from app.parsers.browser_engine import fetch_with_nodriver
 
@@ -16,6 +17,23 @@ def test_nodriver_proxy_args_plain_proxy():
     args = _nodriver_proxy_args(url)
 
     assert args == ["--proxy-server=http://1.2.3.4:8080"]
+
+
+def test_nodriver_proxy_args_https_proxy():
+    url = "https://1.2.3.4:8080"
+
+    args = _nodriver_proxy_args(url)
+
+    assert args == ["--proxy-server=https://1.2.3.4:8080"]
+
+
+def test_nodriver_proxy_args_unsupported_scheme_logs_warning(caplog):
+    url = "socks5://1.2.3.4:1080"
+
+    args = _nodriver_proxy_args(url)
+
+    assert args == []
+    assert "unsupported proxy scheme" in caplog.text
 
 
 def test_nodriver_proxy_args_proxy_with_at_sign_in_password():
@@ -37,6 +55,10 @@ def test_is_blocked_on_normal_html():
     html = "<html><body><div data-marker='item'>Normal listing</div></body></html>"
 
     assert _is_blocked("", html) is False
+
+
+def test_shared_block_signal_helper_detects_block_phrase():
+    assert looks_like_block_or_captcha("", "verify you are human") is True
 
 def test_parse_proxy_url_without_credentials():
     result = _parse_proxy_url("http://1.2.3.4:8080")

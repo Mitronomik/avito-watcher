@@ -5,19 +5,11 @@ import asyncio
 import logging
 import random
 from typing import Optional
+from urllib.parse import urlsplit
+
+from app.parsers.block_signals import looks_like_block_or_captcha
 
 logger = logging.getLogger(__name__)
-
-# Block-detection signals (Russian + English Avito error pages)
-BLOCK_SIGNALS = (
-    "проблема с ip",
-    "доступ ограничен",
-    "captcha",
-    "robot check",
-    "access denied",
-    "blocked",
-    "временно недоступен",
-)
 
 # ---------------------------------------------------------------------------
 # JS stealth init-script — patches navigator properties detectable by Avito UBA.
@@ -97,8 +89,7 @@ _STEALTH_INIT_SCRIPT = """
 # ---------------------------------------------------------------------------
 
 def _is_blocked(title: str, body: str) -> bool:
-    text = (title + " " + body[:3000]).lower()
-    return any(sig in text for sig in BLOCK_SIGNALS)
+    return looks_like_block_or_captcha(title, body, body_limit=3000)
 
 
 def _parse_proxy_url(proxy_url: str) -> dict:
@@ -112,17 +103,26 @@ def _parse_proxy_url(proxy_url: str) -> dict:
 
 
 def _nodriver_proxy_args(proxy_url: str | None) -> list[str]:
-    """Return --proxy-server arg list for nodriver launch."""
+    """Return --proxy-server arg list for nodriver launch.
+
+    Nodriver flow is currently validated only for HTTP(S) proxies.
+    Unsupported schemes are ignored with a warning instead of being silently coerced.
+    """
     if proxy_url is None:
         return []
-    if "@" in proxy_url:
-        # strip auth from URL for the flag; auth handled by CDP handler
-        proto, rest = proxy_url.split("://", 1)
-        hostport = rest.rsplit("@", 1)[1]
-        return [f"--proxy-server=http://{hostport}"]
-    else:
-        proto, hostport = proxy_url.split("://", 1)
-        return [f"--proxy-server=http://{hostport}"]
+
+    parsed = urlsplit(proxy_url)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        logger.warning(
+            "[browser_engine] nodriver: unsupported proxy scheme %r for %s; only http/https are supported",
+            scheme,
+            proxy_url,
+        )
+        return []
+
+    hostport = parsed.netloc.rsplit("@", 1)[-1]
+    return [f"--proxy-server={scheme}://{hostport}"]
 
 
 # ---------------------------------------------------------------------------
@@ -261,11 +261,7 @@ async def fetch_with_camoufox(url: str, proxy_url: Optional[str]) -> dict:
 
     try:
         import os as _os_cf
-        _cf_headless = (
-            False
-            if _os_cf.getenv("SCRAPE_HEADLESS", "false").lower() not in ("true", "1")
-            else "virtual"
-        )
+        _cf_headless = "virtual" if _os_cf.getenv("SCRAPE_HEADLESS", "false").lower() in ("true", "1") else False
         async with AsyncCamoufox(headless=_cf_headless, proxy=proxy_cfg) as browser:
             page = await browser.new_page()
 
