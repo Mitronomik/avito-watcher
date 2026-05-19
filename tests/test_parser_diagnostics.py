@@ -174,6 +174,31 @@ def test_fetch_page_html_both_engines_blocked_raises():
     assert exc_info.value.error_type == ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK
 
 
+
+
+def test_fetch_page_html_cycle_mode_nodriver_session_open_failure_falls_back(monkeypatch):
+    parser = AvitoParser()
+    parser._cycle_active = True
+
+    async def fail_open(_proxy):
+        raise RuntimeError("nodriver open failed")
+
+    async def ok_open(_proxy):
+        class S:
+            async def fetch(self, _url):
+                return {"ok": True, "html": "<html></html>"}
+
+            async def close(self):
+                return None
+
+        return S()
+
+    monkeypatch.setattr("app.parsers.avito_parser.open_nodriver_session", fail_open)
+    monkeypatch.setattr("app.parsers.avito_parser.open_camoufox_session", ok_open)
+
+    html = asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+    assert html == "<html></html>"
+    assert parser._prefer_engine == _Engine.CAMOUFOX
 def test_monitor_records_parser_error_type_in_last_error(db_session):
     search = make_search(db_session)
     service = MonitorService(
@@ -436,3 +461,17 @@ def test_run_all_searches_wraps_parser_cycle_hooks_on_exception(monkeypatch, db_
     assert len(results) == 1
     assert parser.begin_calls == 1
     assert parser.end_calls == 1
+
+
+def test_run_all_searches_without_cycle_hooks(monkeypatch, db_session):
+    class ParserWithoutCycle:
+        async def fetch_search_cards(self, _search_url):
+            return []
+
+    parser = ParserWithoutCycle()
+    service = MonitorService(parser=parser, scorer=FakeScorer(), notifier=FakeNotifier())
+    make_search(db_session, name="no-hooks")
+    patch_session_local(monkeypatch, db_session)
+
+    results = service.run_all_searches()
+    assert len(results) == 1

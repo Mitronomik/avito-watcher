@@ -148,7 +148,7 @@ class _NodriverSession:
         except Exception as exc:
             return {"ok": False, "engine": "nodriver", "error_type": "exception", "error": str(exc)}
 
-    def close(self) -> None:
+    async def close(self) -> None:
         self._browser.stop()
 
 
@@ -179,38 +179,76 @@ class _CamoufoxSession:
 
 async def open_nodriver_session(proxy_url: Optional[str]):
     import nodriver as uc  # noqa: PLC0415
-    args=["--lang=ru-RU","--window-size=1920,1080","--disable-blink-features=AutomationControlled"]
+    args = ["--lang=ru-RU", "--window-size=1920,1080", "--disable-blink-features=AutomationControlled"]
     if proxy_url:
         args.extend(_nodriver_proxy_args(proxy_url))
     import os as _os
     _headless = _os.getenv("SCRAPE_HEADLESS", "false").lower() in ("true", "1")
     browser = await uc.start(headless=_headless, browser_args=args)
+
     tab = browser.main_tab
     if tab is None:
         _ = await browser.get("about:blank")
         tab = browser.main_tab
+
     if tab is not None:
-        await tab.send(uc.cdp.page.add_script_to_evaluate_on_new_document(source=_STEALTH_INIT_SCRIPT))
-    if proxy_url and "@" in proxy_url and tab is not None:
+        try:
+            await tab.send(uc.cdp.page.add_script_to_evaluate_on_new_document(source=_STEALTH_INIT_SCRIPT))
+        except Exception as _patch_exc:
+            logger.debug("[browser_engine] nodriver: stealth init-script skipped: %s", _patch_exc)
+    else:
+        logger.warning("[browser_engine] nodriver: main_tab is None before warmup, stealth init-script was not injected")
+
+    if proxy_url and "@" in proxy_url:
         creds_part = proxy_url.split("://", 1)[1].rsplit("@", 1)[0]
         user, password = creds_part.split(":", 1)
-        await tab.send(uc.cdp.fetch.enable(handle_auth_requests=True))
-        async def _auth_handler(event: uc.cdp.fetch.AuthRequired) -> None:  # type: ignore[name-defined]
-            await tab.send(uc.cdp.fetch.continue_with_auth(request_id=event.request_id,auth_challenge_response=uc.cdp.fetch.AuthChallengeResponse(response="ProvideCredentials",username=user,password=password)))
-        tab.add_handler(uc.cdp.fetch.AuthRequired, _auth_handler)
+        if tab is not None:
+            try:
+                await tab.send(uc.cdp.fetch.enable(handle_auth_requests=True))
+
+                async def _auth_handler(event: uc.cdp.fetch.AuthRequired) -> None:  # type: ignore[name-defined]
+                    await tab.send(
+                        uc.cdp.fetch.continue_with_auth(
+                            request_id=event.request_id,
+                            auth_challenge_response=uc.cdp.fetch.AuthChallengeResponse(
+                                response="ProvideCredentials",
+                                username=user,
+                                password=password,
+                            ),
+                        )
+                    )
+
+                tab.add_handler(uc.cdp.fetch.AuthRequired, _auth_handler)
+            except Exception as _auth_exc:
+                logger.warning("[browser_engine] nodriver: proxy auth handler setup failed: %s", _auth_exc)
+        else:
+            logger.warning("[browser_engine] nodriver: main_tab is None before warmup, proxy auth credentials will not be injected")
     return _NodriverSession(uc, browser)
 
 
 async def open_camoufox_session(proxy_url: Optional[str]):
     from camoufox.async_api import AsyncCamoufox  # noqa: PLC0415
+
     proxy_cfg = _parse_proxy_url(proxy_url) if proxy_url else None
     import os as _os_cf
+
     _cf_headless = "virtual" if _os_cf.getenv("SCRAPE_HEADLESS", "false").lower() in ("true", "1") else False
     browser_cm = AsyncCamoufox(headless=_cf_headless, proxy=proxy_cfg)
     browser = await browser_cm.__aenter__()
-    page = await browser.new_page()
-    await page.add_init_script(_STEALTH_INIT_SCRIPT)
-    return _CamoufoxSession(browser_cm, page)
+    try:
+        page = await browser.new_page()
+        await page.add_init_script(_STEALTH_INIT_SCRIPT)
+        try:
+            await page.context.grant_permissions(["geolocation"])
+            await page.context.set_geolocation({"latitude": 59.9386, "longitude": 30.3141})
+        except Exception as _geo_exc:
+            logger.debug("[browser_engine] camoufox: geolocation setup skipped: %s", _geo_exc)
+        return _CamoufoxSession(browser_cm, page)
+    except Exception:
+        import sys as _sys
+
+        await browser_cm.__aexit__(*_sys.exc_info())
+        raise
 
 # ---------------------------------------------------------------------------
 # nodriver backend
@@ -236,7 +274,7 @@ async def fetch_with_nodriver(url: str, proxy_url: Optional[str]) -> dict:
     finally:
         if session is not None:
             try:
-                session.close()
+                await session.close()
             except Exception:
                 pass
 
@@ -251,7 +289,7 @@ async def fetch_with_camoufox(url: str, proxy_url: Optional[str]) -> dict:
     Returns same schema as fetch_with_nodriver.
     """
     try:
-        __import__("camoufox.async_api")
+        from camoufox.async_api import AsyncCamoufox  # noqa: PLC0415,F401
     except ImportError:
         return {"ok": False, "engine": "camoufox",
                 "error_type": "import_error",

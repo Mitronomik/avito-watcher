@@ -508,7 +508,12 @@ class MonitorService:
 
     async def _run_all_searches_async(self) -> list[dict]:
         """Async core of run_all_searches — runs all due searches sequentially."""
-        await self.parser.begin_cycle()
+        begin_cycle = getattr(self.parser, "begin_cycle", None)
+        end_cycle = getattr(self.parser, "end_cycle", None)
+        cycle_started = False
+        if begin_cycle is not None:
+            await begin_cycle()
+            cycle_started = True
         try:
             with SessionLocal() as db:
                 repo = SearchRepository(db)
@@ -525,4 +530,5 @@ class MonitorService:
                     results.append(result)
                 return results
         finally:
-            await self.parser.end_cycle()
+            if cycle_started and end_cycle is not None:
+                await end_cycle()

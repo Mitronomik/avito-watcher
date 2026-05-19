@@ -121,23 +121,22 @@ class AvitoParser:
         sessions = list(self._engine_sessions.values())
         self._engine_sessions.clear()
         for session in sessions:
-            close = getattr(session, "close", None)
-            if close is None:
-                continue
-            result = close()
-            if hasattr(result, "__await__"):
-                await result
+            await session.close()
 
-    async def ensure_engine_session(self, engine: _Engine, proxy_url: str | None) -> None:
+    async def ensure_engine_session(self, engine: _Engine, proxy_url: str | None) -> dict | None:
         if not self._cycle_active:
-            return
+            return None
         key = (engine, proxy_url)
         if key in self._engine_sessions:
-            return
-        if engine == _Engine.NODRIVER:
-            self._engine_sessions[key] = await open_nodriver_session(proxy_url)
-        else:
-            self._engine_sessions[key] = await open_camoufox_session(proxy_url)
+            return None
+        try:
+            if engine == _Engine.NODRIVER:
+                self._engine_sessions[key] = await open_nodriver_session(proxy_url)
+            else:
+                self._engine_sessions[key] = await open_camoufox_session(proxy_url)
+        except Exception as exc:
+            return {"ok": False, "engine": engine.value, "error_type": "exception", "error": str(exc)}
+        return None
 
     async def _fetch_page_html(self, url: str) -> str:
         """Fetch raw HTML using stealth engine with Nodriver→Camoufox fallback.
@@ -154,8 +153,8 @@ class AvitoParser:
             proxy_url = self._proxy_manager.get_proxy()
 
         # First attempt
-        await self.ensure_engine_session(self._prefer_engine, proxy_url)
-        result = await self._try_engine(url, proxy_url, self._prefer_engine)
+        setup_error = await self.ensure_engine_session(self._prefer_engine, proxy_url)
+        result = setup_error or await self._try_engine(url, proxy_url, self._prefer_engine)
         if result["ok"]:
             if proxy_url and self._proxy_manager:
                 self._proxy_manager.report_success(proxy_url)
@@ -177,8 +176,8 @@ class AvitoParser:
         )
 
         # Fallback attempt
-        await self.ensure_engine_session(fallback, proxy_url)
-        result2 = await self._try_engine(url, proxy_url, fallback)
+        setup_error2 = await self.ensure_engine_session(fallback, proxy_url)
+        result2 = setup_error2 or await self._try_engine(url, proxy_url, fallback)
         if result2["ok"]:
             if proxy_url and self._proxy_manager:
                 self._proxy_manager.report_success(proxy_url)
