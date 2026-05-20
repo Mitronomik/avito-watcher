@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import inspect
 import random
 from typing import Optional
 
@@ -131,6 +132,13 @@ async def _humanize_camoufox_page(page) -> None:
         await asyncio.sleep(random.uniform(0.25, 0.9))
 
 
+async def _stop_browser_best_effort(browser) -> None:
+    try:
+        stop_result = browser.stop()
+        if inspect.isawaitable(stop_result):
+            await stop_result
+    except Exception as exc:
+        logger.warning("[browser_engine] nodriver stop failed: %s", exc)
 
 
 class _NodriverSession:
@@ -173,7 +181,7 @@ class _NodriverSession:
             return {"ok": False, "engine": "nodriver", "error_type": "exception", "error": str(exc)}
 
     async def close(self) -> None:
-        self._browser.stop()
+        await _stop_browser_best_effort(self._browser)
 
 
 class _CamoufoxSession:
@@ -267,10 +275,7 @@ async def open_nodriver_session(proxy_url: Optional[str]):
                 logger.warning("[browser_engine] nodriver: main_tab is None before warmup, proxy auth credentials will not be injected")
         return _NodriverSession(uc, browser)
     except Exception:
-        try:
-            browser.stop()
-        except Exception:
-            pass
+        await _stop_browser_best_effort(browser)
         raise
 
 
