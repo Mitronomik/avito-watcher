@@ -15,6 +15,28 @@ cp .env.example .env
 ./scripts/bootstrap.sh
 ```
 
+## Runtime-флаги скрейпинга
+
+- `SCRAPE_HEADLESS=true` — рекомендуется для Docker/VPS и используется по умолчанию.
+- `SCRAPE_HUMANIZE=false` — опциональная «человечная» прокрутка/паузы; по умолчанию выключена.
+- `PROXY_URLS` — опциональный список прокси через запятую.
+
+Поддерживаемые схемы прокси: `http://` и `https://`.
+
+Пример:
+
+```bash
+SCRAPE_HEADLESS=true
+SCRAPE_HUMANIZE=false
+PROXY_URLS=http://user:pass@host:port,https://user:pass@host2:port2
+```
+
+### Troubleshooting прокси
+
+- Ошибка вида `unsupported proxy scheme` — проверьте, что используется `http` или `https` (не `socks5`).
+- Ошибка вида `proxy must include valid port` — проверьте, что в URL указан числовой порт.
+- Если `PROXY_URLS` пустой, приложение работает в no-proxy режиме.
+
 ## Docker Compose
 
 Все команды ниже используют основной compose-файл:

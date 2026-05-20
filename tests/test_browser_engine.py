@@ -505,7 +505,7 @@ def test_humanize_disabled_has_no_scroll_calls(monkeypatch):
     async def _fast_sleep(*_args, **_kwargs):
         return None
 
-    monkeypatch.setenv("SCRAPE_HUMANIZE", "false")
+    monkeypatch.setattr("app.parsers.browser_engine.settings.scrape_humanize", False)
     monkeypatch.setattr("app.parsers.browser_engine.asyncio.sleep", _fast_sleep)
     session = _NodriverSession(uc_module=SimpleNamespace(), browser=FakeBrowser())
     result = asyncio.run(session.fetch("https://www.avito.ru/a"))
@@ -543,7 +543,7 @@ def test_humanize_enabled_scrolls_after_navigation_nodriver(monkeypatch):
     async def _fast_sleep(*_args, **_kwargs):
         return None
 
-    monkeypatch.setenv("SCRAPE_HUMANIZE", "true")
+    monkeypatch.setattr("app.parsers.browser_engine.settings.scrape_humanize", True)
     monkeypatch.setattr("app.parsers.browser_engine.asyncio.sleep", _fast_sleep)
     monkeypatch.setattr("app.parsers.browser_engine.random.randint", lambda _a, _b: 1)
     session = _NodriverSession(uc_module=SimpleNamespace(), browser=FakeBrowser())
@@ -593,7 +593,7 @@ def test_humanize_exception_is_logged_and_non_fatal_camoufox(monkeypatch, caplog
     async def _fast_sleep(*_args, **_kwargs):
         return None
 
-    monkeypatch.setenv("SCRAPE_HUMANIZE", "true")
+    monkeypatch.setattr("app.parsers.browser_engine.settings.scrape_humanize", True)
     monkeypatch.setattr("app.parsers.browser_engine.asyncio.sleep", _fast_sleep)
     monkeypatch.setattr("app.parsers.browser_engine.random.randint", lambda _a, _b: 1)
     session = _CamoufoxSession(browser=FakeBrowser(), page=FakePage())
