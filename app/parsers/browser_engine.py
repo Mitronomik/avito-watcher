@@ -6,9 +6,9 @@ import logging
 import os
 import random
 from typing import Optional
-from urllib.parse import urlsplit
 
 from app.parsers.block_signals import looks_like_block_or_captcha
+from app.parsers.proxy_url import parse_proxy_url
 
 logger = logging.getLogger(__name__)
 
@@ -94,36 +94,21 @@ def _is_blocked(title: str, body: str) -> bool:
 
 
 def _parse_proxy_url(proxy_url: str) -> dict:
-    """Parse http://user:pass@host:port into camoufox proxy dict."""
-    proto, rest = proxy_url.split("://", 1)
-    if "@" in rest:
-        creds, hostport = rest.rsplit("@", 1)
-        user, password = creds.split(":", 1)
-        return {"server": f"{proto}://{hostport}", "username": user, "password": password}
-    return {"server": proxy_url}
+    """Parse proxy URL into camoufox proxy dict with decoded credentials."""
+    parsed = parse_proxy_url(proxy_url)
+    result = {"server": parsed.server}
+    if parsed.username is not None and parsed.password is not None:
+        result["username"] = parsed.username
+        result["password"] = parsed.password
+    return result
 
 
 def _nodriver_proxy_args(proxy_url: str | None) -> list[str]:
-    """Return --proxy-server arg list for nodriver launch.
-
-    Nodriver flow is currently validated only for HTTP(S) proxies.
-    Unsupported schemes are ignored with a warning instead of being silently coerced.
-    """
+    """Return --proxy-server arg list for nodriver launch."""
     if proxy_url is None:
         return []
-
-    parsed = urlsplit(proxy_url)
-    scheme = parsed.scheme.lower()
-    if scheme not in {"http", "https"}:
-        logger.warning(
-            "[browser_engine] nodriver: unsupported proxy scheme %r for %s; only http/https are supported",
-            scheme,
-            proxy_url,
-        )
-        return []
-
-    hostport = parsed.netloc.rsplit("@", 1)[-1]
-    return [f"--proxy-server={scheme}://{hostport}"]
+    parsed = parse_proxy_url(proxy_url)
+    return [f"--proxy-server={parsed.scheme}://{parsed.hostport}"]
 
 
 def _is_humanize_enabled() -> bool:
@@ -257,9 +242,10 @@ async def open_nodriver_session(proxy_url: Optional[str]):
         else:
             logger.warning("[browser_engine] nodriver: main_tab is None before warmup, stealth init-script was not injected")
 
-        if proxy_url and "@" in proxy_url:
-            creds_part = proxy_url.split("://", 1)[1].rsplit("@", 1)[0]
-            user, password = creds_part.split(":", 1)
+        parsed_proxy = parse_proxy_url(proxy_url) if proxy_url else None
+        if parsed_proxy and parsed_proxy.username is not None and parsed_proxy.password is not None:
+            user = parsed_proxy.username
+            password = parsed_proxy.password
             if tab is not None:
                 try:
                     await tab.send(uc.cdp.fetch.enable(handle_auth_requests=True))

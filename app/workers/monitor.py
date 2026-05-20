@@ -5,6 +5,7 @@ import time
 from app.db.init_db import init_db
 from app.parsers.avito_parser import AvitoParser
 from app.parsers.proxy_manager import ProxyManager
+from app.parsers.proxy_url import validate_proxy_urls
 from app.core.config import settings
 from app.services.monitor_service import MonitorService
 
@@ -19,6 +20,7 @@ def _build_parser() -> AvitoParser:
     raw = settings.proxy_urls.strip()
     proxy_urls = [u.strip() for u in raw.split(",") if u.strip()]
     if proxy_urls:
+        proxy_urls = validate_proxy_urls(proxy_urls)
         manager = ProxyManager(proxy_urls, quarantine_seconds=7200)
         logger.info(
             "proxy_manager initialized proxies=%d", manager.total

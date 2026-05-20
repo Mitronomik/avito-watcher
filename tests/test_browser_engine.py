@@ -35,13 +35,11 @@ def test_nodriver_proxy_args_https_proxy():
     assert args == ["--proxy-server=https://1.2.3.4:8080"]
 
 
-def test_nodriver_proxy_args_unsupported_scheme_logs_warning(caplog):
+def test_nodriver_proxy_args_unsupported_scheme_raises():
     url = "socks5://1.2.3.4:1080"
 
-    args = _nodriver_proxy_args(url)
-
-    assert args == []
-    assert "unsupported proxy scheme" in caplog.text
+    with pytest.raises(ValueError, match="unsupported proxy scheme"):
+        _nodriver_proxy_args(url)
 
 
 def test_nodriver_proxy_args_proxy_with_at_sign_in_password():
@@ -53,6 +51,21 @@ def test_nodriver_proxy_args_proxy_with_at_sign_in_password():
     assert args == ["--proxy-server=http://1.2.3.4:8080"]
 
 
+
+
+def test_nodriver_proxy_args_ipv6_proxy():
+    url = "http://[2001:db8::1]:8080"
+
+    args = _nodriver_proxy_args(url)
+
+    assert args == ["--proxy-server=http://[2001:db8::1]:8080"]
+
+
+def test_nodriver_proxy_args_invalid_port_raises_predictably():
+    url = "http://1.2.3.4:abc"
+
+    with pytest.raises(ValueError, match="proxy must include valid port"):
+        _nodriver_proxy_args(url)
 def test_is_blocked_on_captcha_html():
     html = "<html><body>captcha: verify you are human</body></html>"
 
@@ -90,7 +103,7 @@ def test_parse_proxy_url_with_encoded_at_sign_in_password():
 
     assert result["server"] == "http://1.2.3.4:8080"
     assert result["username"] == "user"
-    assert result["password"] == "p%40ssword"
+    assert result["password"] == "p@ssword"
 
 
 def test_nodriver_proxy_auth_is_configured_before_first_avito_navigation(monkeypatch):

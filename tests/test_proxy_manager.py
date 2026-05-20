@@ -1,8 +1,11 @@
 """Tests for ProxyManager round-robin, quarantine, and observability counters."""
+
 import time
 
+import pytest
 
 from app.parsers.proxy_manager import ProxyManager
+from app.parsers.proxy_url import validate_proxy_urls
 
 
 def make_pool(*urls: str, quarantine_seconds: int = 7200) -> ProxyManager:
@@ -34,12 +37,10 @@ def test_report_failure_quarantines_proxy():
 def test_report_success_decreases_failure_count():
     """report_success() decrements failures counter by 1 (min 0)."""
     pm = make_pool("http://a:b@1.1.1.1:8000")
-    # Manually set failures=2 to verify decrement (not reset-to-zero)
     pm._proxies[0].failures = 2
 
     pm.report_success("http://a:b@1.1.1.1:8000")
 
-    # report_success does: p.failures = max(0, p.failures - 1)
     assert pm._proxies[0].failures == 1
 
 
@@ -50,11 +51,10 @@ def test_quarantine_duration_grows_with_failures():
     pm.report_failure(url)
     first_until = pm._proxies[0].quarantine_until
 
-    pm._proxies[0].quarantine_until = 0.0  # un-quarantine manually
+    pm._proxies[0].quarantine_until = 0.0
     pm.report_failure(url)
     second_until = pm._proxies[0].quarantine_until
 
-    # second quarantine must be longer than first (multiplier grows)
     assert second_until > first_until
 
 
@@ -78,7 +78,11 @@ def test_stats_tracks_hits_and_failures():
 def test_available_count_respects_quarantine_expiry():
     pm = make_pool("http://a:b@1.1.1.1:8000", quarantine_seconds=0)
     pm.report_failure("http://a:b@1.1.1.1:8000")
-    # quarantine_seconds=0 → quarantine_until = now + 0 → already expired
     time.sleep(0.01)
 
     assert pm.available_count == 1
+
+
+def test_proxy_manager_rejects_invalid_proxy_urls():
+    with pytest.raises(ValueError, match="unsupported proxy scheme"):
+        validate_proxy_urls(["socks5://1.2.3.4:1080"])
