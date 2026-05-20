@@ -113,9 +113,9 @@ class _CycleCounters:
     session_evict_count: int = 0
     session_close_failure_count: int = 0
     block_detected_count: int = 0
+    engine_error_count: int = 0
     proxy_success_count: int = 0
     proxy_failure_count: int = 0
-    proxy_quarantine_count: int = 0
 
     def as_dict(self) -> dict[str, int | str | None]:
         return {
@@ -126,9 +126,9 @@ class _CycleCounters:
             "session_evict_count": self.session_evict_count,
             "session_close_failure_count": self.session_close_failure_count,
             "block_detected_count": self.block_detected_count,
+            "engine_error_count": self.engine_error_count,
             "proxy_success_count": self.proxy_success_count,
             "proxy_failure_count": self.proxy_failure_count,
-            "proxy_quarantine_count": self.proxy_quarantine_count,
         }
 
 
@@ -193,7 +193,6 @@ class AvitoParser:
             return None
         key = (engine, proxy_url)
         if key in self._engine_sessions:
-            self._cycle_counters.session_reuse_count += 1
             return None
         try:
             if engine == _Engine.NODRIVER:
@@ -235,12 +234,14 @@ class AvitoParser:
             self._prefer_engine.value,
             result.get("error_type"),
         )
-        self._cycle_counters.block_detected_count += 1
+        if result.get("error_type") == "possible_captcha_or_block":
+            self._cycle_counters.block_detected_count += 1
+        else:
+            self._cycle_counters.engine_error_count += 1
         self._cycle_counters.engine_fallback_count += 1
         if proxy_url and self._proxy_manager:
             self._proxy_manager.report_failure(proxy_url)
             self._cycle_counters.proxy_failure_count += 1
-            self._cycle_counters.proxy_quarantine_count += 1
             proxy_url = self._proxy_manager.get_proxy()
 
         fallback = (
@@ -263,7 +264,6 @@ class AvitoParser:
         if proxy_url and self._proxy_manager:
             self._proxy_manager.report_failure(proxy_url)
             self._cycle_counters.proxy_failure_count += 1
-            self._cycle_counters.proxy_quarantine_count += 1
 
         raise ParserError(
             ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK,
