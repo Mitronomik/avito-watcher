@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     # Secret key to protect POST /monitor/run. Set API_KEY env var.
     # If empty, the endpoint is unprotected (dev mode only).
     scrape_headless: bool = True
+    scrape_humanize: bool = False
     scrape_timeout_ms: int = 45000
     scrape_concurrency: int = 2
     proxy_urls: str = ""

@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import random
 from typing import Optional
 
+from app.core.config import settings
 from app.parsers.block_signals import looks_like_block_or_captcha
 from app.parsers.proxy_url import parse_proxy_url
 
@@ -112,7 +112,7 @@ def _nodriver_proxy_args(proxy_url: str | None) -> list[str]:
 
 
 def _is_humanize_enabled() -> bool:
-    return os.getenv("SCRAPE_HUMANIZE", "false").lower() in ("true", "1")
+    return settings.scrape_humanize
 
 
 async def _humanize_nodriver_page(page) -> None:
@@ -224,9 +224,7 @@ async def open_nodriver_session(proxy_url: Optional[str]):
     args = ["--lang=ru-RU", "--window-size=1920,1080", "--disable-blink-features=AutomationControlled"]
     if proxy_url:
         args.extend(_nodriver_proxy_args(proxy_url))
-    import os as _os
-    _headless = _os.getenv("SCRAPE_HEADLESS", "false").lower() in ("true", "1")
-    browser = await uc.start(headless=_headless, browser_args=args)
+    browser = await uc.start(headless=settings.scrape_headless, browser_args=args)
 
     try:
         tab = browser.main_tab
@@ -280,9 +278,7 @@ async def open_camoufox_session(proxy_url: Optional[str]):
     from camoufox.async_api import AsyncCamoufox  # noqa: PLC0415
 
     proxy_cfg = _parse_proxy_url(proxy_url) if proxy_url else None
-    import os as _os_cf
-
-    _cf_headless = "virtual" if _os_cf.getenv("SCRAPE_HEADLESS", "false").lower() in ("true", "1") else False
+    _cf_headless = "virtual" if settings.scrape_headless else False
     browser_cm = AsyncCamoufox(headless=_cf_headless, proxy=proxy_cfg)
     browser = await browser_cm.__aenter__()
     try:
