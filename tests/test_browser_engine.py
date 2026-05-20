@@ -35,13 +35,11 @@ def test_nodriver_proxy_args_https_proxy():
     assert args == ["--proxy-server=https://1.2.3.4:8080"]
 
 
-def test_nodriver_proxy_args_unsupported_scheme_logs_warning(caplog):
+def test_nodriver_proxy_args_unsupported_scheme_raises():
     url = "socks5://1.2.3.4:1080"
 
-    args = _nodriver_proxy_args(url)
-
-    assert args == []
-    assert "unsupported proxy scheme" in caplog.text
+    with pytest.raises(ValueError, match="unsupported proxy scheme"):
+        _nodriver_proxy_args(url)
 
 
 def test_nodriver_proxy_args_proxy_with_at_sign_in_password():
@@ -90,7 +88,7 @@ def test_parse_proxy_url_with_encoded_at_sign_in_password():
 
     assert result["server"] == "http://1.2.3.4:8080"
     assert result["username"] == "user"
-    assert result["password"] == "p%40ssword"
+    assert result["password"] == "p@ssword"
 
 
 def test_nodriver_proxy_auth_is_configured_before_first_avito_navigation(monkeypatch):

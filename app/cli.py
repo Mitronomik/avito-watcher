@@ -6,6 +6,7 @@ from app.bot.telegram_commands import build_telegram_application
 from app.parsers.avito_parser import AvitoParser
 from app.parsers.errors import ParserError
 from app.parsers.proxy_manager import ProxyManager
+from app.parsers.proxy_url import validate_proxy_urls
 from app.db.init_db import init_db
 from app.db.session import SessionLocal
 from app.repositories.search_repository import SearchRepository
@@ -16,6 +17,7 @@ def _build_parser() -> "AvitoParser":
     """Build AvitoParser with ProxyManager from PROXY_URLS env var (mirrors monitor.py logic)."""
     raw = os.getenv("PROXY_URLS", "").strip()
     proxy_urls = [u.strip() for u in raw.split(",") if u.strip()]
+    proxy_urls = validate_proxy_urls(proxy_urls) if proxy_urls else []
     manager = ProxyManager(proxy_urls) if proxy_urls else None
     return AvitoParser(proxy_manager=manager)
 
