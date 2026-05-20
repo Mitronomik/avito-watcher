@@ -551,11 +551,14 @@ class MonitorService:
             if callable(cycle_stats_fn):
                 parser_cycle_stats = cycle_stats_fn()
             logger.info(
-                "monitor_service.cycle_summary searches_processed=%s sessions_opened=%s sessions_reused=%s fallbacks=%s evictions=%s close_failures=%s",
+                "monitor_service.cycle_summary searches_processed=%s sessions_opened=%s sessions_reused=%s fallbacks=%s blocks=%s engine_errors=%s proxy_failures=%s evictions=%s close_failures=%s",
                 searches_processed,
                 parser_cycle_stats.get("session_open_count", 0),
                 parser_cycle_stats.get("session_reuse_count", 0),
                 parser_cycle_stats.get("engine_fallback_count", 0),
+                parser_cycle_stats.get("block_detected_count", 0),
+                parser_cycle_stats.get("engine_error_count", 0),
+                parser_cycle_stats.get("proxy_failure_count", 0),
                 parser_cycle_stats.get("session_evict_count", 0),
                 parser_cycle_stats.get("session_close_failure_count", 0),
             )

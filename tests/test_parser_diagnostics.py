@@ -1,7 +1,7 @@
 import asyncio
 import json
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from bs4 import BeautifulSoup
@@ -285,10 +285,79 @@ def test_session_reuse_and_open_counters_increment(monkeypatch):
     monkeypatch.setattr("app.parsers.avito_parser.open_nodriver_session", open_nodriver)
 
     asyncio.run(parser.ensure_engine_session(_Engine.NODRIVER, None))
-    asyncio.run(parser.ensure_engine_session(_Engine.NODRIVER, None))
+    asyncio.run(parser._try_engine("https://www.avito.ru/moskva/kvartiry", None, _Engine.NODRIVER))
     stats = parser.cycle_stats()
     assert stats["session_open_count"] == 1
     assert stats["session_reuse_count"] == 1
+
+
+def test_engine_exception_counts_as_engine_error_not_block():
+    parser = AvitoParser()
+    try_engine = AsyncMock(
+        side_effect=[
+            {"ok": False, "error_type": "exception", "error": "warmup failed"},
+            {"ok": True, "html": "<html>ok</html>"},
+        ]
+    )
+
+    with patch.object(parser, "_try_engine", new=try_engine):
+        asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+
+    stats = parser.cycle_stats()
+    assert stats["engine_fallback_count"] == 1
+    assert stats["engine_error_count"] == 1
+    assert stats["block_detected_count"] == 0
+
+
+def test_engine_block_counts_as_block_not_engine_error():
+    parser = AvitoParser()
+    try_engine = AsyncMock(
+        side_effect=[
+            {"ok": False, "error_type": "possible_captcha_or_block", "error": "blocked"},
+            {"ok": True, "html": "<html>ok</html>"},
+        ]
+    )
+
+    with patch.object(parser, "_try_engine", new=try_engine):
+        asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+
+    stats = parser.cycle_stats()
+    assert stats["engine_fallback_count"] == 1
+    assert stats["block_detected_count"] == 1
+    assert stats["engine_error_count"] == 0
+
+
+def test_proxy_failure_counter_tracks_reported_failures_without_quarantine_counter():
+    parser = AvitoParser()
+    try_engine = AsyncMock(
+        side_effect=[
+            {"ok": False, "error_type": "possible_captcha_or_block", "error": "blocked"},
+            {"ok": True, "html": "<html>ok</html>"},
+        ]
+    )
+    report_failure = Mock()
+
+    class FakeProxyManager:
+        def __init__(self):
+            self.calls = 0
+
+        def get_proxy(self):
+            self.calls += 1
+            return "http://proxy-1" if self.calls == 1 else "http://proxy-2"
+
+        def report_failure(self, _proxy):
+            return report_failure(_proxy)
+
+        def report_success(self, _proxy):
+            return None
+
+    parser._proxy_manager = FakeProxyManager()
+    with patch.object(parser, "_try_engine", new=try_engine):
+        asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+
+    stats = parser.cycle_stats()
+    assert stats["proxy_failure_count"] == 1
+    assert "proxy_quarantine_count" not in stats
 
 
 def test_fallback_and_eviction_counters_increment():
