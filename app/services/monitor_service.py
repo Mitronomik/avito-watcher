@@ -196,9 +196,16 @@ class MonitorService:
         return CompositeNotifier(channels)
 
 
-    def _build_alert_payload(self, card: ListingCard, summary: str, score, tags: list) -> dict:
+    def _build_alert_payload(
+        self,
+        card: ListingCard,
+        search_name: str,
+        summary: str,
+        score,
+        tags: list,
+    ) -> dict:
         return {
-            "search_name": card.raw.get("search_name", ""),
+            "search_name": search_name,
             "external_id": card.external_id,
             "title": card.title,
             "price": card.price,
@@ -213,7 +220,9 @@ class MonitorService:
             "tags": tags,
         }
 
-    def _retry_context_from_snapshot(self, db: Session, card: ListingCard) -> tuple[str, dict] | None:
+    def _retry_context_from_snapshot(
+        self, db: Session, card: ListingCard, search_name: str
+    ) -> tuple[str, dict] | None:
         snapshots = (
             db.query(ListingSnapshot)
             .filter(ListingSnapshot.external_id == card.external_id)
@@ -234,6 +243,7 @@ class MonitorService:
         summary = llm.get("summary", "")
         payload = self._build_alert_payload(
             card=card,
+            search_name=search_name,
             summary=summary,
             score=llm.get("score"),
             tags=llm.get("tags", []),
@@ -310,7 +320,7 @@ class MonitorService:
         try:
             cards = await self.parser.fetch_search_cards(search.source_url)
             result = await self._process_cards(
-                db, cards, baseline_run, search.filters_json
+                db, cards, baseline_run, search.filters_json, search.name
             )
 
             if baseline_run:
@@ -346,6 +356,7 @@ class MonitorService:
         cards: list[ListingCard],
         baseline_run: bool,
         filters: dict | None,
+        search_name: str,
     ) -> dict:
         listing_repo = ListingRepository(db)
         alert_repo = AlertRepository(db)
@@ -391,7 +402,7 @@ class MonitorService:
                 if baseline_run:
                     continue
 
-                retry_context = self._retry_context_from_snapshot(db, card)
+                retry_context = self._retry_context_from_snapshot(db, card, search_name)
                 if retry_context is None:
                     continue
 
@@ -463,6 +474,7 @@ class MonitorService:
             )
             payload = self._build_alert_payload(
                 card=card,
+                search_name=search_name,
                 summary=llm.get("summary", ""),
                 score=llm.get("score"),
                 tags=llm.get("tags", []),

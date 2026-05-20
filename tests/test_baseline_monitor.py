@@ -45,10 +45,12 @@ class FakeNotifier:
 
     def __init__(self):
         self.messages = []
+        self.payloads = []
         self.channels = [self]
 
     async def send_listing_alert(self, message: str, payload: dict | None = None):
         self.messages.append(message)
+        self.payloads.append(payload)
         return [self.channel_name]
 
 
@@ -192,6 +194,7 @@ def test_second_run_with_one_new_listing_sends_one_alert(db_session):
     assert scalar_count(db_session, AlertSent) == 1
     assert scorer.cards == ["2"]
     assert len(notifier.messages) == 1
+    assert notifier.payloads[0]["search_name"] == search.name
 
 
 def test_max_price_filters_out_expensive_new_listing(db_session):
@@ -1128,3 +1131,56 @@ def test_retry_uses_latest_scored_snapshot_when_newer_price_snapshot_has_no_llm(
     assert row is not None
     assert retry_notifier.email.calls == 0
     assert retry_notifier.sheets.calls == 1
+
+
+def test_retry_alert_payload_includes_search_name(db_session):
+    class CaptureChannel:
+        def __init__(self, name: str, should_succeed: bool):
+            self.channel_name = name
+            self.should_succeed = should_succeed
+            self.payloads = []
+
+        async def send_listing_alert(self, message: str, payload: dict | None = None):
+            self.payloads.append(payload)
+            if self.should_succeed:
+                return True
+            raise RuntimeError(f"{self.channel_name} failed")
+
+    class MultiNotifier:
+        def __init__(self, email_success: bool, sheets_success: bool):
+            self.email = CaptureChannel("email", email_success)
+            self.sheets = CaptureChannel("google_sheets", sheets_success)
+            self.channels = [self.email, self.sheets]
+
+    search = make_search(db_session, name="commercial")
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1")]]),
+            scorer=FakeScorer(),
+            notifier=FakeNotifier(),
+        ),
+        db_session,
+        search,
+    )
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1"), card("2")]]),
+            scorer=FakeScorer(),
+            notifier=MultiNotifier(email_success=True, sheets_success=False),
+        ),
+        db_session,
+        search,
+    )
+
+    retry_notifier = MultiNotifier(email_success=True, sheets_success=True)
+    run(
+        MonitorService(
+            parser=FakeParser([[card("1"), card("2")]]),
+            scorer=FakeScorer(),
+            notifier=retry_notifier,
+        ),
+        db_session,
+        search,
+    )
+
+    assert retry_notifier.sheets.payloads[0]["search_name"] == "commercial"
