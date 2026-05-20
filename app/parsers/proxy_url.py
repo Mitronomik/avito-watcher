@@ -22,10 +22,19 @@ def parse_proxy_url(proxy_url: str) -> ParsedProxy:
     scheme = parsed.scheme.lower()
     if scheme not in _SUPPORTED_PROXY_SCHEMES:
         raise ValueError(f"unsupported proxy scheme: {scheme or '<empty>'}")
-    if not parsed.hostname or parsed.port is None:
-        raise ValueError("proxy must include host and port")
+    host = parsed.hostname
+    if not host:
+        raise ValueError("proxy must include host")
 
-    hostport = parsed.netloc.rsplit("@", 1)[-1]
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("proxy must include valid port") from exc
+    if port is None:
+        raise ValueError("proxy must include valid port")
+
+    host_formatted = f"[{host}]" if ":" in host else host
+    hostport = f"{host_formatted}:{port}"
     server = f"{scheme}://{hostport}"
     username = unquote(parsed.username) if parsed.username is not None else None
     password = unquote(parsed.password) if parsed.password is not None else None
