@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 from typing import Optional
 from urllib.parse import urlsplit
@@ -125,6 +126,26 @@ def _nodriver_proxy_args(proxy_url: str | None) -> list[str]:
     return [f"--proxy-server={scheme}://{hostport}"]
 
 
+def _is_humanize_enabled() -> bool:
+    return os.getenv("SCRAPE_HUMANIZE", "false").lower() in ("true", "1")
+
+
+async def _humanize_nodriver_page(page) -> None:
+    scrolls = random.randint(1, 3)
+    for _ in range(scrolls):
+        delta = random.randint(80, 260)
+        await page.evaluate(f"window.scrollBy(0, {delta})")
+        await asyncio.sleep(random.uniform(0.25, 0.9))
+
+
+async def _humanize_camoufox_page(page) -> None:
+    scrolls = random.randint(1, 3)
+    for _ in range(scrolls):
+        delta = random.randint(80, 260)
+        await page.mouse.wheel(0, delta)
+        await asyncio.sleep(random.uniform(0.25, 0.9))
+
+
 
 
 class _NodriverSession:
@@ -150,6 +171,11 @@ class _NodriverSession:
             if warmup_result is not None:
                 return warmup_result
             page = await self._browser.get(url)
+            if _is_humanize_enabled():
+                try:
+                    await _humanize_nodriver_page(page)
+                except Exception as exc:
+                    logger.warning("[browser_engine] nodriver humanize failed: %s", exc)
             await asyncio.sleep(random.uniform(3.0, 6.0))
             title: str = await page.evaluate("document.title") or ""
             body: str = await page.evaluate("document.body.innerText") or ""
@@ -188,6 +214,11 @@ class _CamoufoxSession:
             if warmup_result is not None:
                 return warmup_result
             await self._page.goto(url, wait_until="domcontentloaded")
+            if _is_humanize_enabled():
+                try:
+                    await _humanize_camoufox_page(self._page)
+                except Exception as exc:
+                    logger.warning("[browser_engine] camoufox humanize failed: %s", exc)
             await asyncio.sleep(random.uniform(3.0, 6.0))
             title = await self._page.title() or ""
             body = (await self._page.locator("body").first.text_content()) or ""

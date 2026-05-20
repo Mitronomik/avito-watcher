@@ -462,3 +462,130 @@ def test_fetch_with_camoufox_closes_session_after_one_call(monkeypatch):
 
     assert result["ok"] is True
     assert events == ["closed"]
+
+
+def test_humanize_disabled_has_no_scroll_calls(monkeypatch):
+    events = []
+
+    class FakePage:
+        async def evaluate(self, script):
+            if script == "document.title":
+                return "Avito"
+            if script == "document.body.innerText":
+                return ""
+            if script == "document.querySelectorAll('[data-marker=\"item\"]').length":
+                return 1
+            if script.startswith("window.scrollBy"):
+                events.append("scroll")
+            return None
+
+        async def get_content(self):
+            return "<html></html>"
+
+    class FakeBrowser:
+        async def get(self, _url):
+            return FakePage()
+
+        def stop(self):
+            return None
+
+    async def _fast_sleep(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setenv("SCRAPE_HUMANIZE", "false")
+    monkeypatch.setattr("app.parsers.browser_engine.asyncio.sleep", _fast_sleep)
+    session = _NodriverSession(uc_module=SimpleNamespace(), browser=FakeBrowser())
+    result = asyncio.run(session.fetch("https://www.avito.ru/a"))
+
+    assert result["ok"] is True
+    assert events == []
+
+
+def test_humanize_enabled_scrolls_after_navigation_nodriver(monkeypatch):
+    events = []
+
+    class FakePage:
+        async def evaluate(self, script):
+            if script == "document.title":
+                return "Avito"
+            if script == "document.body.innerText":
+                return ""
+            if script == "document.querySelectorAll('[data-marker=\"item\"]').length":
+                return 1
+            if script.startswith("window.scrollBy"):
+                events.append("scroll")
+            return None
+
+        async def get_content(self):
+            return "<html></html>"
+
+    class FakeBrowser:
+        async def get(self, url):
+            events.append(f"nav:{url}")
+            return FakePage()
+
+        def stop(self):
+            return None
+
+    async def _fast_sleep(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setenv("SCRAPE_HUMANIZE", "true")
+    monkeypatch.setattr("app.parsers.browser_engine.asyncio.sleep", _fast_sleep)
+    monkeypatch.setattr("app.parsers.browser_engine.random.randint", lambda _a, _b: 1)
+    session = _NodriverSession(uc_module=SimpleNamespace(), browser=FakeBrowser())
+    result = asyncio.run(session.fetch("https://www.avito.ru/a"))
+
+    assert result["ok"] is True
+    assert "scroll" in events
+    assert events.index("nav:https://www.avito.ru/a") < events.index("scroll")
+
+
+def test_humanize_exception_is_logged_and_non_fatal_camoufox(monkeypatch, caplog):
+    class FakeMouse:
+        async def wheel(self, _x, _y):
+            raise RuntimeError("wheel failed")
+
+    class FakeLocator:
+        @property
+        def first(self):
+            return self
+
+        async def text_content(self):
+            return ""
+
+        async def count(self):
+            return 1
+
+    class FakePage:
+        def __init__(self):
+            self.mouse = FakeMouse()
+
+        async def goto(self, _url, wait_until):
+            return wait_until
+
+        async def title(self):
+            return "Avito"
+
+        def locator(self, _selector):
+            return FakeLocator()
+
+        async def content(self):
+            return "<html></html>"
+
+    class FakeBrowser:
+        async def __aexit__(self, *_args):
+            return None
+
+    async def _fast_sleep(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setenv("SCRAPE_HUMANIZE", "true")
+    monkeypatch.setattr("app.parsers.browser_engine.asyncio.sleep", _fast_sleep)
+    monkeypatch.setattr("app.parsers.browser_engine.random.randint", lambda _a, _b: 1)
+    session = _CamoufoxSession(browser=FakeBrowser(), page=FakePage())
+
+    result = asyncio.run(session.fetch("https://www.avito.ru/a"))
+
+    assert result["ok"] is True
+    assert "camoufox humanize failed" in caplog.text
