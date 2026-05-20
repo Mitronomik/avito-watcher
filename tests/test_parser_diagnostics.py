@@ -267,6 +267,57 @@ def test_ensure_engine_session_can_open_fresh_session_after_eviction(monkeypatch
     assert opened == [True]
     assert (_Engine.NODRIVER, None) in parser._engine_sessions
 
+
+def test_session_reuse_and_open_counters_increment(monkeypatch):
+    parser = AvitoParser()
+    parser._cycle_active = True
+
+    class OpenedSession:
+        async def fetch(self, _url):
+            return {"ok": True, "html": "<html>fresh</html>"}
+
+        async def close(self):
+            return None
+
+    async def open_nodriver(_proxy):
+        return OpenedSession()
+
+    monkeypatch.setattr("app.parsers.avito_parser.open_nodriver_session", open_nodriver)
+
+    asyncio.run(parser.ensure_engine_session(_Engine.NODRIVER, None))
+    asyncio.run(parser.ensure_engine_session(_Engine.NODRIVER, None))
+    stats = parser.cycle_stats()
+    assert stats["session_open_count"] == 1
+    assert stats["session_reuse_count"] == 1
+
+
+def test_fallback_and_eviction_counters_increment():
+    parser = AvitoParser()
+    parser._cycle_active = True
+
+    class BrokenSession:
+        async def fetch(self, _url):
+            return {"ok": False, "error_type": "exception", "error": "boom"}
+
+        async def close(self):
+            return None
+
+    class GoodSession:
+        async def fetch(self, _url):
+            return {"ok": True, "html": "<html>ok</html>"}
+
+        async def close(self):
+            return None
+
+    parser._engine_sessions[(_Engine.NODRIVER, None)] = BrokenSession()
+    parser._engine_sessions[(_Engine.CAMOUFOX, None)] = GoodSession()
+
+    asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+
+    stats = parser.cycle_stats()
+    assert stats["engine_fallback_count"] == 1
+    assert stats["session_evict_count"] == 1
+
 def test_monitor_records_parser_error_type_in_last_error(db_session):
     search = make_search(db_session)
     service = MonitorService(
@@ -571,3 +622,16 @@ def test_end_cycle_closes_all_sessions_even_if_one_fails(caplog):
 
     assert closed == [True]
     assert "failed to close browser session" in caplog.text
+
+
+def test_end_cycle_logs_summary(caplog):
+    parser = AvitoParser()
+    caplog.set_level("INFO")
+
+    parser._cycle_counters.session_open_count = 2
+    parser._cycle_counters.session_reuse_count = 3
+    parser._cycle_counters.engine_fallback_count = 1
+
+    asyncio.run(parser.end_cycle())
+
+    assert "avito_parser.end_cycle stats=" in caplog.text

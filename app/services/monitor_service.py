@@ -511,6 +511,7 @@ class MonitorService:
         begin_cycle = getattr(self.parser, "begin_cycle", None)
         end_cycle = getattr(self.parser, "end_cycle", None)
         cycle_started = False
+        searches_processed = 0
         if begin_cycle is not None:
             await begin_cycle()
             cycle_started = True
@@ -528,7 +529,21 @@ class MonitorService:
                     else:
                         result["search"] = search.name
                     results.append(result)
+                    searches_processed += 1
                 return results
         finally:
             if cycle_started and end_cycle is not None:
                 await end_cycle()
+            parser_cycle_stats = {}
+            cycle_stats_fn = getattr(self.parser, "cycle_stats", None)
+            if callable(cycle_stats_fn):
+                parser_cycle_stats = cycle_stats_fn()
+            logger.info(
+                "monitor_service.cycle_summary searches_processed=%s sessions_opened=%s sessions_reused=%s fallbacks=%s evictions=%s close_failures=%s",
+                searches_processed,
+                parser_cycle_stats.get("session_open_count", 0),
+                parser_cycle_stats.get("session_reuse_count", 0),
+                parser_cycle_stats.get("engine_fallback_count", 0),
+                parser_cycle_stats.get("session_evict_count", 0),
+                parser_cycle_stats.get("session_close_failure_count", 0),
+            )

@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol
@@ -103,6 +104,34 @@ class _Engine(Enum):
     CAMOUFOX = "camoufox"
 
 
+@dataclass
+class _CycleCounters:
+    engine_used: str | None = None
+    engine_fallback_count: int = 0
+    session_open_count: int = 0
+    session_reuse_count: int = 0
+    session_evict_count: int = 0
+    session_close_failure_count: int = 0
+    block_detected_count: int = 0
+    proxy_success_count: int = 0
+    proxy_failure_count: int = 0
+    proxy_quarantine_count: int = 0
+
+    def as_dict(self) -> dict[str, int | str | None]:
+        return {
+            "engine_used": self.engine_used,
+            "engine_fallback_count": self.engine_fallback_count,
+            "session_open_count": self.session_open_count,
+            "session_reuse_count": self.session_reuse_count,
+            "session_evict_count": self.session_evict_count,
+            "session_close_failure_count": self.session_close_failure_count,
+            "block_detected_count": self.block_detected_count,
+            "proxy_success_count": self.proxy_success_count,
+            "proxy_failure_count": self.proxy_failure_count,
+            "proxy_quarantine_count": self.proxy_quarantine_count,
+        }
+
+
 class AvitoParser:
     def __init__(self, now_func=None, proxy_manager: ProxyManager | None = None) -> None:
         self.now_func = now_func or (lambda: datetime.now(UTC))
@@ -110,6 +139,7 @@ class AvitoParser:
         self._prefer_engine = _Engine.NODRIVER
         self._engine_sessions: dict[tuple[_Engine, str | None], BrowserSession] = {}
         self._cycle_active = False
+        self._cycle_counters = _CycleCounters()
 
     def _now(self) -> datetime:
         return self.now_func()
@@ -119,24 +149,29 @@ class AvitoParser:
         session = self._engine_sessions.pop(key, None)
         if session is None:
             return
+        self._cycle_counters.session_evict_count += 1
         try:
             await session.close()
         except Exception as exc:
+            self._cycle_counters.session_close_failure_count += 1
             logger.warning("avito_parser: failed to close browser session: %s", exc)
 
     async def _try_engine(self, url: str, proxy_url: str | None, engine: _Engine) -> dict:
         session = self._engine_sessions.get((engine, proxy_url))
         if session is not None:
+            self._cycle_counters.session_reuse_count += 1
             result = await session.fetch(url)
             if not result.get("ok") and result.get("error_type") == "exception":
                 await self._evict_engine_session(engine, proxy_url)
             return result
+        self._cycle_counters.engine_used = engine.value
         if engine == _Engine.NODRIVER:
             return await fetch_with_nodriver(url, proxy_url)
         return await fetch_with_camoufox(url, proxy_url)
 
     async def begin_cycle(self) -> None:
         self._cycle_active = True
+        self._cycle_counters = _CycleCounters()
 
     async def end_cycle(self) -> None:
         self._cycle_active = False
@@ -146,19 +181,27 @@ class AvitoParser:
             try:
                 await session.close()
             except Exception as exc:
+                self._cycle_counters.session_close_failure_count += 1
                 logger.warning("avito_parser: failed to close browser session: %s", exc)
+        logger.info("avito_parser.end_cycle stats=%s", self._cycle_counters.as_dict())
+
+    def cycle_stats(self) -> dict[str, int | str | None]:
+        return self._cycle_counters.as_dict().copy()
 
     async def ensure_engine_session(self, engine: _Engine, proxy_url: str | None) -> dict | None:
         if not self._cycle_active:
             return None
         key = (engine, proxy_url)
         if key in self._engine_sessions:
+            self._cycle_counters.session_reuse_count += 1
             return None
         try:
             if engine == _Engine.NODRIVER:
                 self._engine_sessions[key] = await open_nodriver_session(proxy_url)
             else:
                 self._engine_sessions[key] = await open_camoufox_session(proxy_url)
+            self._cycle_counters.session_open_count += 1
+            self._cycle_counters.engine_used = engine.value
         except Exception as exc:
             return {"ok": False, "engine": engine.value, "error_type": "exception", "error": str(exc)}
         return None
@@ -183,6 +226,8 @@ class AvitoParser:
         if result["ok"]:
             if proxy_url and self._proxy_manager:
                 self._proxy_manager.report_success(proxy_url)
+                self._cycle_counters.proxy_success_count += 1
+            self._cycle_counters.engine_used = self._prefer_engine.value
             return result["html"]
 
         _log.warning(
@@ -190,8 +235,12 @@ class AvitoParser:
             self._prefer_engine.value,
             result.get("error_type"),
         )
+        self._cycle_counters.block_detected_count += 1
+        self._cycle_counters.engine_fallback_count += 1
         if proxy_url and self._proxy_manager:
             self._proxy_manager.report_failure(proxy_url)
+            self._cycle_counters.proxy_failure_count += 1
+            self._cycle_counters.proxy_quarantine_count += 1
             proxy_url = self._proxy_manager.get_proxy()
 
         fallback = (
@@ -206,11 +255,15 @@ class AvitoParser:
         if result2["ok"]:
             if proxy_url and self._proxy_manager:
                 self._proxy_manager.report_success(proxy_url)
+                self._cycle_counters.proxy_success_count += 1
             self._prefer_engine = fallback
+            self._cycle_counters.engine_used = fallback.value
             return result2["html"]
 
         if proxy_url and self._proxy_manager:
             self._proxy_manager.report_failure(proxy_url)
+            self._cycle_counters.proxy_failure_count += 1
+            self._cycle_counters.proxy_quarantine_count += 1
 
         raise ParserError(
             ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK,
