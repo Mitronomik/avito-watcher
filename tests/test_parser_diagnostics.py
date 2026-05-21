@@ -729,6 +729,144 @@ def test_fetch_page_html_falls_back_when_nodriver_returns_timeout(monkeypatch):
     assert parser._prefer_engine == _Engine.CAMOUFOX
 
 
+def test_second_fetch_same_proxy_skips_nodriver_after_timeout(monkeypatch):
+    parser = AvitoParser()
+    parser._prefer_engine = _Engine.NODRIVER
+    proxy_url = "http://user:pass@1.2.3.4:8080"
+    calls: list[_Engine] = []
+
+    async def fake_try_engine(_url, _proxy_url, engine):
+        calls.append(engine)
+        if calls == [_Engine.NODRIVER]:
+            return {"ok": False, "error_type": "timeout", "error": "warmup timeout"}
+        return {"ok": True, "html": "<html>ok</html>"}
+
+    async def no_setup(*_args, **_kwargs):
+        return None
+
+    class FakeProxyManager:
+        def get_proxy(self):
+            return proxy_url
+
+        def report_failure(self, _proxy_url):
+            return None
+
+        def report_success(self, _proxy_url):
+            return None
+
+    parser._proxy_manager = FakeProxyManager()
+    monkeypatch.setattr(parser, "_try_engine", fake_try_engine)
+    monkeypatch.setattr(parser, "ensure_engine_session", no_setup)
+
+    first = asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+    second = asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+
+    assert first == "<html>ok</html>"
+    assert second == "<html>ok</html>"
+    assert calls == [_Engine.NODRIVER, _Engine.CAMOUFOX, _Engine.CAMOUFOX]
+
+
+def test_recent_nodriver_failure_not_inherited_by_other_proxy(monkeypatch):
+    parser = AvitoParser()
+    parser._prefer_engine = _Engine.NODRIVER
+    calls: list[tuple[str | None, _Engine]] = []
+    proxy_sequence = iter(
+        [
+            "http://user:pass@1.2.3.4:8080",
+            "http://user:pass@1.2.3.4:8080",
+            "http://user:pass@5.6.7.8:8080",
+        ]
+    )
+
+    async def fake_try_engine(_url, proxy_url, engine):
+        calls.append((proxy_url, engine))
+        if proxy_url == "http://user:pass@1.2.3.4:8080" and engine == _Engine.NODRIVER:
+            return {"ok": False, "error_type": "timeout", "error": "warmup timeout"}
+        return {"ok": True, "html": "<html>ok</html>"}
+
+    async def no_setup(*_args, **_kwargs):
+        return None
+
+    class FakeProxyManager:
+        def get_proxy(self):
+            return next(proxy_sequence)
+
+        def report_failure(self, _proxy_url):
+            return None
+
+        def report_success(self, _proxy_url):
+            return None
+
+    parser._proxy_manager = FakeProxyManager()
+    monkeypatch.setattr(parser, "_try_engine", fake_try_engine)
+    monkeypatch.setattr(parser, "ensure_engine_session", no_setup)
+
+    asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+    parser._prefer_engine = _Engine.NODRIVER
+    asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+
+    assert calls[0] == ("http://user:pass@1.2.3.4:8080", _Engine.NODRIVER)
+    assert calls[2] == ("http://user:pass@5.6.7.8:8080", _Engine.NODRIVER)
+
+
+def test_no_proxy_does_not_inherit_proxy_nodriver_failure(monkeypatch):
+    parser = AvitoParser()
+    parser._prefer_engine = _Engine.NODRIVER
+    calls: list[tuple[str | None, _Engine]] = []
+    proxy_sequence = iter(["http://user:pass@1.2.3.4:8080", "http://user:pass@1.2.3.4:8080", None])
+
+    async def fake_try_engine(_url, proxy_url, engine):
+        calls.append((proxy_url, engine))
+        if proxy_url == "http://user:pass@1.2.3.4:8080" and engine == _Engine.NODRIVER:
+            return {"ok": False, "error_type": "timeout", "error": "warmup timeout"}
+        return {"ok": True, "html": "<html>ok</html>"}
+
+    async def no_setup(*_args, **_kwargs):
+        return None
+
+    class FakeProxyManager:
+        def get_proxy(self):
+            return next(proxy_sequence)
+
+        def report_failure(self, _proxy_url):
+            return None
+
+        def report_success(self, _proxy_url):
+            return None
+
+    parser._proxy_manager = FakeProxyManager()
+    monkeypatch.setattr(parser, "_try_engine", fake_try_engine)
+    monkeypatch.setattr(parser, "ensure_engine_session", no_setup)
+
+    asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+    parser._prefer_engine = _Engine.NODRIVER
+    asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+
+    assert calls[0] == ("http://user:pass@1.2.3.4:8080", _Engine.NODRIVER)
+    assert calls[2] == (None, _Engine.NODRIVER)
+
+
+def test_successful_nodriver_does_not_mark_recent_failure(monkeypatch):
+    parser = AvitoParser()
+    parser._prefer_engine = _Engine.NODRIVER
+    calls: list[_Engine] = []
+
+    async def fake_try_engine(_url, _proxy_url, engine):
+        calls.append(engine)
+        return {"ok": True, "html": "<html>ok</html>"}
+
+    async def no_setup(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(parser, "_try_engine", fake_try_engine)
+    monkeypatch.setattr(parser, "ensure_engine_session", no_setup)
+
+    asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+    asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+
+    assert calls == [_Engine.NODRIVER, _Engine.NODRIVER]
+
+
 def test_fetch_page_html_cycle_mode_evicts_cached_session_on_timeout():
     parser = AvitoParser()
     parser._cycle_active = True
