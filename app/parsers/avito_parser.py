@@ -116,6 +116,7 @@ class _CycleCounters:
     engine_error_count: int = 0
     proxy_success_count: int = 0
     proxy_failure_count: int = 0
+    engine_skip_recent_failure_count: int = 0
 
     def as_dict(self) -> dict[str, int | str | None]:
         return {
@@ -129,6 +130,7 @@ class _CycleCounters:
             "engine_error_count": self.engine_error_count,
             "proxy_success_count": self.proxy_success_count,
             "proxy_failure_count": self.proxy_failure_count,
+            "engine_skip_recent_failure_count": self.engine_skip_recent_failure_count,
         }
 
 
@@ -138,11 +140,48 @@ class AvitoParser:
         self._proxy_manager = proxy_manager
         self._prefer_engine = _Engine.NODRIVER
         self._engine_sessions: dict[tuple[_Engine, str | None], BrowserSession] = {}
+        self._engine_recent_failures: dict[tuple[_Engine, str], int] = {}
         self._cycle_active = False
         self._cycle_counters = _CycleCounters()
 
     def _now(self) -> datetime:
         return self.now_func()
+
+    @staticmethod
+    def _proxy_key(proxy_url: str | None) -> str:
+        return proxy_url or "no_proxy"
+
+    def _choose_start_engine(self, proxy_url: str | None) -> _Engine:
+        proxy_key = self._proxy_key(proxy_url)
+        nodriver_failures = self._engine_recent_failures.get((_Engine.NODRIVER, proxy_key), 0)
+        start_engine = self._prefer_engine
+        if self._prefer_engine == _Engine.NODRIVER and nodriver_failures > 0:
+            self._cycle_counters.engine_skip_recent_failure_count += 1
+            start_engine = _Engine.CAMOUFOX
+            logger.info(
+                "avito_parser: skipping nodriver due to recent failures proxy=%s failures=%s",
+                proxy_key,
+                nodriver_failures,
+            )
+        logger.debug(
+            "avito_parser: engine decision proxy=%s global_prefer=%s start=%s nodriver_recent_failures=%s",
+            proxy_key,
+            self._prefer_engine.value,
+            start_engine.value,
+            nodriver_failures,
+        )
+        return start_engine
+
+    def _record_engine_result(self, engine: _Engine, proxy_url: str | None, result: dict) -> None:
+        proxy_key = self._proxy_key(proxy_url)
+        key = (engine, proxy_key)
+        if result.get("ok"):
+            self._engine_recent_failures.pop(key, None)
+            return
+        if engine != _Engine.NODRIVER:
+            return
+        if result.get("error_type") in {"timeout", "possible_captcha_or_block"}:
+            self._engine_recent_failures[key] = self._engine_recent_failures.get(key, 0) + 1
 
     async def _evict_engine_session(self, engine: _Engine, proxy_url: str | None) -> None:
         key = (engine, proxy_url)
@@ -220,18 +259,20 @@ class AvitoParser:
             proxy_url = self._proxy_manager.get_proxy()
 
         # First attempt
-        setup_error = await self.ensure_engine_session(self._prefer_engine, proxy_url)
-        result = setup_error or await self._try_engine(url, proxy_url, self._prefer_engine)
+        start_engine = self._choose_start_engine(proxy_url)
+        setup_error = await self.ensure_engine_session(start_engine, proxy_url)
+        result = setup_error or await self._try_engine(url, proxy_url, start_engine)
+        self._record_engine_result(start_engine, proxy_url, result)
         if result["ok"]:
             if proxy_url and self._proxy_manager:
                 self._proxy_manager.report_success(proxy_url)
                 self._cycle_counters.proxy_success_count += 1
-            self._cycle_counters.engine_used = self._prefer_engine.value
+            self._cycle_counters.engine_used = start_engine.value
             return result["html"]
 
         _log.warning(
             "avito_parser: %s blocked (error_type=%s), switching engine",
-            self._prefer_engine.value,
+            start_engine.value,
             result.get("error_type"),
         )
         if result.get("error_type") == "possible_captcha_or_block":
@@ -246,13 +287,14 @@ class AvitoParser:
 
         fallback = (
             _Engine.CAMOUFOX
-            if self._prefer_engine == _Engine.NODRIVER
+            if start_engine == _Engine.NODRIVER
             else _Engine.NODRIVER
         )
 
         # Fallback attempt
         setup_error2 = await self.ensure_engine_session(fallback, proxy_url)
         result2 = setup_error2 or await self._try_engine(url, proxy_url, fallback)
+        self._record_engine_result(fallback, proxy_url, result2)
         if result2["ok"]:
             if proxy_url and self._proxy_manager:
                 self._proxy_manager.report_success(proxy_url)
