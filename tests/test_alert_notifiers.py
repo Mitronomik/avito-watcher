@@ -66,6 +66,17 @@ def test_jsonl_outbox_writes_valid_json_line(tmp_path: Path):
     assert data["external_id"] == "42"
 
 
+
+
+def test_jsonl_outbox_maps_summary_to_llm_summary(tmp_path: Path):
+    out = tmp_path / "alerts" / "alerts.jsonl"
+    notifier = JsonlOutboxNotifier(enabled=True, path=str(out))
+    payload = {"external_id": "42", "summary": "LLM short summary"}
+    asyncio.run(notifier.send_listing_alert("msg", payload))
+
+    line = out.read_text(encoding="utf-8").strip()
+    data = json.loads(line)
+    assert data["llm_summary"] == "LLM short summary"
 def test_composite_continues_when_one_channel_fails():
     class Ok:
         channel_name = "jsonl"

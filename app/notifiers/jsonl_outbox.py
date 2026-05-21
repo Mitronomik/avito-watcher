@@ -29,7 +29,7 @@ class JsonlOutboxNotifier:
             "address": payload.get("address"),
             "published_label": payload.get("published_label"),
             "url": payload.get("url"),
-            "llm_summary": payload.get("llm_summary"),
+            "llm_summary": payload.get("summary", payload.get("llm_summary")),
             "search_name": payload.get("search_name"),
             "message": message,
         }

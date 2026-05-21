@@ -439,15 +439,18 @@ class MonitorService:
                 filtered_by_publication_date += 1
                 continue
 
-            scored += 1
-            try:
-                llm = await self.scorer.score(card)
-            except Exception as exc:
-                llm = {
-                    "score": 0,
-                    "summary": f"LLM scoring unavailable: {exc}",
-                    "tags": ["llm_error"],
-                }
+            if settings.scoring_enabled:
+                scored += 1
+                try:
+                    llm = await self.scorer.score(card)
+                except Exception as exc:
+                    llm = {
+                        "score": 0,
+                        "summary": f"LLM scoring unavailable: {exc}",
+                        "tags": ["llm_error"],
+                    }
+            else:
+                llm = {"score": None, "summary": "", "tags": []}
 
             listing_repo.create_snapshot(
                 external_id=card.external_id,
