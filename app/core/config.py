@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Literal
 
 
 class Settings(BaseSettings):
@@ -20,6 +21,7 @@ class Settings(BaseSettings):
     scrape_humanize: bool = False
     scrape_timeout_ms: int = 45000
     scrape_concurrency: int = 2
+    scrape_preferred_engine: Literal["auto", "nodriver", "camoufox"] = "auto"
     proxy_urls: str = ""
     alert_channels: str = "jsonl,telegram"
     email_enabled: bool = False

@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from urllib.parse import urljoin, urlparse
 
 from app.parsers.block_signals import looks_like_block_or_captcha
+from app.core.config import settings
 from app.parsers.browser_engine import fetch_with_camoufox, fetch_with_nodriver, open_camoufox_session, open_nodriver_session
 from app.parsers.errors import ParserError, ParserErrorType
 from app.parsers.proxy_manager import ProxyManager
@@ -117,6 +118,10 @@ class _CycleCounters:
     proxy_success_count: int = 0
     proxy_failure_count: int = 0
     engine_skip_recent_failure_count: int = 0
+    preferred_engine: str | None = None
+    selected_first_engine: str | None = None
+    engine_selection_changed_by_health_memory: bool = False
+    fallback_used: bool = False
 
     def as_dict(self) -> dict[str, int | str | None]:
         return {
@@ -131,14 +136,21 @@ class _CycleCounters:
             "proxy_success_count": self.proxy_success_count,
             "proxy_failure_count": self.proxy_failure_count,
             "engine_skip_recent_failure_count": self.engine_skip_recent_failure_count,
+            "preferred_engine": self.preferred_engine,
+            "selected_first_engine": self.selected_first_engine,
+            "engine_selection_changed_by_health_memory": self.engine_selection_changed_by_health_memory,
+            "fallback_used": self.fallback_used,
         }
 
 
 class AvitoParser:
-    def __init__(self, now_func=None, proxy_manager: ProxyManager | None = None) -> None:
+    def __init__(self, now_func=None, proxy_manager: ProxyManager | None = None, preferred_engine: str | None = None) -> None:
         self.now_func = now_func or (lambda: datetime.now(UTC))
         self._proxy_manager = proxy_manager
         self._prefer_engine = _Engine.NODRIVER
+        self._preferred_engine_mode = preferred_engine or settings.scrape_preferred_engine
+        if self._preferred_engine_mode not in {"auto", "nodriver", "camoufox"}:
+            raise ValueError("preferred_engine must be one of: auto, nodriver, camoufox")
         self._engine_sessions: dict[tuple[_Engine, str | None], BrowserSession] = {}
         self._engine_recent_failures: dict[tuple[_Engine, str], int] = {}
         self._cycle_active = False
@@ -154,20 +166,33 @@ class AvitoParser:
     def _choose_start_engine(self, proxy_url: str | None) -> _Engine:
         proxy_key = self._proxy_key(proxy_url)
         nodriver_failures = self._engine_recent_failures.get((_Engine.NODRIVER, proxy_key), 0)
-        start_engine = self._prefer_engine
-        if self._prefer_engine == _Engine.NODRIVER and nodriver_failures > 0:
+        if self._preferred_engine_mode == "camoufox":
+            preferred_engine = _Engine.CAMOUFOX
+        elif self._preferred_engine_mode == "nodriver":
+            preferred_engine = _Engine.NODRIVER
+        else:
+            preferred_engine = self._prefer_engine
+
+        start_engine = preferred_engine
+        changed_by_health = False
+        if preferred_engine == _Engine.NODRIVER and nodriver_failures > 0:
             self._cycle_counters.engine_skip_recent_failure_count += 1
             start_engine = _Engine.CAMOUFOX
+            changed_by_health = True
             logger.info(
                 "avito_parser: skipping nodriver due to recent failures proxy=%s failures=%s",
                 proxy_key,
                 nodriver_failures,
             )
+        self._cycle_counters.preferred_engine = self._preferred_engine_mode
+        self._cycle_counters.selected_first_engine = start_engine.value
+        self._cycle_counters.engine_selection_changed_by_health_memory = changed_by_health
         logger.debug(
-            "avito_parser: engine decision proxy=%s global_prefer=%s start=%s nodriver_recent_failures=%s",
+            "avito_parser: engine decision proxy=%s preferred_engine=%s selected_first_engine=%s changed_by_health_memory=%s nodriver_recent_failures=%s",
             proxy_key,
-            self._prefer_engine.value,
+            self._preferred_engine_mode,
             start_engine.value,
+            changed_by_health,
             nodriver_failures,
         )
         return start_engine
@@ -280,6 +305,7 @@ class AvitoParser:
         else:
             self._cycle_counters.engine_error_count += 1
         self._cycle_counters.engine_fallback_count += 1
+        self._cycle_counters.fallback_used = True
         if proxy_url and self._proxy_manager:
             self._proxy_manager.report_failure(proxy_url)
             self._cycle_counters.proxy_failure_count += 1

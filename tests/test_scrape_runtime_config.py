@@ -1,4 +1,5 @@
 from app.core.config import Settings
+import pytest
 
 
 def test_scrape_headless_default_true():
@@ -19,3 +20,15 @@ def test_scrape_runtime_env_overrides(monkeypatch):
 
     assert settings.scrape_headless is False
     assert settings.scrape_humanize is True
+
+
+def test_scrape_preferred_engine_default_auto():
+    settings = Settings(database_url="sqlite:///tmp.db", _env_file=None)
+    assert settings.scrape_preferred_engine == "auto"
+
+
+def test_scrape_preferred_engine_invalid_value_fails_clearly(monkeypatch):
+    monkeypatch.setenv("SCRAPE_PREFERRED_ENGINE", "bad")
+    with pytest.raises(Exception) as exc_info:
+        Settings(database_url="sqlite:///tmp.db", _env_file=None)
+    assert "scrape_preferred_engine" in str(exc_info.value)

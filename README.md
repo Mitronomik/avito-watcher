@@ -20,9 +20,13 @@ cp .env.example .env
 - `SCRAPE_HEADLESS=true` — рекомендуется для Docker/VPS и используется по умолчанию.
 - `SCRAPE_HUMANIZE=false` — опциональная «человечная» прокрутка/паузы; по умолчанию выключена.
 - `PROXY_URLS` — опциональный список прокси через запятую.
+- `SCRAPE_PREFERRED_ENGINE=auto|nodriver|camoufox` — выбор первого движка скрейпинга; по умолчанию `auto`.
 - `SCORING_ENABLED=false` — опционально отключает LLM scoring, чтобы изолировать browser/proxy smoke от доступности Ollama/модели.
 
 Поддерживаемые схемы прокси: `http://` и `https://`.
+
+- Режим `camoufox` может быть полезен, если `nodriver` стабильно упирается в timeout на конкретном прокси.
+- Fallback между движками остаётся включённым всегда, независимо от `SCRAPE_PREFERRED_ENGINE`.
 
 Пример:
 
@@ -30,6 +34,7 @@ cp .env.example .env
 SCRAPE_HEADLESS=true
 SCRAPE_HUMANIZE=false
 PROXY_URLS=http://user:pass@host:port,https://user:pass@host2:port2
+SCRAPE_PREFERRED_ENGINE=auto
 ```
 
 ### Troubleshooting прокси
