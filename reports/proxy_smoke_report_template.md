@@ -28,7 +28,7 @@ Date (UTC): YYYY-MM-DD
 - Nodriver proxy navigation timeout (warmup or target) reported as `error_type=timeout`.
 - Known non-blocking limitation (macOS + Python 3.12): isolated `fetch_with_nodriver` smoke can print finalizer warnings after a controlled timeout, e.g. `Exception ignored in: <function BaseSubprocessTransport.__del__ ...>` and `RuntimeError: Event loop is closed`.
 - Reproduce isolated warning with a minimal timeout smoke command, for example:
-  `python3 - <<'PY'\nimport asyncio\nfrom app.parsers.browser_engine import fetch_with_nodriver\n\nasync def main():\n    result = await fetch_with_nodriver('https://www.avito.ru/', proxy=None, timeout_ms=30000)\n    print(result)\n\nasyncio.run(main())\nPY`
+  `SCRAPE_TIMEOUT_MS=30000 python3 - <<'PY'\nimport asyncio\nimport os\nfrom app.parsers.browser_engine import fetch_with_nodriver\n\nasync def main():\n    proxy_url = os.environ.get('PROXY_URLS') or None\n    result = await fetch_with_nodriver('https://www.avito.ru/', proxy_url)\n    print(result)\n\nasyncio.run(main())\nPY`
 - Production acceptance criterion is **MonitorService run-once completion** (successful one-pass monitoring with parser fallback/alerts/DB flow), not absence of the isolated nodriver finalizer warning.
 - Camoufox `Page.goto` timeout on Avito warmup/target reported as `error_type=timeout`.
 - macOS limitation: Camoufox virtual display is Linux-only.
