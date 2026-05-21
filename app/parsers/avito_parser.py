@@ -161,7 +161,7 @@ class AvitoParser:
         if session is not None:
             self._cycle_counters.session_reuse_count += 1
             result = await session.fetch(url)
-            if not result.get("ok") and result.get("error_type") == "exception":
+            if not result.get("ok") and result.get("error_type") in {"exception", "timeout"}:
                 await self._evict_engine_session(engine, proxy_url)
             return result
         self._cycle_counters.engine_used = engine.value

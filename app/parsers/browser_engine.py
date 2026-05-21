@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import inspect
+import platform
 import random
 from typing import Optional
 
@@ -116,6 +117,20 @@ def _is_humanize_enabled() -> bool:
     return settings.scrape_humanize
 
 
+def _timeout_seconds() -> float:
+    return max(settings.scrape_timeout_ms / 1000, 0.1)
+
+
+def _timeout_result(engine: str, phase: str) -> dict:
+    timeout_ms = settings.scrape_timeout_ms
+    return {
+        "ok": False,
+        "engine": engine,
+        "error_type": "timeout",
+        "error": f"{phase} navigation timeout after {timeout_ms}ms",
+    }
+
+
 async def _humanize_nodriver_page(page) -> None:
     scrolls = random.randint(1, 3)
     for _ in range(scrolls):
@@ -151,10 +166,12 @@ class _NodriverSession:
         if self._warmed_up:
             return None
         try:
-            _ = await self._browser.get("https://www.avito.ru/")
+            _ = await asyncio.wait_for(self._browser.get("https://www.avito.ru/"), timeout=_timeout_seconds())
             await asyncio.sleep(random.uniform(2.0, 4.0))
             self._warmed_up = True
             return None
+        except asyncio.TimeoutError:
+            return _timeout_result("nodriver", "warmup")
         except Exception as exc:
             return {"ok": False, "engine": "nodriver", "error_type": "exception", "error": str(exc)}
 
@@ -163,7 +180,7 @@ class _NodriverSession:
             warmup_result = await self._ensure_warmup()
             if warmup_result is not None:
                 return warmup_result
-            page = await self._browser.get(url)
+            page = await asyncio.wait_for(self._browser.get(url), timeout=_timeout_seconds())
             if _is_humanize_enabled():
                 try:
                     await _humanize_nodriver_page(page)
@@ -177,6 +194,8 @@ class _NodriverSession:
                 return {"ok": False, "engine": "nodriver", "error_type": "possible_captcha_or_block"}
             cards_count: int = await page.evaluate("document.querySelectorAll('[data-marker=\"item\"]').length")
             return {"ok": True, "engine": "nodriver", "html": html, "cards_count": cards_count}
+        except asyncio.TimeoutError:
+            return _timeout_result("nodriver", "target")
         except Exception as exc:
             return {"ok": False, "engine": "nodriver", "error_type": "exception", "error": str(exc)}
 
@@ -194,11 +213,19 @@ class _CamoufoxSession:
         if self._warmed_up:
             return None
         try:
-            await self._page.goto("https://www.avito.ru/", wait_until="domcontentloaded")
+            await self._page.goto(
+                "https://www.avito.ru/",
+                wait_until="domcontentloaded",
+                timeout=settings.scrape_timeout_ms,
+            )
             await asyncio.sleep(random.uniform(2.0, 4.0))
             self._warmed_up = True
             return None
+        except asyncio.TimeoutError:
+            return _timeout_result("camoufox", "warmup")
         except Exception as exc:
+            if "Timeout" in str(exc):
+                return _timeout_result("camoufox", "warmup")
             return {"ok": False, "engine": "camoufox", "error_type": "exception", "error": str(exc)}
 
     async def fetch(self, url: str) -> dict:
@@ -206,7 +233,7 @@ class _CamoufoxSession:
             warmup_result = await self._ensure_warmup()
             if warmup_result is not None:
                 return warmup_result
-            await self._page.goto(url, wait_until="domcontentloaded")
+            await self._page.goto(url, wait_until="domcontentloaded", timeout=settings.scrape_timeout_ms)
             if _is_humanize_enabled():
                 try:
                     await _humanize_camoufox_page(self._page)
@@ -220,7 +247,11 @@ class _CamoufoxSession:
                 return {"ok": False, "engine": "camoufox", "error_type": "possible_captcha_or_block"}
             cards_count = await self._page.locator('[data-marker="item"]').count()
             return {"ok": True, "engine": "camoufox", "html": html, "cards_count": cards_count}
+        except asyncio.TimeoutError:
+            return _timeout_result("camoufox", "target")
         except Exception as exc:
+            if "Timeout" in str(exc):
+                return _timeout_result("camoufox", "target")
             return {"ok": False, "engine": "camoufox", "error_type": "exception", "error": str(exc)}
 
     async def close(self) -> None:
@@ -237,7 +268,7 @@ async def open_nodriver_session(proxy_url: Optional[str]):
     try:
         tab = browser.main_tab
         if tab is None:
-            _ = await browser.get("about:blank")
+            _ = await asyncio.wait_for(browser.get("about:blank"), timeout=_timeout_seconds())
             tab = browser.main_tab
 
         if tab is not None:
@@ -283,8 +314,16 @@ async def open_camoufox_session(proxy_url: Optional[str]):
     from camoufox.async_api import AsyncCamoufox  # noqa: PLC0415
 
     proxy_cfg = _parse_proxy_url(proxy_url) if proxy_url else None
-    _cf_headless = "virtual" if settings.scrape_headless else False
-    browser_cm = AsyncCamoufox(headless=_cf_headless, proxy=proxy_cfg)
+    system_name = platform.system()
+    if settings.scrape_headless:
+        # Camoufox virtual display is Linux-only; use native headless on macOS.
+        _cf_headless = "virtual" if system_name == "Linux" else True
+    else:
+        _cf_headless = False
+    camoufox_kwargs = {"headless": _cf_headless, "proxy": proxy_cfg}
+    if proxy_cfg:
+        camoufox_kwargs["geoip"] = True
+    browser_cm = AsyncCamoufox(**camoufox_kwargs)
     browser = await browser_cm.__aenter__()
     try:
         page = await browser.new_page()
@@ -321,6 +360,8 @@ async def fetch_with_nodriver(url: str, proxy_url: Optional[str]) -> dict:
         return result
     except Exception as exc:
         logger.warning("[browser_engine] nodriver exception: %s", exc)
+        if isinstance(exc, asyncio.TimeoutError):
+            return _timeout_result("nodriver", "setup")
         return {"ok": False, "engine": "nodriver", "error_type": "exception", "error": str(exc)}
     finally:
         if session is not None:

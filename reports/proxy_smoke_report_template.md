@@ -22,3 +22,9 @@ Date (UTC): YYYY-MM-DD
   - warmup:
   - listing fetch:
   - fallback (if any):
+
+## Known failure modes to capture in notes
+- Nodriver proxy navigation timeout (warmup or target) reported as `error_type=timeout`.
+- Camoufox `Page.goto` timeout on Avito warmup/target reported as `error_type=timeout`.
+- macOS limitation: Camoufox virtual display is Linux-only.
+  Local smoke on macOS may require `SCRAPE_HEADLESS=false` unless platform-aware headless handling is available.
