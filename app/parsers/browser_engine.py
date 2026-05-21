@@ -117,6 +117,20 @@ def _is_humanize_enabled() -> bool:
     return settings.scrape_humanize
 
 
+def _timeout_seconds() -> float:
+    return max(settings.scrape_timeout_ms / 1000, 0.1)
+
+
+def _timeout_result(engine: str, phase: str) -> dict:
+    timeout_ms = settings.scrape_timeout_ms
+    return {
+        "ok": False,
+        "engine": engine,
+        "error_type": "timeout",
+        "error": f"{phase} navigation timeout after {timeout_ms}ms",
+    }
+
+
 async def _humanize_nodriver_page(page) -> None:
     scrolls = random.randint(1, 3)
     for _ in range(scrolls):
@@ -254,7 +268,7 @@ async def open_nodriver_session(proxy_url: Optional[str]):
     try:
         tab = browser.main_tab
         if tab is None:
-            _ = await browser.get("about:blank")
+            _ = await asyncio.wait_for(browser.get("about:blank"), timeout=_timeout_seconds())
             tab = browser.main_tab
 
         if tab is not None:
@@ -346,6 +360,8 @@ async def fetch_with_nodriver(url: str, proxy_url: Optional[str]) -> dict:
         return result
     except Exception as exc:
         logger.warning("[browser_engine] nodriver exception: %s", exc)
+        if isinstance(exc, asyncio.TimeoutError):
+            return _timeout_result("nodriver", "setup")
         return {"ok": False, "engine": "nodriver", "error_type": "exception", "error": str(exc)}
     finally:
         if session is not None:
@@ -389,15 +405,3 @@ async def fetch_with_camoufox(url: str, proxy_url: Optional[str]) -> dict:
                 await session.close()
             except Exception:
                 pass
-def _timeout_seconds() -> float:
-    return max(settings.scrape_timeout_ms / 1000, 0.1)
-
-
-def _timeout_result(engine: str, phase: str) -> dict:
-    timeout_ms = settings.scrape_timeout_ms
-    return {
-        "ok": False,
-        "engine": engine,
-        "error_type": "timeout",
-        "error": f"{phase} navigation timeout after {timeout_ms}ms",
-    }

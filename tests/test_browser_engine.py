@@ -320,6 +320,39 @@ def test_open_nodriver_session_stops_browser_when_setup_fails(monkeypatch):
     assert "stop" in events
 
 
+def test_open_nodriver_session_about_blank_timeout_is_cleaned_up(monkeypatch):
+    events = []
+
+    class FakeBrowser:
+        def __init__(self):
+            self.main_tab = None
+
+        async def get(self, nav_url):
+            if nav_url == "about:blank":
+                raise asyncio.TimeoutError()
+            return None
+
+        def stop(self):
+            events.append("stop")
+
+    fake_uc = ModuleType("nodriver")
+
+    async def fake_start(*, headless, browser_args):
+        return FakeBrowser()
+
+    fake_uc.start = fake_start
+    fake_uc.cdp = SimpleNamespace(
+        page=SimpleNamespace(add_script_to_evaluate_on_new_document=lambda source: ("page.script", source)),
+        fetch=SimpleNamespace(AuthRequired="AuthRequired", enable=lambda **kwargs: ("fetch.enable", kwargs), AuthChallengeResponse=lambda **kwargs: kwargs, continue_with_auth=lambda **kwargs: kwargs),
+    )
+    monkeypatch.setitem(sys.modules, "nodriver", fake_uc)
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(open_nodriver_session(None))
+
+    assert "stop" in events
+
+
 def test_nodriver_session_warmup_runs_once_per_session(monkeypatch):
     events = []
 
@@ -451,6 +484,19 @@ def test_fetch_with_nodriver_closes_session_after_one_call(monkeypatch):
 
     assert result["ok"] is True
     assert events == ["closed"]
+
+
+def test_fetch_with_nodriver_returns_controlled_timeout_on_setup_timeout(monkeypatch):
+    fake_uc = ModuleType("nodriver")
+    monkeypatch.setitem(sys.modules, "nodriver", fake_uc)
+
+    async def fake_open(_proxy):
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr("app.parsers.browser_engine.open_nodriver_session", fake_open)
+    result = asyncio.run(fetch_with_nodriver("https://www.avito.ru/a", None))
+    assert result["ok"] is False
+    assert result["error_type"] == "timeout"
 
 
 def test_fetch_with_camoufox_closes_session_after_one_call(monkeypatch):
