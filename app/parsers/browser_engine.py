@@ -148,12 +148,19 @@ async def _humanize_camoufox_page(page) -> None:
 
 
 async def _stop_browser_best_effort(browser) -> None:
+    cleanup_timeout_seconds = min(_timeout_seconds(), 5.0)
     try:
         stop_result = browser.stop()
         if inspect.isawaitable(stop_result):
-            await stop_result
+            await asyncio.wait_for(stop_result, timeout=cleanup_timeout_seconds)
+    except asyncio.TimeoutError:
+        logger.warning("[browser_engine] nodriver stop timed out after %.2fs", cleanup_timeout_seconds)
     except Exception as exc:
         logger.warning("[browser_engine] nodriver stop failed: %s", exc)
+    finally:
+        # Give subprocess transports a chance to run close callbacks before loop shutdown.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
 
 
 class _NodriverSession:
@@ -161,6 +168,8 @@ class _NodriverSession:
         self._uc = uc_module
         self._browser = browser
         self._warmed_up = False
+        self._closed = False
+        self._broken = False
 
     async def _ensure_warmup(self) -> dict | None:
         if self._warmed_up:
@@ -171,9 +180,17 @@ class _NodriverSession:
             self._warmed_up = True
             return None
         except asyncio.TimeoutError:
+            self._broken = True
+            await self.close()
             return _timeout_result("nodriver", "warmup")
         except Exception as exc:
+            self._broken = True
+            await self.close()
             return {"ok": False, "engine": "nodriver", "error_type": "exception", "error": str(exc)}
+
+    @property
+    def broken(self) -> bool:
+        return self._broken
 
     async def fetch(self, url: str) -> dict:
         try:
@@ -195,11 +212,18 @@ class _NodriverSession:
             cards_count: int = await page.evaluate("document.querySelectorAll('[data-marker=\"item\"]').length")
             return {"ok": True, "engine": "nodriver", "html": html, "cards_count": cards_count}
         except asyncio.TimeoutError:
+            self._broken = True
+            await self.close()
             return _timeout_result("nodriver", "target")
         except Exception as exc:
+            self._broken = True
+            await self.close()
             return {"ok": False, "engine": "nodriver", "error_type": "exception", "error": str(exc)}
 
     async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         await _stop_browser_best_effort(self._browser)
 
 
@@ -208,6 +232,8 @@ class _CamoufoxSession:
         self._browser = browser
         self._page = page
         self._warmed_up = False
+        self._closed = False
+        self._broken = False
 
     async def _ensure_warmup(self) -> dict | None:
         if self._warmed_up:
@@ -227,6 +253,10 @@ class _CamoufoxSession:
             if "Timeout" in str(exc):
                 return _timeout_result("camoufox", "warmup")
             return {"ok": False, "engine": "camoufox", "error_type": "exception", "error": str(exc)}
+
+    @property
+    def broken(self) -> bool:
+        return self._broken
 
     async def fetch(self, url: str) -> dict:
         try:
