@@ -485,7 +485,11 @@ def test_run_all_searches_records_one_failure_and_continues_next_search(
     db_session.refresh(first)
     db_session.refresh(second)
     assert parser.calls == 2
-    assert result[0] == {"search": "first", "error": "parser failed"}
+    assert result[0]["search"] == "first"
+    assert result[0]["error"] == "parser failed"
+    assert "elapsed_ms" in result[0]
+    assert "parser_stats" in result[0]
+    assert isinstance(result[0]["elapsed_ms"], int)
     assert result[1]["search"] == "second"
     assert "parser_stats" in result[1]
     assert "elapsed_ms" in result[1]

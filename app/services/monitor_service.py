@@ -567,11 +567,17 @@ class MonitorService:
                 searches = repo.list_due_active(_utcnow())
                 results = []
                 for search in searches:
+                    started_at = time.perf_counter()
                     try:
                         result = await self.process_search(db, search)
                     except Exception as exc:
                         logger.exception("search check failed", extra={"search": search.name})
-                        result = {"search": search.name, "error": str(exc)}
+                        result = {
+                            "search": search.name,
+                            "error": str(exc),
+                            "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+                            "parser_stats": self._parser_stats_snapshot(),
+                        }
                     else:
                         result["search"] = search.name
                     results.append(result)
