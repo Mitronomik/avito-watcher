@@ -288,6 +288,8 @@ class _NodriverSession:
         self._broken = False
 
     async def _ensure_warmup(self) -> dict | None:
+        if self._closed:
+            return {"ok": False, "engine": "nodriver", "error_type": "exception", "error": "nodriver session is closed"}
         if self._warmed_up:
             return None
         try:
@@ -309,6 +311,8 @@ class _NodriverSession:
         return self._broken
 
     async def fetch(self, url: str) -> dict:
+        if self._closed:
+            return {"ok": False, "engine": "nodriver", "error_type": "exception", "error": "nodriver session is closed"}
         try:
             warmup_result = await self._ensure_warmup()
             if warmup_result is not None:
@@ -340,7 +344,10 @@ class _NodriverSession:
         if self._closed:
             return
         self._closed = True
-        await _stop_browser_best_effort(self._browser)
+        browser = self._browser
+        await _stop_browser_best_effort(browser)
+        self._browser = None
+        self._uc = None
 
 
 class _CamoufoxSession:
@@ -352,6 +359,8 @@ class _CamoufoxSession:
         self._broken = False
 
     async def _ensure_warmup(self) -> dict | None:
+        if self._closed:
+            return {"ok": False, "engine": "nodriver", "error_type": "exception", "error": "nodriver session is closed"}
         if self._warmed_up:
             return None
         try:
@@ -375,6 +384,8 @@ class _CamoufoxSession:
         return self._broken
 
     async def fetch(self, url: str) -> dict:
+        if self._closed:
+            return {"ok": False, "engine": "nodriver", "error_type": "exception", "error": "nodriver session is closed"}
         try:
             warmup_result = await self._ensure_warmup()
             if warmup_result is not None:
@@ -515,6 +526,10 @@ async def fetch_with_nodriver(url: str, proxy_url: Optional[str]) -> dict:
                 await session.close()
             except Exception:
                 pass
+            session = None
+            gc.collect()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0.1)
 
 
 # ---------------------------------------------------------------------------
@@ -551,3 +566,7 @@ async def fetch_with_camoufox(url: str, proxy_url: Optional[str]) -> dict:
                 await session.close()
             except Exception:
                 pass
+            session = None
+            gc.collect()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0.1)
