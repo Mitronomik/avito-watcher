@@ -1060,6 +1060,51 @@ def test_nodriver_target_navigation_timeout_returns_controlled_timeout(monkeypat
     assert result["error_type"] == "timeout"
 
 
+
+
+def test_camoufox_fetch_after_close_returns_camoufox_engine_error():
+    class Browser:
+        async def __aexit__(self, *_args):
+            return None
+
+    class Page:
+        async def goto(self, *_args, **_kwargs):
+            return None
+
+    session = _CamoufoxSession(browser=Browser(), page=Page())
+
+    async def _run():
+        await session.close()
+        return await session.fetch("https://www.avito.ru/a")
+
+    result = asyncio.run(_run())
+
+    assert result == {
+        "ok": False,
+        "engine": "camoufox",
+        "error_type": "exception",
+        "error": "camoufox session is closed",
+    }
+
+
+def test_camoufox_session_close_is_idempotent():
+    class Browser:
+        def __init__(self):
+            self.calls = 0
+
+        async def __aexit__(self, *_args):
+            self.calls += 1
+            return None
+
+    session = _CamoufoxSession(browser=Browser(), page=SimpleNamespace())
+
+    async def _run():
+        await session.close()
+        await session.close()
+
+    asyncio.run(_run())
+
+    assert session._browser.calls == 1
 def test_camoufox_warmup_timeout_classified_as_timeout():
     class TimeoutPage:
         async def goto(self, *_args, **_kwargs):

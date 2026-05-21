@@ -360,7 +360,7 @@ class _CamoufoxSession:
 
     async def _ensure_warmup(self) -> dict | None:
         if self._closed:
-            return {"ok": False, "engine": "nodriver", "error_type": "exception", "error": "nodriver session is closed"}
+            return {"ok": False, "engine": "camoufox", "error_type": "exception", "error": "camoufox session is closed"}
         if self._warmed_up:
             return None
         try:
@@ -385,7 +385,7 @@ class _CamoufoxSession:
 
     async def fetch(self, url: str) -> dict:
         if self._closed:
-            return {"ok": False, "engine": "nodriver", "error_type": "exception", "error": "nodriver session is closed"}
+            return {"ok": False, "engine": "camoufox", "error_type": "exception", "error": "camoufox session is closed"}
         try:
             warmup_result = await self._ensure_warmup()
             if warmup_result is not None:
@@ -412,6 +412,9 @@ class _CamoufoxSession:
             return {"ok": False, "engine": "camoufox", "error_type": "exception", "error": str(exc)}
 
     async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         await self._browser.__aexit__(None, None, None)
 
 
