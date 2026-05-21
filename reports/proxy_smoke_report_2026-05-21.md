@@ -1,58 +1,62 @@
-# Proxy smoke report
+# Proxy/browser/Ollama smoke report
 
-Date (UTC): 2026-05-21
+Date: 2026-05-21
+
+## Result
+
+PASS_WITH_NOTES
 
 ## Environment
 
-- PROXY_URLS: `http://***:***@mproxy.site:11102`
-- SCRAPE_HEADLESS: `true`
-- SCRAPE_HUMANIZE: `false`
-- ALERT_CHANNELS: `jsonl`
-- DATABASE_URL: `sqlite:///tmp.db`
-- Python: `python3`
+- Proxy: authenticated HTTP proxy, redacted
+- SCRAPE_HEADLESS=false
+- SCRAPE_HUMANIZE=false
+- SCRAPE_TIMEOUT_MS=30000
+- ALERT_CHANNELS=jsonl
+- OLLAMA_MODEL=qwen2.5:7b-instruct
+- Database: PostgreSQL docker compose
+- Search job: spb_proxy_smoke_2026_05_21
 
-## Proxy connectivity
+## Findings
 
-### curl ipify
+### Browser/proxy
 
-Result: PASS
+- curl through proxy to ipify: PASS
+- curl through proxy to Avito: QRATOR 403, acceptable for raw curl
+- nodriver through proxy: controlled timeout on warmup, no infinite hang
+- parser fallback after nodriver timeout: PASS
+- monitor run completed: PASS
 
-Observed:
-- Proxy CONNECT tunnel established.
-- Proxy auth accepted.
-- Public IP returned: `94.25.229.246`.
-- No `407 Proxy Authentication Required`.
+### Monitor result
 
-### curl Avito
+Observed result:
 
-Result: EXPECTED_CURL_BLOCK
+- created: 8
+- alerted: 8
+- scored: 8
+- total_seen: 30
+- baseline_initialized: true
+- baseline_run: false
+- fail_count: 0
+- last_error: empty
 
-Observed:
-- Proxy CONNECT tunnel established.
-- Avito/QRATOR returned `HTTP/2 403`.
+### Ollama/scoring
 
-Interpretation:
-- This is acceptable for raw curl because Avito/QRATOR may block non-browser clients.
-- Browser-based smoke is required for final validation.
+- Ollama version: 0.24.0
+- Installed model: qwen2.5:7b-instruct
+- /api/chat: PASS
+- ListingScorer direct test: PASS
+- Monitor scoring: PASS
 
-## Browser/parser smoke
+### JSONL
 
-Command type:
-- Direct `AvitoParser.fetch_search_cards(...)` smoke with `asyncio.wait_for(timeout=90)`.
-
-Result: PASS
-
-Observed:
-- `ok: true`
-- `total_cards: 30`
-- First parsed cards included valid `external_id`, `title`, `price`, `url`.
+- JSONL alerts created.
+- search_name is present.
+- message includes LLM summary.
+- Structured field llm_summary is null due to payload key mismatch.
+- Follow-up PR needed: map payload["summary"] to JSONL llm_summary.
 
 ## Conclusion
 
-Authenticated proxy works with the current browser/parser stack.
-Core parser path successfully loads and parses Avito search results through the proxy.
-
-## Remaining notes
-
-- Previous plain CLI dry-run was interrupted while nodriver was awaiting Avito warmup navigation.
-- Recommended follow-up: add internal navigation timeout around browser warmup/target navigation so worker cannot hang indefinitely on slow browser navigation.
+The proxy/browser/fallback/monitor/scoring pipeline is operational.
+Remaining issue is JSONL summary field mapping and optional scoring disable flag for cleaner smoke testing.
