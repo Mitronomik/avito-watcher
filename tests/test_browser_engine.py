@@ -377,7 +377,7 @@ def test_camoufox_session_warmup_runs_once_per_session(monkeypatch):
             return 3
 
     class FakePage:
-        async def goto(self, url, wait_until):
+        async def goto(self, url, wait_until, timeout=None):
             events.append((url, wait_until))
 
         async def title(self):
@@ -574,7 +574,7 @@ def test_humanize_exception_is_logged_and_non_fatal_camoufox(monkeypatch, caplog
         def __init__(self):
             self.mouse = FakeMouse()
 
-        async def goto(self, _url, wait_until):
+        async def goto(self, _url, wait_until, timeout=None):
             return wait_until
 
         async def title(self):
@@ -676,3 +676,158 @@ def test_open_nodriver_session_stop_failure_is_logged_non_fatal(monkeypatch, cap
         asyncio.run(open_nodriver_session(None))
 
     assert "nodriver stop failed" in caplog.text
+
+
+def test_nodriver_warmup_navigation_timeout_returns_controlled_timeout():
+    class BrokenBrowser:
+        async def get(self, _url):
+            raise asyncio.TimeoutError()
+
+        def stop(self):
+            return None
+
+    session = _NodriverSession(uc_module=SimpleNamespace(), browser=BrokenBrowser())
+    result = asyncio.run(session.fetch("https://www.avito.ru/a"))
+    assert result["ok"] is False
+    assert result["error_type"] == "timeout"
+
+
+def test_nodriver_target_navigation_timeout_returns_controlled_timeout(monkeypatch):
+    class Browser:
+        def __init__(self):
+            self.calls = 0
+
+        async def get(self, _url):
+            self.calls += 1
+            if self.calls == 1:
+                return SimpleNamespace()
+            raise asyncio.TimeoutError()
+
+        def stop(self):
+            return None
+
+    async def _fast_sleep(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.parsers.browser_engine.asyncio.sleep", _fast_sleep)
+    session = _NodriverSession(uc_module=SimpleNamespace(), browser=Browser())
+    result = asyncio.run(session.fetch("https://www.avito.ru/a"))
+    assert result["ok"] is False
+    assert result["error_type"] == "timeout"
+
+
+def test_camoufox_warmup_timeout_classified_as_timeout():
+    class TimeoutPage:
+        async def goto(self, *_args, **_kwargs):
+            raise RuntimeError("Page.goto: Timeout 30000ms exceeded")
+
+    session = _CamoufoxSession(browser=SimpleNamespace(), page=TimeoutPage())
+    result = asyncio.run(session.fetch("https://www.avito.ru/a"))
+    assert result["ok"] is False
+    assert result["error_type"] == "timeout"
+
+
+def test_camoufox_target_timeout_classified_as_timeout(monkeypatch):
+    class FakePage:
+        def __init__(self):
+            self.calls = 0
+
+        async def goto(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("Page.goto: Timeout 30000ms exceeded")
+
+    async def _fast_sleep(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.parsers.browser_engine.asyncio.sleep", _fast_sleep)
+    session = _CamoufoxSession(browser=SimpleNamespace(), page=FakePage())
+    result = asyncio.run(session.fetch("https://www.avito.ru/a"))
+    assert result["ok"] is False
+    assert result["error_type"] == "timeout"
+
+
+def test_open_camoufox_session_headless_virtual_only_linux_and_geoip_with_proxy(monkeypatch):
+    captured = {}
+
+    class FakeContext:
+        async def grant_permissions(self, _perms):
+            return None
+
+        async def set_geolocation(self, _geo):
+            return None
+
+    class FakePage:
+        def __init__(self):
+            self.context = FakeContext()
+
+        async def add_init_script(self, _script):
+            return None
+
+    class FakeBrowser:
+        async def new_page(self):
+            return FakePage()
+
+    class FakeAsyncCamoufox:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return FakeBrowser()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    fake_mod = ModuleType("camoufox.async_api")
+    fake_mod.AsyncCamoufox = FakeAsyncCamoufox
+    monkeypatch.setitem(sys.modules, "camoufox.async_api", fake_mod)
+    monkeypatch.setattr("app.parsers.browser_engine.settings.scrape_headless", True)
+    monkeypatch.setattr("app.parsers.browser_engine.platform.system", lambda: "Darwin")
+
+    session = asyncio.run(open_camoufox_session("http://user:pass@1.2.3.4:8080"))
+    assert session is not None
+    assert captured["headless"] is True
+    assert captured["geoip"] is True
+
+
+def test_open_camoufox_session_headless_virtual_on_linux_no_geoip_without_proxy(monkeypatch):
+    captured = {}
+
+    class FakeContext:
+        async def grant_permissions(self, _perms):
+            return None
+
+        async def set_geolocation(self, _geo):
+            return None
+
+    class FakePage:
+        def __init__(self):
+            self.context = FakeContext()
+
+        async def add_init_script(self, _script):
+            return None
+
+    class FakeBrowser:
+        async def new_page(self):
+            return FakePage()
+
+    class FakeAsyncCamoufox:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return FakeBrowser()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    fake_mod = ModuleType("camoufox.async_api")
+    fake_mod.AsyncCamoufox = FakeAsyncCamoufox
+    monkeypatch.setitem(sys.modules, "camoufox.async_api", fake_mod)
+    monkeypatch.setattr("app.parsers.browser_engine.settings.scrape_headless", True)
+    monkeypatch.setattr("app.parsers.browser_engine.platform.system", lambda: "Linux")
+
+    session = asyncio.run(open_camoufox_session(None))
+    assert session is not None
+    assert captured["headless"] == "virtual"
+    assert "geoip" not in captured

@@ -704,3 +704,44 @@ def test_end_cycle_logs_summary(caplog):
     asyncio.run(parser.end_cycle())
 
     assert "avito_parser.end_cycle stats=" in caplog.text
+
+
+def test_fetch_page_html_falls_back_when_nodriver_returns_timeout(monkeypatch):
+    parser = AvitoParser()
+    parser._prefer_engine = _Engine.NODRIVER
+
+    responses = iter([
+        {"ok": False, "error_type": "timeout", "error": "warmup timeout"},
+        {"ok": True, "html": "<html>ok</html>"},
+    ])
+
+    async def fake_try_engine(url, proxy_url, engine):
+        return next(responses)
+
+    async def no_setup(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(parser, "_try_engine", fake_try_engine)
+    monkeypatch.setattr(parser, "ensure_engine_session", no_setup)
+
+    html = asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+    assert html == "<html>ok</html>"
+    assert parser._prefer_engine == _Engine.CAMOUFOX
+
+
+def test_fetch_page_html_cycle_mode_evicts_cached_session_on_timeout():
+    parser = AvitoParser()
+    parser._cycle_active = True
+
+    class TimeoutSession:
+        async def fetch(self, _url):
+            return {"ok": False, "error_type": "timeout", "error": "stuck"}
+
+        async def close(self):
+            return None
+
+    parser._engine_sessions[(_Engine.NODRIVER, None)] = TimeoutSession()
+
+    result = asyncio.run(parser._try_engine("https://www.avito.ru/moskva/kvartiry", None, _Engine.NODRIVER))
+    assert result["error_type"] == "timeout"
+    assert (_Engine.NODRIVER, None) not in parser._engine_sessions
