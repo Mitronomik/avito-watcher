@@ -1,6 +1,8 @@
 import pytest
 import asyncio
 import sys
+import subprocess
+import logging
 from types import ModuleType, SimpleNamespace
 
 from app.parsers.block_signals import looks_like_block_or_captcha
@@ -698,7 +700,7 @@ def test_stop_browser_best_effort_performs_event_loop_drain(monkeypatch):
     monkeypatch.setattr("app.parsers.browser_engine.asyncio.sleep", _sleep)
     asyncio.run(_stop_browser_best_effort(Browser()))
 
-    assert events == ["stop", "sleep:0", "sleep:0"]
+    assert events == ["stop", "sleep:0", "sleep:0.1"]
 
 
 def test_stop_browser_best_effort_logs_failure_non_fatal(caplog):
@@ -727,6 +729,129 @@ def test_stop_browser_best_effort_logs_timeout_non_fatal(monkeypatch, caplog):
     asyncio.run(_stop_browser_best_effort(Browser()))
 
     assert "nodriver stop timed out" in caplog.text
+
+
+def test_stop_browser_best_effort_cleans_asyncio_process_owned_handle():
+    events = []
+
+    class FakeAsyncioProcess:
+        def __init__(self):
+            self.returncode = None
+            self.wait_calls = 0
+
+        def terminate(self):
+            events.append("terminate")
+
+        def kill(self):
+            events.append("kill")
+            self.returncode = 0
+
+        async def wait(self):
+            self.wait_calls += 1
+            events.append(f"wait:{self.wait_calls}")
+            if self.wait_calls == 1:
+                await asyncio.sleep(3600)
+            self.returncode = 0
+            return 0
+
+    class Browser:
+        def __init__(self):
+            self.proc = FakeAsyncioProcess()
+
+        def stop(self):
+            events.append("stop")
+            return None
+
+    asyncio_process_type = asyncio.subprocess.Process
+    asyncio.subprocess.Process = FakeAsyncioProcess
+    try:
+        asyncio.run(_stop_browser_best_effort(Browser()))
+    finally:
+        asyncio.subprocess.Process = asyncio_process_type
+
+    assert events == ["stop", "terminate", "wait:1", "kill", "wait:2"]
+
+
+def test_stop_browser_best_effort_cleans_popen_owned_handle():
+    events = []
+
+    class FakePopen:
+        def __init__(self):
+            self.done = False
+
+        def poll(self):
+            return 0 if self.done else None
+
+        def terminate(self):
+            events.append("terminate")
+
+        def wait(self, timeout=None):
+            events.append(f"wait:{timeout}")
+            if not self.done:
+                raise subprocess.TimeoutExpired(cmd="x", timeout=timeout)
+            return 0
+
+        def kill(self):
+            events.append("kill")
+            self.done = True
+
+    class Browser:
+        def __init__(self):
+            self.popen = FakePopen()
+
+        def stop(self):
+            events.append("stop")
+            return None
+
+    popen_type = subprocess.Popen
+    subprocess.Popen = FakePopen
+    try:
+        asyncio.run(_stop_browser_best_effort(Browser()))
+    finally:
+        subprocess.Popen = popen_type
+
+    assert events == ["stop", "terminate", "wait:5.0", "kill", "wait:5.0"]
+
+
+def test_stop_browser_best_effort_no_process_handle_path(caplog):
+    class Browser:
+        def stop(self):
+            return None
+
+    with caplog.at_level(logging.DEBUG):
+        asyncio.run(_stop_browser_best_effort(Browser()))
+    assert "no process-like attributes" in caplog.text
+
+
+def test_stop_browser_best_effort_cleanup_failures_non_fatal(caplog):
+    class FakePopen:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            raise RuntimeError("boom")
+
+        def wait(self, timeout=None):
+            raise RuntimeError("boom")
+
+        def kill(self):
+            raise RuntimeError("boom")
+
+    class Browser:
+        def __init__(self):
+            self.popen = FakePopen()
+
+        def stop(self):
+            return None
+
+    popen_type = subprocess.Popen
+    subprocess.Popen = FakePopen
+    try:
+        asyncio.run(_stop_browser_best_effort(Browser()))
+    finally:
+        subprocess.Popen = popen_type
+
+    assert "nodriver popen terminate failed" in caplog.text
 
 
 def test_open_nodriver_session_stop_failure_is_logged_non_fatal(monkeypatch, caplog):
