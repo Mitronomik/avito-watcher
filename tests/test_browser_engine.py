@@ -887,6 +887,68 @@ def test_open_nodriver_session_stop_failure_is_logged_non_fatal(monkeypatch, cap
 
 
 
+
+
+def test_nodriver_session_close_clears_owned_references():
+    class Browser:
+        def stop(self):
+            return None
+
+    session = _NodriverSession(uc_module=object(), browser=Browser())
+
+    async def _run():
+        await session.close()
+
+    asyncio.run(_run())
+
+    assert session._browser is None
+    assert session._uc is None
+
+
+def test_nodriver_fetch_after_close_returns_controlled_failure():
+    class Browser:
+        async def get(self, _url):
+            return None
+
+        def stop(self):
+            return None
+
+    session = _NodriverSession(uc_module=SimpleNamespace(), browser=Browser())
+
+    async def _run():
+        await session.close()
+        return await session.fetch("https://www.avito.ru/a")
+
+    result = asyncio.run(_run())
+
+    assert result["ok"] is False
+    assert result["error_type"] == "exception"
+    assert "closed" in result["error"]
+
+
+def test_fetch_with_nodriver_warmup_timeout_payload_still_controlled(monkeypatch):
+    class FakeSession:
+        async def fetch(self, _url):
+            return {"ok": False, "engine": "nodriver", "error_type": "timeout", "error": "warmup navigation timeout after 30000ms"}
+
+        async def close(self):
+            return None
+
+    fake_uc = ModuleType("nodriver")
+    monkeypatch.setitem(sys.modules, "nodriver", fake_uc)
+
+    async def fake_open(_proxy):
+        return FakeSession()
+
+    monkeypatch.setattr("app.parsers.browser_engine.open_nodriver_session", fake_open)
+    result = asyncio.run(fetch_with_nodriver("https://www.avito.ru/a", None))
+
+    assert result == {
+        "ok": False,
+        "engine": "nodriver",
+        "error_type": "timeout",
+        "error": "warmup navigation timeout after 30000ms",
+    }
 def test_nodriver_session_close_is_idempotent():
     class Browser:
         def __init__(self):
@@ -998,6 +1060,51 @@ def test_nodriver_target_navigation_timeout_returns_controlled_timeout(monkeypat
     assert result["error_type"] == "timeout"
 
 
+
+
+def test_camoufox_fetch_after_close_returns_camoufox_engine_error():
+    class Browser:
+        async def __aexit__(self, *_args):
+            return None
+
+    class Page:
+        async def goto(self, *_args, **_kwargs):
+            return None
+
+    session = _CamoufoxSession(browser=Browser(), page=Page())
+
+    async def _run():
+        await session.close()
+        return await session.fetch("https://www.avito.ru/a")
+
+    result = asyncio.run(_run())
+
+    assert result == {
+        "ok": False,
+        "engine": "camoufox",
+        "error_type": "exception",
+        "error": "camoufox session is closed",
+    }
+
+
+def test_camoufox_session_close_is_idempotent():
+    class Browser:
+        def __init__(self):
+            self.calls = 0
+
+        async def __aexit__(self, *_args):
+            self.calls += 1
+            return None
+
+    session = _CamoufoxSession(browser=Browser(), page=SimpleNamespace())
+
+    async def _run():
+        await session.close()
+        await session.close()
+
+    asyncio.run(_run())
+
+    assert session._browser.calls == 1
 def test_camoufox_warmup_timeout_classified_as_timeout():
     class TimeoutPage:
         async def goto(self, *_args, **_kwargs):
