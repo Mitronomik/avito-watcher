@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -24,6 +25,24 @@ from app.utils.formatting import build_listing_message
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 logger = logging.getLogger(__name__)
+
+PARSER_DIAGNOSTIC_KEYS = (
+    "preferred_engine",
+    "selected_first_engine",
+    "engine_selection_changed_by_health_memory",
+    "fallback_used",
+    "engine_used",
+    "engine_fallback_count",
+    "engine_skip_recent_failure_count",
+    "block_detected_count",
+    "engine_error_count",
+    "proxy_success_count",
+    "proxy_failure_count",
+    "session_open_count",
+    "session_reuse_count",
+    "session_evict_count",
+    "session_close_failure_count",
+)
 
 
 def _as_float(value: object) -> float | None:
@@ -195,6 +214,15 @@ class MonitorService:
                 channels.append(GoogleSheetsWebhookNotifier())
         return CompositeNotifier(channels)
 
+    def _parser_stats_snapshot(self) -> dict:
+        cycle_stats_fn = getattr(self.parser, "cycle_stats", None)
+        if not callable(cycle_stats_fn):
+            return {}
+        stats = cycle_stats_fn()
+        if not isinstance(stats, dict):
+            return {}
+        return {key: stats.get(key) for key in PARSER_DIAGNOSTIC_KEYS}
+
 
     def _build_alert_payload(
         self,
@@ -316,6 +344,7 @@ class MonitorService:
         search_repo = SearchRepository(db)
         checked_at = self._now()
         baseline_run = not search.baseline_initialized
+        started_at = time.perf_counter()
 
         try:
             cards = await self.parser.fetch_search_cards(search.source_url)
@@ -330,6 +359,8 @@ class MonitorService:
 
             result["baseline_initialized"] = search.baseline_initialized
             result["baseline_run"] = baseline_run
+            result["elapsed_ms"] = int((time.perf_counter() - started_at) * 1000)
+            result["parser_stats"] = self._parser_stats_snapshot()
             return result
         except Exception as exc:
             db.rollback()
@@ -536,11 +567,17 @@ class MonitorService:
                 searches = repo.list_due_active(_utcnow())
                 results = []
                 for search in searches:
+                    started_at = time.perf_counter()
                     try:
                         result = await self.process_search(db, search)
                     except Exception as exc:
                         logger.exception("search check failed", extra={"search": search.name})
-                        result = {"search": search.name, "error": str(exc)}
+                        result = {
+                            "search": search.name,
+                            "error": str(exc),
+                            "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+                            "parser_stats": self._parser_stats_snapshot(),
+                        }
                     else:
                         result["search"] = search.name
                     results.append(result)
@@ -554,8 +591,12 @@ class MonitorService:
             if callable(cycle_stats_fn):
                 parser_cycle_stats = cycle_stats_fn()
             logger.info(
-                "monitor_service.cycle_summary searches_processed=%s sessions_opened=%s sessions_reused=%s fallbacks=%s blocks=%s engine_errors=%s proxy_failures=%s evictions=%s close_failures=%s",
+                "monitor_service.cycle_summary searches_processed=%s preferred_engine=%s selected_first_engine=%s fallback_used=%s engine_skip_recent_failure_count=%s sessions_opened=%s sessions_reused=%s fallbacks=%s blocks=%s engine_errors=%s proxy_failures=%s evictions=%s close_failures=%s",
                 searches_processed,
+                parser_cycle_stats.get("preferred_engine"),
+                parser_cycle_stats.get("selected_first_engine"),
+                parser_cycle_stats.get("fallback_used"),
+                parser_cycle_stats.get("engine_skip_recent_failure_count", 0),
                 parser_cycle_stats.get("session_open_count", 0),
                 parser_cycle_stats.get("session_reuse_count", 0),
                 parser_cycle_stats.get("engine_fallback_count", 0),

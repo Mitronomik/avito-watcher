@@ -30,6 +30,9 @@ class FakeParser:
             raise batch
         return batch
 
+    def cycle_stats(self):
+        return {}
+
 
 class FakeScorer:
     def __init__(self):
@@ -171,6 +174,49 @@ def test_second_run_with_same_listings_sends_zero_alerts(db_session):
     assert scalar_count(db_session, AlertSent) == 0
     assert notifier.messages == []
     assert scorer.cards == []
+
+
+def test_process_search_includes_elapsed_ms_and_parser_stats(db_session):
+    search = make_search(db_session)
+
+    class ParserWithStats(FakeParser):
+        def cycle_stats(self):
+            return {
+                "preferred_engine": "nodriver",
+                "selected_first_engine": "nodriver",
+                "fallback_used": False,
+                "engine_skip_recent_failure_count": 0,
+            }
+
+    service = MonitorService(
+        parser=ParserWithStats([[card("1")]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    result = run(service, db_session, search)
+
+    assert isinstance(result["elapsed_ms"], int)
+    assert result["elapsed_ms"] >= 0
+    assert result["parser_stats"]["preferred_engine"] == "nodriver"
+    assert result["parser_stats"]["selected_first_engine"] == "nodriver"
+    assert result["parser_stats"]["fallback_used"] is False
+
+
+def test_process_search_without_cycle_stats_returns_empty_parser_stats(db_session):
+    search = make_search(db_session)
+
+    class ParserWithoutCycleStats:
+        async def fetch_search_cards(self, _search_url: str):
+            return [card("1")]
+
+    service = MonitorService(
+        parser=ParserWithoutCycleStats(), scorer=FakeScorer(), notifier=FakeNotifier()
+    )
+
+    result = run(service, db_session, search)
+
+    assert result["parser_stats"] == {}
 
 
 def test_second_run_with_one_new_listing_sends_one_alert(db_session):
@@ -439,8 +485,14 @@ def test_run_all_searches_records_one_failure_and_continues_next_search(
     db_session.refresh(first)
     db_session.refresh(second)
     assert parser.calls == 2
-    assert result[0] == {"search": "first", "error": "parser failed"}
+    assert result[0]["search"] == "first"
+    assert result[0]["error"] == "parser failed"
+    assert "elapsed_ms" in result[0]
+    assert "parser_stats" in result[0]
+    assert isinstance(result[0]["elapsed_ms"], int)
     assert result[1]["search"] == "second"
+    assert "parser_stats" in result[1]
+    assert "elapsed_ms" in result[1]
     assert result[1]["baseline_run"] is True
     assert result[1]["created"] == 1
     assert first.fail_count == 1
@@ -536,6 +588,31 @@ def test_successful_run_updates_next_run_at(monkeypatch, db_session):
     min_next_run_at = search.last_success_at + timedelta(seconds=30)
     max_next_run_at = search.last_success_at + timedelta(seconds=60)
     assert min_next_run_at <= search.next_run_at <= max_next_run_at
+
+
+def test_run_once_preserves_business_counters_and_adds_parser_stats(
+    monkeypatch, db_session
+):
+    search = make_search(db_session)
+    patch_session_local(monkeypatch, db_session)
+
+    service = MonitorService(
+        parser=FakeParser([[card("1")]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    result = service.run_once(search.id)
+
+    assert result["created"] == 1
+    assert result["alerted"] == 0
+    assert result["price_changed"] == 0
+    assert result["filtered"] == 0
+    assert result["filtered_by_rules"] == 0
+    assert result["filtered_by_publication_date"] == 0
+    assert result["scored"] == 0
+    assert result["total_seen"] == 1
+    assert "parser_stats" in result
 
 
 def test_min_area_filter_uses_area_parsed_from_card_text(db_session):
