@@ -683,6 +683,24 @@ def test_stop_browser_best_effort_awaits_async_stop_result():
     assert events == ["stop", "awaited"]
 
 
+def test_stop_browser_best_effort_performs_event_loop_drain(monkeypatch):
+    events = []
+
+    class Browser:
+        def stop(self):
+            events.append("stop")
+            return None
+
+    async def _sleep(delay, *_args, **_kwargs):
+        events.append(f"sleep:{delay}")
+        return None
+
+    monkeypatch.setattr("app.parsers.browser_engine.asyncio.sleep", _sleep)
+    asyncio.run(_stop_browser_best_effort(Browser()))
+
+    assert events == ["stop", "sleep:0", "sleep:0"]
+
+
 def test_stop_browser_best_effort_logs_failure_non_fatal(caplog):
     class BrokenBrowser:
         def stop(self):
@@ -691,6 +709,24 @@ def test_stop_browser_best_effort_logs_failure_non_fatal(caplog):
     asyncio.run(_stop_browser_best_effort(BrokenBrowser()))
 
     assert "nodriver stop failed" in caplog.text
+
+
+def test_stop_browser_best_effort_logs_timeout_non_fatal(monkeypatch, caplog):
+    class NeverFinishes:
+        def __await__(self):
+            async def _inner():
+                await asyncio.sleep(3600)
+
+            return _inner().__await__()
+
+    class Browser:
+        def stop(self):
+            return NeverFinishes()
+
+    monkeypatch.setattr("app.parsers.browser_engine.settings.scrape_timeout_ms", 10)
+    asyncio.run(_stop_browser_best_effort(Browser()))
+
+    assert "nodriver stop timed out" in caplog.text
 
 
 def test_open_nodriver_session_stop_failure_is_logged_non_fatal(monkeypatch, caplog):
@@ -723,6 +759,81 @@ def test_open_nodriver_session_stop_failure_is_logged_non_fatal(monkeypatch, cap
 
     assert "nodriver stop failed" in caplog.text
 
+
+
+
+def test_nodriver_session_close_is_idempotent():
+    class Browser:
+        def __init__(self):
+            self.calls = 0
+
+        def stop(self):
+            self.calls += 1
+            return None
+
+    browser = Browser()
+    session = _NodriverSession(uc_module=SimpleNamespace(), browser=browser)
+
+    async def _run():
+        await session.close()
+        await session.close()
+
+    asyncio.run(_run())
+    assert browser.calls == 1
+
+
+def test_nodriver_warmup_timeout_closes_session_before_return(monkeypatch):
+    events = []
+
+    class Browser:
+        async def get(self, _url):
+            raise asyncio.TimeoutError()
+
+        def stop(self):
+            events.append("stop")
+            return None
+
+    async def _fast_sleep(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.parsers.browser_engine.asyncio.sleep", _fast_sleep)
+    session = _NodriverSession(uc_module=SimpleNamespace(), browser=Browser())
+    result = asyncio.run(session.fetch("https://www.avito.ru/a"))
+
+    assert result["ok"] is False
+    assert result["error_type"] == "timeout"
+    assert session.broken is True
+    assert events == ["stop"]
+
+
+def test_nodriver_target_timeout_closes_session_before_return(monkeypatch):
+    events = []
+
+    class Browser:
+        def __init__(self):
+            self.calls = 0
+
+        async def get(self, _url):
+            self.calls += 1
+            if self.calls == 1:
+                return SimpleNamespace()
+            raise asyncio.TimeoutError()
+
+        def stop(self):
+            events.append("stop")
+            return None
+
+    async def _fast_sleep(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.parsers.browser_engine.asyncio.sleep", _fast_sleep)
+    session = _NodriverSession(uc_module=SimpleNamespace(), browser=Browser())
+    result = asyncio.run(session.fetch("https://www.avito.ru/a"))
+
+    assert result["ok"] is False
+    assert result["error_type"] == "timeout"
+    assert session.broken is True
+    assert events == ["stop"]
 
 def test_nodriver_warmup_navigation_timeout_returns_controlled_timeout():
     class BrokenBrowser:
