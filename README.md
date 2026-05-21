@@ -38,6 +38,22 @@ PROXY_URLS=http://user:pass@host:port,https://user:pass@host2:port2
 - Ошибка вида `proxy must include valid port` — проверьте, что в URL указан числовой порт.
 - Если `PROXY_URLS` пустой, приложение работает в no-proxy режиме.
 
+### Known nodriver cleanup warning on macOS
+
+На macOS с Python 3.12 после **контролируемого** timeout в изолированном вызове `fetch_with_nodriver` может появляться финализаторное предупреждение вида:
+
+- `Exception ignored in: <function BaseSubprocessTransport.__del__ ...>`
+- `RuntimeError: Event loop is closed`
+
+Это известное не-блокирующее ограничение cleanup в изолированном smoke-сценарии и **не означает**, что парсер/мониторинг упал.
+
+Операционный критерий исправности — успешное выполнение `run-once` по пути `MonitorService` (проход завершается, fallback работает, алерты доставляются, состояние БД сохраняется корректно), а не отсутствие этого финализаторного warning в isolated nodriver smoke.
+
+Если нужен практический smoke-check на macOS, используйте:
+
+- `python3 -m app.cli run-once` как основной operational check;
+- camoufox fallback как рабочий fallback-путь при nodriver timeout.
+
 ## Docker Compose
 
 Все команды ниже используют основной compose-файл:
