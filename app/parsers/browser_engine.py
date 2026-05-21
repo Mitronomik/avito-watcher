@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import inspect
 import platform
 import random
+import subprocess
 from typing import Optional
 
 from app.core.config import settings
@@ -149,7 +151,12 @@ async def _humanize_camoufox_page(page) -> None:
 
 async def _stop_browser_best_effort(browser) -> None:
     cleanup_timeout_seconds = min(_timeout_seconds(), 5.0)
+    loop = asyncio.get_running_loop()
+    _log_nodriver_browser_diagnostics("after uc.start", browser)
+    owned_processes = _collect_owned_process_handles(browser)
+    logger.debug("[browser_engine] nodriver owned-process handles found: %d", len(owned_processes))
     try:
+        _log_nodriver_browser_diagnostics("before browser.stop", browser)
         stop_result = browser.stop()
         if inspect.isawaitable(stop_result):
             await asyncio.wait_for(stop_result, timeout=cleanup_timeout_seconds)
@@ -158,9 +165,118 @@ async def _stop_browser_best_effort(browser) -> None:
     except Exception as exc:
         logger.warning("[browser_engine] nodriver stop failed: %s", exc)
     finally:
+        _log_nodriver_browser_diagnostics("after browser.stop", browser)
+        await _cleanup_owned_process_handles(owned_processes, cleanup_timeout_seconds)
+        owned_processes.clear()
+        browser = None
+        try:
+            if not loop.is_closed():
+                gc.collect()
+        except Exception as exc:
+            logger.debug("[browser_engine] nodriver gc.collect failed: %s", exc)
         # Give subprocess transports a chance to run close callbacks before loop shutdown.
         await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.1)
+
+
+def _collect_owned_process_handles(browser) -> list:
+    owned = []
+    candidate_names = {"process", "subprocess", "transport", "browser_process", "proc", "popen", "pid"}
+    try:
+        names = dir(browser)
+    except Exception as exc:
+        logger.debug("[browser_engine] nodriver diagnostics dir() failed: %s", exc)
+        return owned
+    for name in names:
+        lowered = name.lower()
+        if not any(token in lowered for token in candidate_names):
+            continue
+        try:
+            value = getattr(browser, name)
+        except Exception as exc:
+            logger.debug("[browser_engine] nodriver diagnostics getattr(%s) failed: %s", name, exc)
+            continue
+        if isinstance(value, (asyncio.subprocess.Process, subprocess.Popen)):
+            owned.append(value)
+    return owned
+
+
+def _log_nodriver_browser_diagnostics(stage: str, browser) -> None:
+    safe = []
+    try:
+        names = dir(browser)
+    except Exception as exc:
+        logger.debug("[browser_engine] nodriver diagnostics (%s): dir() failed: %s", stage, exc)
+        return
+    for name in names:
+        lowered = name.lower()
+        if not any(token in lowered for token in ("process", "subprocess", "transport", "browser_process", "proc", "popen", "pid")):
+            continue
+        try:
+            value = getattr(browser, name)
+            safe.append(f"{name}={type(value).__name__}")
+        except Exception as exc:
+            safe.append(f"{name}=<getattr failed: {exc}>")
+    logger.debug("[browser_engine] nodriver diagnostics (%s): %s", stage, ", ".join(safe) if safe else "no process-like attributes")
+
+
+async def _cleanup_owned_process_handles(handles: list, cleanup_timeout_seconds: float) -> None:
+    for handle in handles:
+        try:
+            if isinstance(handle, asyncio.subprocess.Process):
+                await _cleanup_asyncio_process_handle(handle, cleanup_timeout_seconds)
+            elif isinstance(handle, subprocess.Popen):
+                _cleanup_popen_handle(handle, cleanup_timeout_seconds)
+        except Exception as exc:
+            logger.warning("[browser_engine] nodriver owned-process cleanup failed: %s", exc)
+
+
+async def _cleanup_asyncio_process_handle(handle: asyncio.subprocess.Process, cleanup_timeout_seconds: float) -> None:
+    if handle.returncode is not None:
+        return
+    try:
+        handle.terminate()
+    except Exception as exc:
+        logger.warning("[browser_engine] nodriver asyncio-process terminate failed: %s", exc)
+    try:
+        await asyncio.wait_for(handle.wait(), timeout=cleanup_timeout_seconds)
+        return
+    except asyncio.TimeoutError:
+        pass
+    except Exception as exc:
+        logger.warning("[browser_engine] nodriver asyncio-process wait failed: %s", exc)
+    try:
+        handle.kill()
+    except Exception as exc:
+        logger.warning("[browser_engine] nodriver asyncio-process kill failed: %s", exc)
+    try:
+        await asyncio.wait_for(handle.wait(), timeout=cleanup_timeout_seconds)
+    except Exception as exc:
+        logger.warning("[browser_engine] nodriver asyncio-process final wait failed: %s", exc)
+
+
+def _cleanup_popen_handle(handle: subprocess.Popen, cleanup_timeout_seconds: float) -> None:
+    if handle.poll() is not None:
+        return
+    try:
+        handle.terminate()
+    except Exception as exc:
+        logger.warning("[browser_engine] nodriver popen terminate failed: %s", exc)
+    try:
+        handle.wait(timeout=cleanup_timeout_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception as exc:
+        logger.warning("[browser_engine] nodriver popen wait failed: %s", exc)
+    try:
+        handle.kill()
+    except Exception as exc:
+        logger.warning("[browser_engine] nodriver popen kill failed: %s", exc)
+    try:
+        handle.wait(timeout=cleanup_timeout_seconds)
+    except Exception as exc:
+        logger.warning("[browser_engine] nodriver popen final wait failed: %s", exc)
 
 
 class _NodriverSession:
