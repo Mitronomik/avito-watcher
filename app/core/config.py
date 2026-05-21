@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     database_url: str
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen2.5:7b-instruct"
+    scoring_enabled: bool = True
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     api_key: str = ""

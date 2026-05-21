@@ -1184,3 +1184,44 @@ def test_retry_alert_payload_includes_search_name(db_session):
     )
 
     assert retry_notifier.sheets.payloads[0]["search_name"] == "commercial"
+
+
+def test_scoring_disabled_skips_scorer_and_sends_default_llm_payload(db_session, monkeypatch):
+    monkeypatch.setattr("app.services.monitor_service.settings.scoring_enabled", False)
+    search = make_search(db_session)
+    scorer = FakeScorer()
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2")]]),
+        scorer=scorer,
+        notifier=notifier,
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["scored"] == 0
+    assert scorer.cards == []
+    assert notifier.payloads[0]["score"] is None
+    assert notifier.payloads[0]["summary"] == ""
+    assert notifier.payloads[0]["tags"] == []
+
+
+def test_scoring_enabled_keeps_existing_scorer_path(db_session, monkeypatch):
+    monkeypatch.setattr("app.services.monitor_service.settings.scoring_enabled", True)
+    search = make_search(db_session)
+    scorer = FakeScorer()
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2")]]),
+        scorer=scorer,
+        notifier=notifier,
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["scored"] == 1
+    assert scorer.cards == ["2"]
+    assert notifier.payloads[0]["summary"] == "score for 2"
+    assert notifier.payloads[0]["score"] == 100

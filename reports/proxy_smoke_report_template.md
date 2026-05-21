@@ -6,9 +6,10 @@ Date (UTC): YYYY-MM-DD
 - PROXY_URLS: `http://user:pass@host:port`
 - SCRAPE_HEADLESS: `true`
 - ALERT_CHANNELS: `jsonl`
+- SCORING_ENABLED: `false` (optional, to isolate browser/proxy from Ollama/model)
 
 ## Command
-`PROXY_URLS=http://user:pass@host:port SCRAPE_HEADLESS=true ALERT_CHANNELS=jsonl python3 -m app.cli run-once`
+`PROXY_URLS=http://user:pass@host:port SCRAPE_HEADLESS=true ALERT_CHANNELS=jsonl SCORING_ENABLED=false python3 -m app.cli run-once`
 
 ## Expected behavior
 - No `407 Proxy Authentication Required` in logs.

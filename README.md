@@ -20,6 +20,7 @@ cp .env.example .env
 - `SCRAPE_HEADLESS=true` — рекомендуется для Docker/VPS и используется по умолчанию.
 - `SCRAPE_HUMANIZE=false` — опциональная «человечная» прокрутка/паузы; по умолчанию выключена.
 - `PROXY_URLS` — опциональный список прокси через запятую.
+- `SCORING_ENABLED=false` — опционально отключает LLM scoring, чтобы изолировать browser/proxy smoke от доступности Ollama/модели.
 
 Поддерживаемые схемы прокси: `http://` и `https://`.
 
