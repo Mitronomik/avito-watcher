@@ -67,7 +67,7 @@ def test_api_key_query_preserved_in_links_and_forms(monkeypatch):
     assert "action='/admin/searches?api_key=secret'" in new_page
     response = client.post("/admin/searches?api_key=secret", data={"name": "query_key", "source_url": "https://www.avito.ru/a", "poll_interval_sec": "1"}, follow_redirects=False)
     assert response.status_code == 303
-    assert response.headers["location"].endswith("/admin/searches?api_key=secret")
+    assert response.headers["location"].endswith("/admin/searches?saved=1&api_key=secret")
 
 
 def test_create_and_edit_and_preserve(monkeypatch):
@@ -243,3 +243,74 @@ def test_searches_dashboard_api_key_preserved_in_new_links(monkeypatch):
     assert f"/admin/searches/{job_id}/deactivate?api_key=secret" in page
     assert f"/admin/searches/{job_id}/reset-baseline?api_key=secret" in page
     assert f"/admin/searches/{job_id}/run-once?api_key=secret" in page
+
+
+def test_legacy_name_edit_without_name_change_succeeds(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    legacy_id = create_job(Session, name="СПб коммерческая")
+    resp = client.post(f"/admin/searches/{legacy_id}", data={"name": "СПб коммерческая", "source_url": "https://www.avito.ru/spb/a", "poll_interval_sec": "300", "human_title": "Legacy updated"}, follow_redirects=False)
+    assert resp.status_code == 303
+    with Session() as s:
+        job = s.get(SearchJob, legacy_id)
+        assert job.filters_json["human_title"] == "Legacy updated"
+
+
+def test_legacy_name_edit_to_invalid_non_slug_fails(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    legacy_id = create_job(Session, name="СПб коммерческая")
+    bad = client.post(f"/admin/searches/{legacy_id}", data={"name": "другое имя", "source_url": "https://www.avito.ru/spb/a", "poll_interval_sec": "300"})
+    assert "name must match" in bad.text
+    assert "Nothing was saved because validation failed." in bad.text
+
+
+def test_legacy_name_edit_to_valid_slug_succeeds(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    legacy_id = create_job(Session, name="СПб коммерческая")
+    resp = client.post(f"/admin/searches/{legacy_id}", data={"name": "spb_kommerc", "source_url": "https://www.avito.ru/spb/a", "poll_interval_sec": "300"}, follow_redirects=False)
+    assert resp.status_code == 303
+    with Session() as s:
+        assert s.get(SearchJob, legacy_id).name == "spb_kommerc"
+
+
+def test_validation_error_navigation_links_and_api_key(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    job_id = create_job(Session, name="legacy_name")
+    monkeypatch.setattr(settings, "api_key", "secret")
+    bad = client.post(f"/admin/searches/{job_id}?api_key=secret", data={"name": "!!", "source_url": "https://www.avito.ru/a", "poll_interval_sec": "1", "return_url": f"/admin/searches/{job_id}/edit"})
+    assert "Nothing was saved because validation failed." in bad.text
+    assert ">Back<" in bad.text
+    assert "api_key=secret" in bad.text
+    assert "Back to search list" in bad.text
+
+
+def test_safe_return_url_used_after_update(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    job_id = create_job(Session, name="safejob")
+    resp = client.post(f"/admin/searches/{job_id}", data={"name": "safejob", "source_url": "https://www.avito.ru/a", "poll_interval_sec": "1", "return_url": "/admin/searches/new?x=1"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/admin/searches/new?x=1")
+
+
+def test_unsafe_return_url_ignored(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    job_id = create_job(Session, name="unsafejob")
+    resp = client.post(f"/admin/searches/{job_id}", data={"name": "unsafejob", "source_url": "https://www.avito.ru/a", "poll_interval_sec": "1", "return_url": "https://evil.example/x"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/admin/searches?updated=1"
+
+
+def test_success_marker_and_notice(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    job_id = create_job(Session, name="noticejob")
+    resp = client.post(f"/admin/searches/{job_id}", data={"name": "noticejob", "source_url": "https://www.avito.ru/a", "poll_interval_sec": "1"}, follow_redirects=False)
+    assert resp.headers["location"] == "/admin/searches?updated=1"
+    page_saved = client.get("/admin/searches?saved=1").text
+    page_updated = client.get("/admin/searches?updated=1").text
+    assert "Saved successfully." in page_saved
+    assert "Updated successfully." in page_updated
+
+
+def test_name_field_helper_text_visible(monkeypatch):
+    client, _ = make_client(monkeypatch)
+    page = client.get("/admin/searches/new").text
+    assert "Technical name. Use latin letters" in page
