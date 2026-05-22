@@ -17,7 +17,7 @@ from app.core.config import settings
 from app.db.session import get_db
 from app.parsers.errors import ParserError
 from app.repositories.search_repository import SearchRepository
-from app.services.monitor_service import MonitorService
+from app.services.monitor_service import MonitorService, runtime_diagnostics
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,120}$")
 FRESHNESS_PRESETS = {"12": 12.0, "24": 24.0, "48": 48.0, "72": 72.0}
@@ -406,6 +406,7 @@ def run_once(search_id: int, request: Request):
             "error": str(exc),
             "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
             "parser_stats": _parser_stats_snapshot(parser_instance),
+            "runtime": runtime_diagnostics(),
         }
     except KeyboardInterrupt:
         raise
@@ -417,5 +418,6 @@ def run_once(search_id: int, request: Request):
             "error": str(exc),
             "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
             "parser_stats": _parser_stats_snapshot(parser_instance),
+            "runtime": runtime_diagnostics(),
         }
     return _render_page('Run once', f"<h1>Run once result</h1><pre>{html.escape(json.dumps(result, ensure_ascii=False, indent=2))}</pre><p><a href='{_admin_url('/admin/searches', api_key)}'>Back</a></p>")

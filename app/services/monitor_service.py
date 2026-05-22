@@ -64,6 +64,20 @@ def _as_keywords(value: object) -> list[str]:
     return []
 
 
+def runtime_diagnostics() -> dict:
+    alert_channels = [
+        item.strip().lower()
+        for item in settings.alert_channels.split(",")
+        if item.strip()
+    ]
+    return {
+        "alert_channels": alert_channels,
+        "scoring_enabled": settings.scoring_enabled,
+        "scrape_preferred_engine": settings.scrape_preferred_engine,
+        "scrape_headless": settings.scrape_headless,
+    }
+
+
 def passes_rule_filters(card: ListingCard, filters: dict | None) -> bool:
     filters = filters or {}
 
@@ -361,6 +375,7 @@ class MonitorService:
             result["baseline_run"] = baseline_run
             result["elapsed_ms"] = int((time.perf_counter() - started_at) * 1000)
             result["parser_stats"] = self._parser_stats_snapshot()
+            result["runtime"] = runtime_diagnostics()
             return result
         except Exception as exc:
             db.rollback()

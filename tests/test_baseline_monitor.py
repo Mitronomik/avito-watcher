@@ -8,7 +8,7 @@ from app.models.listing import Listing
 from app.models.listing_snapshot import ListingSnapshot
 from app.parsers.schemas import ListingCard
 from app.repositories.search_repository import SearchRepository
-from app.services.monitor_service import MonitorService
+from app.services.monitor_service import MonitorService, runtime_diagnostics
 
 
 class FakeParser:
@@ -613,6 +613,21 @@ def test_run_once_preserves_business_counters_and_adds_parser_stats(
     assert result["scored"] == 0
     assert result["total_seen"] == 1
     assert "parser_stats" in result
+    assert "runtime" in result
+
+
+def test_runtime_diagnostics_parses_alert_channels_with_spaces(monkeypatch):
+    monkeypatch.setattr("app.services.monitor_service.settings.alert_channels", "jsonl, telegram")
+    monkeypatch.setattr("app.services.monitor_service.settings.scoring_enabled", False)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_preferred_engine", "camoufox")
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_headless", True)
+
+    runtime = runtime_diagnostics()
+
+    assert runtime["alert_channels"] == ["jsonl", "telegram"]
+    assert runtime["scoring_enabled"] is False
+    assert runtime["scrape_preferred_engine"] == "camoufox"
+    assert runtime["scrape_headless"] is True
 
 
 def test_min_area_filter_uses_area_parsed_from_card_text(db_session):

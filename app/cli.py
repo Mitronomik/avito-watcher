@@ -16,7 +16,7 @@ from app.parsers.proxy_url import validate_proxy_urls
 from app.db.init_db import init_db
 from app.db.session import SessionLocal
 from app.repositories.search_repository import SearchRepository
-from app.services.monitor_service import MonitorService
+from app.services.monitor_service import MonitorService, runtime_diagnostics
 
 
 def _parser_stats_snapshot(parser_instance: "AvitoParser") -> dict:
@@ -243,6 +243,8 @@ def cmd_run_once(args) -> None:
         started_at = time.perf_counter()
         try:
             result = service.run_once(args.search_id)
+            if isinstance(result, dict):
+                result.setdefault("runtime", runtime_diagnostics())
         except ParserError as exc:
             elapsed_ms = int((time.perf_counter() - started_at) * 1000)
             result = {
@@ -252,6 +254,7 @@ def cmd_run_once(args) -> None:
                 "error": str(exc),
                 "elapsed_ms": elapsed_ms,
                 "parser_stats": _parser_stats_snapshot(parser_instance),
+                "runtime": runtime_diagnostics(),
             }
         except KeyboardInterrupt:
             raise
@@ -264,6 +267,7 @@ def cmd_run_once(args) -> None:
                 "error": str(exc),
                 "elapsed_ms": elapsed_ms,
                 "parser_stats": _parser_stats_snapshot(parser_instance),
+                "runtime": runtime_diagnostics(),
             }
     else:
         result = service.run_all_searches()
