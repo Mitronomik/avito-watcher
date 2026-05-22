@@ -282,6 +282,11 @@ class AvitoParser:
         proxy_url: str | None = None
         if self._proxy_manager:
             proxy_url = self._proxy_manager.get_proxy()
+            if proxy_url is None:
+                raise ParserError(
+                    ParserErrorType.PROXY_UNAVAILABLE,
+                    "No available proxies: all configured proxies are quarantined",
+                )
 
         # First attempt
         start_engine = self._choose_start_engine(proxy_url)

@@ -117,6 +117,27 @@ def test_fetch_page_html_raises_possible_captcha_or_block_when_all_engines_fail(
     assert try_engine.await_count == 2
 
 
+def test_fetch_page_html_raises_proxy_unavailable_when_all_proxies_quarantined():
+    parser = AvitoParser()
+
+    class EmptyProxyManager:
+        def get_proxy(self):
+            return None
+
+    parser._proxy_manager = EmptyProxyManager()
+    try_engine = AsyncMock()
+
+    with patch.object(parser, "_try_engine", new=try_engine):
+        with pytest.raises(ParserError) as exc_info:
+            asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+
+    assert exc_info.value.error_type == ParserErrorType.PROXY_UNAVAILABLE
+    assert str(exc_info.value) == (
+        "proxy_unavailable: No available proxies: all configured proxies are quarantined"
+    )
+    assert try_engine.await_count == 0
+
+
 def test_parser_preserves_sha256_external_id_fallback():
     external_id = AvitoParser._extract_external_id("/moskva/kvartiry/custom-slug", 0)
 
@@ -858,7 +879,7 @@ def test_no_proxy_does_not_inherit_proxy_nodriver_failure(monkeypatch):
     parser = AvitoParser()
     parser._prefer_engine = _Engine.NODRIVER
     calls: list[tuple[str | None, _Engine]] = []
-    proxy_sequence = iter(["http://user:pass@1.2.3.4:8080", "http://user:pass@1.2.3.4:8080", None])
+    proxy_sequence = iter(["http://user:pass@1.2.3.4:8080", "http://user:pass@1.2.3.4:8080"])
 
     async def fake_try_engine(_url, proxy_url, engine):
         calls.append((proxy_url, engine))
@@ -885,6 +906,7 @@ def test_no_proxy_does_not_inherit_proxy_nodriver_failure(monkeypatch):
 
     asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
     parser._prefer_engine = _Engine.NODRIVER
+    parser._proxy_manager = None
     asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
 
     assert calls[0] == ("http://user:pass@1.2.3.4:8080", _Engine.NODRIVER)
