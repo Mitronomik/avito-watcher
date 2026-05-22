@@ -32,3 +32,10 @@ def test_scrape_preferred_engine_invalid_value_fails_clearly(monkeypatch):
     with pytest.raises(Exception) as exc_info:
         Settings(database_url="sqlite:///tmp.db", _env_file=None)
     assert "scrape_preferred_engine" in str(exc_info.value)
+
+
+def test_pagination_settings_defaults():
+    settings = Settings(database_url="sqlite:///tmp.db", _env_file=None)
+    assert settings.scrape_max_pages == 1
+    assert settings.scrape_cards_per_page_limit == 30
+    assert settings.scrape_stop_on_duplicate_page is True

@@ -375,7 +375,12 @@ class MonitorService:
         started_at = time.perf_counter()
 
         try:
-            cards = await self.parser.fetch_search_cards(search.source_url)
+            pagination = None
+            if hasattr(self.parser, "fetch_search_cards_paginated"):
+                pagination = await self.parser.fetch_search_cards_paginated(search.source_url)
+                cards = pagination["cards"]
+            else:
+                cards = await self.parser.fetch_search_cards(search.source_url)
             result = await self._process_cards(
                 db, cards, baseline_run, search.filters_json, search.name
             )
@@ -390,6 +395,17 @@ class MonitorService:
             result["elapsed_ms"] = int((time.perf_counter() - started_at) * 1000)
             result["parser_stats"] = self._parser_stats_snapshot()
             result["runtime"] = runtime_diagnostics()
+            if pagination is None:
+                pagination = {
+                    "pages_seen": 1,
+                    "pages_attempted": 1,
+                    "cards_seen_before_dedupe": len(cards),
+                    "cards_seen_after_dedupe": len(cards),
+                    "duplicate_cards_skipped": 0,
+                    "pagination_stopped_reason": "single_page",
+                    "page_errors": [],
+                }
+            result.update(pagination)
             return result
         except Exception as exc:
             db.rollback()
