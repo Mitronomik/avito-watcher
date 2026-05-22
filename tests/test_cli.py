@@ -74,6 +74,34 @@ def test_cmd_run_once_search_success_unchanged(monkeypatch, capsys):
     assert output == {"ok": True, "search_id": 7, "status": "done"}
 
 
+def test_cmd_run_once_search_success_includes_runtime_when_service_returns_it(monkeypatch, capsys):
+    _prepare(monkeypatch, {"engine_used": "playwright"}, ServiceSuccess)
+    monkeypatch.setattr(
+        cli,
+        "runtime_diagnostics",
+        lambda: {
+            "alert_channels": ["jsonl"],
+            "scoring_enabled": False,
+            "scrape_preferred_engine": "camoufox",
+            "scrape_headless": True,
+        },
+    )
+
+    class ServiceSuccessWithRuntime(ServiceSuccess):
+        def run_once(self, search_id):
+            return {
+                "ok": True,
+                "search_id": search_id,
+                "status": "done",
+                "runtime": cli.runtime_diagnostics(),
+            }
+
+    monkeypatch.setattr(cli, "MonitorService", ServiceSuccessWithRuntime)
+    cli.cmd_run_once(Namespace(search_id=7))
+    output = json.loads(capsys.readouterr().out)
+    assert output["runtime"]["alert_channels"] == ["jsonl"]
+
+
 def test_cmd_run_once_search_parser_error_returns_structured_json(monkeypatch, capsys):
     _prepare(monkeypatch, {"engine_used": "playwright", "fallback_used": False}, ServiceParserError)
 
@@ -87,6 +115,7 @@ def test_cmd_run_once_search_parser_error_returns_structured_json(monkeypatch, c
     assert isinstance(output["elapsed_ms"], int)
     assert output["elapsed_ms"] >= 0
     assert output["parser_stats"] == {"engine_used": "playwright", "fallback_used": False}
+    assert "runtime" in output
 
 
 def test_cmd_run_once_search_non_parser_error_returns_structured_json(monkeypatch, capsys):
@@ -101,6 +130,7 @@ def test_cmd_run_once_search_non_parser_error_returns_structured_json(monkeypatc
     assert output["error"] == "boom"
     assert isinstance(output["elapsed_ms"], int)
     assert output["parser_stats"] == {"engine_used": "playwright"}
+    assert "runtime" in output
 
 
 def test_cmd_run_once_search_keyboard_interrupt_not_swallowed(monkeypatch):

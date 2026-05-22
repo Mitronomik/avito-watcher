@@ -283,9 +283,19 @@ def test_run_once_parser_error_and_generic_and_keyboard(monkeypatch):
     monkeypatch.setattr("app.admin.MonitorService", ParserErrService)
     monkeypatch.setattr("app.admin._build_parser", lambda: object())
     monkeypatch.setattr("app.admin._parser_stats_snapshot", lambda _p: {"engine_used": "x"})
+    monkeypatch.setattr(
+        "app.admin.runtime_diagnostics",
+        lambda: {
+            "alert_channels": ["jsonl"],
+            "scoring_enabled": False,
+            "scrape_preferred_engine": "camoufox",
+            "scrape_headless": True,
+        },
+    )
     text = client.post(f"/admin/searches/{job_id}/run-once").text
     assert "layout_changed" in text
     assert "parser_stats" in text
+    assert "runtime" in text
 
     class GenericErrService:
         def __init__(self, parser=None):
@@ -297,6 +307,7 @@ def test_run_once_parser_error_and_generic_and_keyboard(monkeypatch):
     monkeypatch.setattr("app.admin.MonitorService", GenericErrService)
     text = client.post(f"/admin/searches/{job_id}/run-once").text
     assert "ValueError" in text
+    assert "runtime" in text
 
     class InterruptService:
         def __init__(self, parser=None):
@@ -308,6 +319,33 @@ def test_run_once_parser_error_and_generic_and_keyboard(monkeypatch):
     monkeypatch.setattr("app.admin.MonitorService", InterruptService)
     with pytest.raises(KeyboardInterrupt):
         client.post(f"/admin/searches/{job_id}/run-once")
+
+
+def test_run_once_success_page_includes_runtime_json(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    job_id = create_job(Session)
+
+    class OkService:
+        def __init__(self, parser=None):
+            self.parser = parser
+
+        def run_once(self, search_id):
+            return {
+                "ok": True,
+                "search_id": search_id,
+                "created": 0,
+                "alerted": 0,
+                "filtered": 0,
+                "scored": 0,
+                "parser_stats": {},
+                "elapsed_ms": 1,
+                "runtime": {"alert_channels": ["jsonl"]},
+            }
+
+    monkeypatch.setattr("app.admin.MonitorService", OkService)
+    text = client.post(f"/admin/searches/{job_id}/run-once").text
+    assert "runtime" in text
+    assert "alert_channels" in text
 
 
 def test_searches_dashboard_statuses_actions_and_previews(monkeypatch):
