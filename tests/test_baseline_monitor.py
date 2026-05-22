@@ -685,6 +685,86 @@ def test_max_area_filter_uses_area_parsed_from_card_text(db_session):
 
 
 
+
+
+def test_filtered_samples_includes_rules_reason(db_session):
+    search = make_search(db_session, filters_json={"min_price": 150.0})
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2", price=100.0)]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_rules"] == 1
+    assert result["filtered_by_publication_date"] == 0
+    assert result["filtered_samples"] == [
+        {
+            "external_id": "2",
+            "title": "Listing 2",
+            "price": 100.0,
+            "area_m2": None,
+            "address": "",
+            "published_label": "",
+            "url": "https://www.avito.ru/item_2",
+            "reason": "rules",
+        }
+    ]
+
+
+def test_filtered_samples_includes_publication_date_reason(db_session):
+    now = datetime(2026, 5, 17, 12, 0, 0)
+    search = make_search(db_session, filters_json={"max_age_hours": 2})
+    service = MonitorService(
+        parser=FakeParser(
+            [[card("1")], [card("1"), card("2", published_at=now - timedelta(hours=3))]]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+        now_func=lambda: now,
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_publication_date"] == 1
+    assert result["filtered_samples"][0]["external_id"] == "2"
+    assert result["filtered_samples"][0]["reason"] == "publication_date"
+
+
+def test_filtered_samples_capped_at_ten(db_session):
+    search = make_search(db_session, filters_json={"min_price": 1_000_000.0})
+    first_batch = [card("1")]
+    second_batch = [card("1")] + [card(str(i), price=10.0) for i in range(2, 17)]
+    service = MonitorService(
+        parser=FakeParser([first_batch, second_batch]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_rules"] == 15
+    assert len(result["filtered_samples"]) == 10
+
+
+def test_baseline_run_has_empty_filtered_samples(db_session):
+    search = make_search(db_session, filters_json={"min_price": 1_000_000.0})
+    service = MonitorService(
+        parser=FakeParser([[card("1", price=100.0)]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    result = run(service, db_session, search)
+
+    assert result["baseline_run"] is True
+    assert result["filtered"] == 0
+    assert result["filtered_samples"] == []
+
 def test_max_age_hours_allows_fresh_listing(db_session):
     now = datetime(2026, 5, 17, 12, 0, 0)
     search = make_search(db_session, filters_json={"max_age_hours": 2})
