@@ -4,6 +4,7 @@ import html
 import json
 import re
 import time
+from pathlib import Path
 from datetime import datetime
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
@@ -119,6 +120,37 @@ def _keywords(value: str) -> list[str] | None:
 def _render_page(title: str, body: str) -> HTMLResponse:
     return HTMLResponse(f"""<!doctype html><html><head><meta charset='utf-8'><title>{html.escape(title)}</title>
 <style>body{{font-family:Arial,sans-serif;max-width:1100px;margin:1rem auto;padding:0 1rem}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccc;padding:.4rem;vertical-align:top}}input,textarea,select{{width:100%;padding:.35rem}}.row{{margin:.4rem 0}}.section{{border:1px solid #dfe3e8;border-radius:.4rem;padding:.7rem .8rem;margin:.7rem 0;background:#fafbfc}}.section h3{{margin:.1rem 0 .6rem 0}}.checkbox input{{width:auto;margin-right:.35rem}}.actions form{{display:inline-block;margin:.1rem}}.note{{background:#fff7d6;padding:.5rem;border:1px solid #e2c86f}}.error{{background:#ffdede;padding:.5rem;border:1px solid #d66}}.badge{{display:inline-block;padding:.12rem .4rem;border-radius:.35rem;font-size:.8rem;font-weight:600;margin:.08rem .15rem .08rem 0}}.badge-green{{background:#d9f7e6;color:#115c36;border:1px solid #94d6b1}}.badge-yellow{{background:#fff6d6;color:#745700;border:1px solid #f2d37c}}.badge-red{{background:#ffe1e1;color:#7a1212;border:1px solid #f2a5a5}}.badge-gray{{background:#eceef1;color:#3d4954;border:1px solid #c9ced4}}.preview{{font-size:.88rem;word-break:break-all}}code{{font-size:.84rem}}</style></head><body>{body}</body></html>""")
+
+
+def _truncate(value: object, limit: int = 120) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 1]}…"
+
+
+def _read_jsonl_alerts(path: str, search_name: str | None, limit: int) -> tuple[list[dict], int, int]:
+    file_path = Path(path)
+    if not file_path.exists() or not file_path.is_file():
+        return [], 0, 0
+    valid_records: list[dict] = []
+    invalid_count = 0
+    with file_path.open("r", encoding="utf-8") as infile:
+        for raw in infile:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                invalid_count += 1
+                continue
+            if isinstance(parsed, dict):
+                valid_records.append(parsed)
+    valid_records.reverse()
+    if search_name:
+        valid_records = [r for r in valid_records if str(r.get("search_name", "")) == search_name]
+    return valid_records[:limit], len(valid_records), invalid_count
 
 
 def _badge(text: str, level: str) -> str:
@@ -257,7 +289,41 @@ def searches(request: Request, db: Session = Depends(get_db)):
         notice = "<div class='note'>Saved successfully.</div>"
     elif request.query_params.get("updated") == "1":
         notice = "<div class='note'>Updated successfully.</div>"
-    return _render_page("Searches", f"<h1>Searches</h1>{notice}<p><a href='{_admin_url('/admin/searches/new', api_key)}'>New search</a></p><table><tr><th>id</th><th>name / source</th><th>human_title</th><th>status</th><th>fail_count</th><th>last_error</th><th>last_success_at</th><th>next_run_at</th><th>poll_interval_sec</th><th>cli</th><th>actions</th></tr>{''.join(rows)}</table>")
+    return _render_page("Searches", f"<h1>Searches</h1>{notice}<p><a href='{_admin_url('/admin/searches/new', api_key)}'>New search</a> · <a href='{_admin_url('/admin/alerts', api_key)}'>Alerts</a></p><table><tr><th>id</th><th>name / source</th><th>human_title</th><th>status</th><th>fail_count</th><th>last_error</th><th>last_success_at</th><th>next_run_at</th><th>poll_interval_sec</th><th>cli</th><th>actions</th></tr>{''.join(rows)}</table>")
+
+
+@router.get('/alerts', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
+def alerts(request: Request, limit: int = Query(default=50), search_name: str | None = Query(default=None)):
+    api_key = request.query_params.get("api_key")
+    effective_limit = max(1, min(limit, 500))
+    normalized_search_name = (search_name or "").strip() or None
+    rows_data, total_loaded, invalid_count = _read_jsonl_alerts(settings.jsonl_outbox_path, normalized_search_name, effective_limit)
+    rows = []
+    for item in rows_data:
+        link = html.escape(str(item.get("url", "")))
+        rows.append(
+            f"<tr><td>{html.escape(_truncate(item.get('timestamp', ''), 40))}</td><td>{html.escape(_truncate(item.get('search_name', ''), 60))}</td>"
+            f"<td>{html.escape(_truncate(item.get('title', ''), 100))}</td><td>{html.escape(_truncate(item.get('price', ''), 40))}</td>"
+            f"<td>{html.escape(_truncate(item.get('area_m2', ''), 30))}</td><td>{html.escape(_truncate(item.get('address', ''), 100))}</td>"
+            f"<td>{html.escape(_truncate(item.get('published_label', ''), 50))}</td><td>{html.escape(_truncate(item.get('llm_summary', ''), 140))}</td>"
+            f"<td>{f"<a href='{link}' target='_blank' rel='noopener noreferrer'>open</a>" if link else ''}</td></tr>"
+        )
+    warning = f"<div class='note'>Skipped invalid JSONL lines: {invalid_count}</div>" if invalid_count else ""
+    empty = "<p>No alerts found yet.</p>" if not rows else ""
+    table = "" if not rows else f"<table><tr><th>timestamp</th><th>search_name</th><th>title</th><th>price</th><th>area_m2</th><th>address</th><th>published_label</th><th>llm_summary</th><th>url</th></tr>{''.join(rows)}</table>"
+    form_action = _admin_url('/admin/alerts', api_key)
+    current_limit = html.escape(str(effective_limit))
+    current_search = html.escape(normalized_search_name or "")
+    body = (
+        f"<h1>Alerts</h1><p><a href='{_admin_url('/admin/searches', api_key)}'>Back to searches</a></p>"
+        f"<p>JSONL file: <code>{html.escape(settings.jsonl_outbox_path)}</code></p>"
+        f"<p>Visible: {len(rows_data)} / Loaded: {total_loaded}</p>{warning}"
+        f"<form method='get' action='{form_action}'><input type='hidden' name='api_key' value='{html.escape(api_key or '')}'>"
+        f"<div class='row'><label>search_name<input name='search_name' value='{current_search}'></label></div>"
+        f"<div class='row'><label>limit<input name='limit' type='number' min='1' max='500' value='{current_limit}'></label></div>"
+        f"<button type='submit'>Apply</button></form>{empty}{table}"
+    )
+    return _render_page('Alerts', body)
 
 
 @router.get('/searches/new', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
