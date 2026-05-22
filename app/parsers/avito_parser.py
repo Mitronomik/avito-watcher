@@ -1,5 +1,7 @@
+import asyncio
 import hashlib
 import logging
+import random
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -364,6 +366,12 @@ class AvitoParser:
         for page in range(1, max_pages + 1):
             pages_attempted += 1
             page_url = self._build_page_url(search_url, page)
+            if page > 1:
+                delay_ms = max(int(settings.scrape_page_delay_ms), 0)
+                jitter_ms = max(int(settings.scrape_page_jitter_ms), 0)
+                sleep_ms = delay_ms + (random.randint(0, jitter_ms) if jitter_ms > 0 else 0)
+                if sleep_ms > 0:
+                    await asyncio.sleep(sleep_ms / 1000.0)
             try:
                 page_cards = await self._fetch_and_parse_page_cards(page_url, per_page_limit)
             except ParserError as exc:
@@ -372,7 +380,14 @@ class AvitoParser:
                 if exc.error_type == ParserErrorType.EMPTY_RESULTS:
                     stop_reason = "empty_results"
                     break
-                page_errors.append({"page": page, "error_type": exc.error_type.value, "error": str(exc)})
+                page_errors.append(
+                    {
+                        "page": page,
+                        "error_type": exc.error_type.value,
+                        "error": str(exc),
+                        "page_url_preview": page_url[:220],
+                    }
+                )
                 stop_reason = "page_error"
                 break
 

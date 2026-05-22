@@ -39,3 +39,5 @@ def test_pagination_settings_defaults():
     assert settings.scrape_max_pages == 1
     assert settings.scrape_cards_per_page_limit == 30
     assert settings.scrape_stop_on_duplicate_page is True
+    assert settings.scrape_page_delay_ms == 0
+    assert settings.scrape_page_jitter_ms == 0

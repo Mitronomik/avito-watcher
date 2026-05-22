@@ -75,6 +75,11 @@ def runtime_diagnostics() -> dict:
         "scoring_enabled": settings.scoring_enabled,
         "scrape_preferred_engine": settings.scrape_preferred_engine,
         "scrape_headless": settings.scrape_headless,
+        "scrape_max_pages": settings.scrape_max_pages,
+        "scrape_cards_per_page_limit": settings.scrape_cards_per_page_limit,
+        "scrape_stop_on_duplicate_page": settings.scrape_stop_on_duplicate_page,
+        "scrape_page_delay_ms": settings.scrape_page_delay_ms,
+        "scrape_page_jitter_ms": settings.scrape_page_jitter_ms,
     }
 
 

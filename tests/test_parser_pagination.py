@@ -95,4 +95,45 @@ def test_later_page_error_becomes_diagnostic_and_stops(monkeypatch):
 
     assert [c.external_id for c in result["cards"]] == ["1"]
     assert result["pagination_stopped_reason"] == "page_error"
-    assert result["page_errors"] == [{"page": 2, "error_type": "layout_changed", "error": "layout_changed: broken"}]
+    assert result["page_errors"] == [
+        {
+            "page": 2,
+            "error_type": "layout_changed",
+            "error": "layout_changed: broken",
+            "page_url_preview": f"{SEARCH_URL}&p=2",
+        }
+    ]
+
+
+def test_sleep_before_page2_when_delay_enabled(monkeypatch):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_max_pages", 2)
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_page_delay_ms", 100)
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_page_jitter_ms", 0)
+    parser = AvitoParser()
+    fetch = AsyncMock(side_effect=[_page_html(["1"]), _page_html(["2"])])
+    sleep = AsyncMock()
+
+    with (
+        patch.object(parser, "_fetch_page_html", new=fetch),
+        patch("app.parsers.avito_parser.asyncio.sleep", new=sleep),
+    ):
+        asyncio.run(parser.fetch_search_cards_paginated(SEARCH_URL))
+
+    sleep.assert_awaited_once_with(0.1)
+
+
+def test_no_sleep_when_single_page(monkeypatch):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_max_pages", 1)
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_page_delay_ms", 100)
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_page_jitter_ms", 10)
+    parser = AvitoParser()
+    fetch = AsyncMock(side_effect=[_page_html(["1"])])
+    sleep = AsyncMock()
+
+    with (
+        patch.object(parser, "_fetch_page_html", new=fetch),
+        patch("app.parsers.avito_parser.asyncio.sleep", new=sleep),
+    ):
+        asyncio.run(parser.fetch_search_cards_paginated(SEARCH_URL))
+
+    sleep.assert_not_awaited()

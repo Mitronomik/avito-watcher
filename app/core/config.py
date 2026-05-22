@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     scrape_max_pages: int = 1
     scrape_cards_per_page_limit: int = 30
     scrape_stop_on_duplicate_page: bool = True
+    scrape_page_delay_ms: int = 0
+    scrape_page_jitter_ms: int = 0
     scrape_preferred_engine: Literal["auto", "nodriver", "camoufox"] = "auto"
     proxy_urls: str = ""
     alert_channels: str = "jsonl,telegram"
