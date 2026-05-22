@@ -56,8 +56,8 @@ def test_paginated_stops_on_empty_results(monkeypatch):
         result = asyncio.run(parser.fetch_search_cards_paginated(SEARCH_URL))
 
     assert [c.external_id for c in result["cards"]] == ["1"]
-    assert result["pagination_stopped_reason"] == "page_error"
-    assert result["page_errors"][0]["error_type"] == ParserErrorType.EMPTY_RESULTS.value
+    assert result["pagination_stopped_reason"] == "empty_results"
+    assert result["page_errors"] == []
 
 
 def test_page1_parser_error_raises(monkeypatch):

@@ -369,6 +369,9 @@ class AvitoParser:
             except ParserError as exc:
                 if page == 1:
                     raise
+                if exc.error_type == ParserErrorType.EMPTY_RESULTS:
+                    stop_reason = "empty_results"
+                    break
                 page_errors.append({"page": page, "error_type": exc.error_type.value, "error": str(exc)})
                 stop_reason = "page_error"
                 break
