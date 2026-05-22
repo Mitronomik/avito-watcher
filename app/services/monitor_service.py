@@ -406,7 +406,10 @@ class MonitorService:
                     "pagination_stopped_reason": "single_page",
                     "page_errors": [],
                 }
-            result.update(pagination)
+            pagination_diagnostics = {
+                key: value for key, value in pagination.items() if key != "cards"
+            }
+            result.update(pagination_diagnostics)
             return result
         except Exception as exc:
             db.rollback()

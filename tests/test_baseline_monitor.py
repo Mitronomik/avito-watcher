@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
@@ -653,6 +654,8 @@ def test_run_once_includes_pagination_diagnostics_and_total_seen_deduped(monkeyp
     assert result["duplicate_cards_skipped"] == 1
     assert result["pagination_stopped_reason"] == "duplicate_page"
     assert result["page_errors"] == []
+    assert "cards" not in result
+    assert json.dumps(result)
 
 
 def test_runtime_diagnostics_parses_alert_channels_with_spaces(monkeypatch):
