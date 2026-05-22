@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol
 from zoneinfo import ZoneInfo
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from app.parsers.block_signals import looks_like_block_or_captcha
 from app.core.config import settings
@@ -344,8 +344,72 @@ class AvitoParser:
         )
 
     async def fetch_search_cards(self, search_url: str) -> list[ListingCard]:
-        self._validate_search_url(search_url)
+        paginated = await self.fetch_search_cards_paginated(search_url)
+        return paginated["cards"]
 
+    async def fetch_search_cards_paginated(self, search_url: str) -> dict:
+        self._validate_search_url(search_url)
+        max_pages = max(int(settings.scrape_max_pages), 1)
+        per_page_limit = max(int(settings.scrape_cards_per_page_limit), 1)
+        stop_on_duplicate_page = bool(settings.scrape_stop_on_duplicate_page)
+
+        all_cards: list[ListingCard] = []
+        seen_ids: set[str] = set()
+        duplicate_cards_skipped = 0
+        page_errors: list[dict] = []
+        pages_seen = 0
+        pages_attempted = 0
+        stop_reason = "max_pages_reached"
+
+        for page in range(1, max_pages + 1):
+            pages_attempted += 1
+            page_url = self._build_page_url(search_url, page)
+            try:
+                page_cards = await self._fetch_and_parse_page_cards(page_url, per_page_limit)
+            except ParserError as exc:
+                if page == 1:
+                    raise
+                if exc.error_type == ParserErrorType.EMPTY_RESULTS:
+                    stop_reason = "empty_results"
+                    break
+                page_errors.append({"page": page, "error_type": exc.error_type.value, "error": str(exc)})
+                stop_reason = "page_error"
+                break
+
+            pages_seen += 1
+            if not page_cards:
+                stop_reason = "empty_page"
+                break
+
+            unique_on_page = 0
+            for card in page_cards:
+                if card.external_id in seen_ids:
+                    duplicate_cards_skipped += 1
+                    continue
+                seen_ids.add(card.external_id)
+                all_cards.append(card)
+                unique_on_page += 1
+
+            if unique_on_page == 0 and stop_on_duplicate_page:
+                stop_reason = "duplicate_page"
+                break
+        else:
+            stop_reason = "max_pages_reached"
+
+        cards_processed_before_dedupe = len(all_cards) + duplicate_cards_skipped
+        return {
+            "cards": all_cards,
+            "pages_seen": pages_seen,
+            "pages_attempted": pages_attempted,
+            "cards_processed_before_dedupe": cards_processed_before_dedupe,
+            "cards_seen_before_dedupe": cards_processed_before_dedupe,
+            "cards_seen_after_dedupe": len(all_cards),
+            "duplicate_cards_skipped": duplicate_cards_skipped,
+            "pagination_stopped_reason": stop_reason,
+            "page_errors": page_errors,
+        }
+
+    async def _fetch_and_parse_page_cards(self, search_url: str, per_page_limit: int) -> list[ListingCard]:
         # Fetch HTML via stealth engine (nodriver → camoufox fallback)
         # _fetch_page_html raises ParserError only when all engines are blocked.
         page_html: str = await self._fetch_page_html(search_url)
@@ -380,7 +444,8 @@ class AvitoParser:
 
         result: list[ListingCard] = []
 
-        for idx, card in enumerate(raw_cards[:CARD_LIMIT]):
+        limit = min(per_page_limit, CARD_LIMIT)
+        for idx, card in enumerate(raw_cards[:limit]):
             a_tag = card.select_one("a[href]")
             href = a_tag.get("href") if a_tag else None
 
@@ -417,6 +482,15 @@ class AvitoParser:
             )
 
         return result
+
+    @staticmethod
+    def _build_page_url(search_url: str, page: int) -> str:
+        if page <= 1:
+            return search_url
+        parsed = urlparse(search_url)
+        query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key != "p"]
+        query.append(("p", str(page)))
+        return urlunparse(parsed._replace(query=urlencode(query)))
 
     @staticmethod
     def _validate_search_url(search_url: str) -> None:

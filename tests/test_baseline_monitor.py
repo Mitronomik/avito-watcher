@@ -616,6 +616,45 @@ def test_run_once_preserves_business_counters_and_adds_parser_stats(
     assert "runtime" in result
 
 
+def test_run_once_includes_pagination_diagnostics_and_total_seen_deduped(monkeypatch, db_session):
+    search = make_search(db_session)
+    patch_session_local(monkeypatch, db_session)
+
+    class PaginatedParser:
+        async def fetch_search_cards_paginated(self, _url):
+            from app.parsers.schemas import ListingCard
+
+            cards = [
+                ListingCard(external_id="1", url="https://www.avito.ru/item_1", title="A", price=1, address="", area_m2=None, rooms="", published_label="", published_at=None, raw={}),
+                ListingCard(external_id="2", url="https://www.avito.ru/item_2", title="B", price=2, address="", area_m2=None, rooms="", published_label="", published_at=None, raw={}),
+            ]
+            return {
+                "cards": cards,
+                "pages_seen": 2,
+                "pages_attempted": 2,
+                "cards_processed_before_dedupe": 3,
+                "cards_seen_before_dedupe": 3,
+                "cards_seen_after_dedupe": 2,
+                "duplicate_cards_skipped": 1,
+                "pagination_stopped_reason": "duplicate_page",
+                "page_errors": [],
+            }
+
+    service = MonitorService(parser=PaginatedParser(), scorer=FakeScorer(), notifier=FakeNotifier())
+    result = service.run_once(search.id)
+
+    assert result["total_seen"] == 2
+    assert result["pages_seen"] == 2
+    assert result["pages_attempted"] == 2
+    assert result["cards_processed_before_dedupe"] == 3
+    assert result["cards_seen_before_dedupe"] == 3
+    assert result["cards_processed_before_dedupe"] == result["cards_seen_before_dedupe"]
+    assert result["cards_seen_after_dedupe"] == 2
+    assert result["duplicate_cards_skipped"] == 1
+    assert result["pagination_stopped_reason"] == "duplicate_page"
+    assert result["page_errors"] == []
+
+
 def test_runtime_diagnostics_parses_alert_channels_with_spaces(monkeypatch):
     monkeypatch.setattr("app.services.monitor_service.settings.alert_channels", "jsonl, telegram")
     monkeypatch.setattr("app.services.monitor_service.settings.scoring_enabled", False)
