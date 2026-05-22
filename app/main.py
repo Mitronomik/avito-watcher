@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from app.admin import router as admin_router
 from app.api.routes import router
+from app.core.config import settings
 from app.db.init_db import init_db
 
 
@@ -13,6 +14,13 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Avito Watcher", lifespan=lifespan)
-app.include_router(router)
-app.include_router(admin_router)
+def create_app(admin_ui_enabled: bool | None = None) -> FastAPI:
+    app_instance = FastAPI(title="Avito Watcher", lifespan=lifespan)
+    app_instance.include_router(router)
+    enabled = settings.admin_ui_enabled if admin_ui_enabled is None else admin_ui_enabled
+    if enabled:
+        app_instance.include_router(admin_router)
+    return app_instance
+
+
+app = create_app()
