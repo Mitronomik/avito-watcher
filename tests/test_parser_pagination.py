@@ -30,6 +30,7 @@ def test_paginated_builds_urls_and_preserves_query_params(monkeypatch):
     assert called_urls[0] == SEARCH_URL
     assert "s=104" in called_urls[1] and "user=1" in called_urls[1] and "p=2" in called_urls[1]
     assert "s=104" in called_urls[2] and "user=1" in called_urls[2] and "p=3" in called_urls[2]
+    assert result["cards_processed_before_dedupe"] == result["cards_seen_before_dedupe"]
 
 
 def test_paginated_dedupes_and_stops_on_duplicate_page(monkeypatch):
@@ -70,6 +71,18 @@ def test_page1_parser_error_raises(monkeypatch):
             asyncio.run(parser.fetch_search_cards_paginated(SEARCH_URL))
 
     assert exc_info.value.error_type == ParserErrorType.LAYOUT_CHANGED
+
+
+def test_page1_empty_results_still_raises(monkeypatch):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_max_pages", 2)
+    parser = AvitoParser()
+    fetch = AsyncMock(side_effect=["<html><body>ничего не найдено</body></html>"])
+
+    with patch.object(parser, "_fetch_page_html", new=fetch):
+        with pytest.raises(ParserError) as exc_info:
+            asyncio.run(parser.fetch_search_cards_paginated(SEARCH_URL))
+
+    assert exc_info.value.error_type == ParserErrorType.EMPTY_RESULTS
 
 
 def test_later_page_error_becomes_diagnostic_and_stops(monkeypatch):

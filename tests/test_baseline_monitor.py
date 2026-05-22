@@ -632,6 +632,7 @@ def test_run_once_includes_pagination_diagnostics_and_total_seen_deduped(monkeyp
                 "cards": cards,
                 "pages_seen": 2,
                 "pages_attempted": 2,
+                "cards_processed_before_dedupe": 3,
                 "cards_seen_before_dedupe": 3,
                 "cards_seen_after_dedupe": 2,
                 "duplicate_cards_skipped": 1,
@@ -645,7 +646,9 @@ def test_run_once_includes_pagination_diagnostics_and_total_seen_deduped(monkeyp
     assert result["total_seen"] == 2
     assert result["pages_seen"] == 2
     assert result["pages_attempted"] == 2
+    assert result["cards_processed_before_dedupe"] == 3
     assert result["cards_seen_before_dedupe"] == 3
+    assert result["cards_processed_before_dedupe"] == result["cards_seen_before_dedupe"]
     assert result["cards_seen_after_dedupe"] == 2
     assert result["duplicate_cards_skipped"] == 1
     assert result["pagination_stopped_reason"] == "duplicate_page"

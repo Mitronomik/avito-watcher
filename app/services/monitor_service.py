@@ -399,6 +399,7 @@ class MonitorService:
                 pagination = {
                     "pages_seen": 1,
                     "pages_attempted": 1,
+                    "cards_processed_before_dedupe": len(cards),
                     "cards_seen_before_dedupe": len(cards),
                     "cards_seen_after_dedupe": len(cards),
                     "duplicate_cards_skipped": 0,

@@ -396,11 +396,13 @@ class AvitoParser:
         else:
             stop_reason = "max_pages_reached"
 
+        cards_processed_before_dedupe = len(all_cards) + duplicate_cards_skipped
         return {
             "cards": all_cards,
             "pages_seen": pages_seen,
             "pages_attempted": pages_attempted,
-            "cards_seen_before_dedupe": len(all_cards) + duplicate_cards_skipped,
+            "cards_processed_before_dedupe": cards_processed_before_dedupe,
+            "cards_seen_before_dedupe": cards_processed_before_dedupe,
             "cards_seen_after_dedupe": len(all_cards),
             "duplicate_cards_skipped": duplicate_cards_skipped,
             "pagination_stopped_reason": stop_reason,
