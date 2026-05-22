@@ -21,6 +21,9 @@ class SearchRepository:
     def list_all(self) -> list[SearchJob]:
         return list(self.db.scalars(select(SearchJob)).all())
 
+    def get_by_name(self, name: str) -> SearchJob | None:
+        return self.db.scalar(select(SearchJob).where(SearchJob.name == name))
+
     def list_active(self) -> list[SearchJob]:
         return list(self.db.scalars(select(SearchJob).where(SearchJob.is_active.is_(True))).all())
 
