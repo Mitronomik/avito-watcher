@@ -5,7 +5,7 @@ import json
 import re
 import time
 from datetime import datetime
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security, status
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -38,8 +38,61 @@ def _require_admin_api_key(
 def _admin_url(path: str, api_key: str | None) -> str:
     if not api_key:
         return path
-    return f"{path}?{urlencode({'api_key': api_key})}"
+    return _append_query_param(path, "api_key", api_key)
 
+
+
+
+def _append_query_param(url: str, key: str, value: str | None) -> str:
+    if not value:
+        return url
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    query[key] = [value]
+    return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
+
+
+def _safe_admin_return_url(raw_url: str | None) -> str | None:
+    if not raw_url:
+        return None
+    parsed = urlparse(raw_url)
+    if parsed.scheme or parsed.netloc:
+        return None
+    if not parsed.path.startswith('/admin'):
+        return None
+    return urlunparse(parsed._replace(fragment=''))
+
+
+def _extract_return_url(request: Request, form: dict[str, str] | None = None) -> str | None:
+    candidate = None
+    if form is not None:
+        candidate = form.get('return_url')
+    if not candidate:
+        candidate = request.query_params.get('return_url') or request.query_params.get('next')
+    if not candidate:
+        referer = request.headers.get('referer')
+        if referer:
+            parsed_ref = urlparse(referer)
+            if not parsed_ref.scheme or not parsed_ref.netloc:
+                candidate = referer
+            else:
+                host = request.url.hostname
+                if parsed_ref.hostname == host:
+                    candidate = urlunparse(('', '', parsed_ref.path, parsed_ref.params, parsed_ref.query, ''))
+    return _safe_admin_return_url(candidate)
+
+
+def _back_links(api_key: str | None, return_url: str | None) -> str:
+    back_target = _append_query_param(return_url, 'api_key', api_key) if return_url else _admin_url('/admin/searches', api_key)
+    list_target = _admin_url('/admin/searches', api_key)
+    return f"<p><a href='{html.escape(back_target)}'>Back</a></p><p><a href='{html.escape(list_target)}'>Back to search list</a></p>"
+
+
+def _success_redirect(request: Request, api_key: str | None, marker: str, form: dict[str, str] | None = None) -> RedirectResponse:
+    target = _extract_return_url(request, form)
+    if target:
+        return RedirectResponse(_append_query_param(target, 'api_key', api_key), status_code=303)
+    return RedirectResponse(_admin_url(f'/admin/searches?{marker}=1', api_key), status_code=303)
 
 def _is_avito_url(url: str) -> bool:
     parsed = urlparse(url)
@@ -76,7 +129,7 @@ async def _parse_form(request: Request) -> dict[str, str]:
     return {k: v[-1] if v else "" for k, v in data.items()}
 
 
-def _job_form(job=None, error: str = "") -> str:
+def _job_form(job=None, error: str = "", return_url: str = "") -> str:
     filters = (getattr(job, "filters_json", {}) if job else {}) or {}
 
     def v(name, default=""):
@@ -88,7 +141,7 @@ def _job_form(job=None, error: str = "") -> str:
     checked_req_pub = "checked" if filters.get("require_published_at") else ""
     return f"""{'<div class="error">'+html.escape(error)+'</div>' if error else ''}
 <div class='row'>human_title<input name='human_title' value='{html.escape(str(filters.get("human_title", "")))}'></div>
-<div class='row'>name<input name='name' value='{html.escape(str(v("name", "")))}' required></div>
+<div class='row'>name<input name='name' value='{html.escape(str(v("name", "")))}' required><div class='preview'>Technical name. Use latin letters, digits, _ or -. Existing legacy names may remain unchanged.</div></div><input type='hidden' name='return_url' value='{html.escape(return_url)}'>
 <div class='row'>source_url<textarea name='source_url' rows='3' required>{html.escape(str(v("source_url", "")))}</textarea></div>
 <div class='note'>Some Avito constraints such as owner/first floor are currently controlled by the Avito URL. Internal filters below are additional safety filters.</div>
 <div class='row'>is_active <input type='checkbox' name='is_active' {checked_active}></div>
@@ -158,13 +211,19 @@ def searches(request: Request, db: Session = Depends(get_db)):
         rows.append(
             f"<tr><td>{s.id}</td><td>{html.escape(s.name)}<div class='preview'>{source_url_preview}</div></td><td>{html.escape(str((s.filters_json or {}).get('human_title','')))}</td><td>{status_badges}</td><td>{s.fail_count}</td><td class='preview'>{last_error_preview}</td><td>{s.last_success_at or ''}</td><td>{next_run_cell}</td><td>{s.poll_interval_sec}</td><td><code>python3 -m app.cli run-once --search-id {s.id}</code></td><td class='actions'><a href='{_admin_url(f'/admin/searches/{s.id}/edit', api_key)}'>edit</a> {open_avito}<form method='post' action='{_admin_url(f'/admin/searches/{s.id}/{"deactivate" if s.is_active else "activate"}', api_key)}'><button>{'deactivate' if s.is_active else 'activate'}</button></form><form method='post' action='{_admin_url(f'/admin/searches/{s.id}/reset-baseline', api_key)}'><button>reset baseline</button></form><form method='post' action='{_admin_url(f'/admin/searches/{s.id}/run-once', api_key)}'><button>run once</button></form></td></tr>"
         )
-    return _render_page("Searches", f"<h1>Searches</h1><p><a href='{_admin_url('/admin/searches/new', api_key)}'>New search</a></p><table><tr><th>id</th><th>name / source</th><th>human_title</th><th>status</th><th>fail_count</th><th>last_error</th><th>last_success_at</th><th>next_run_at</th><th>poll_interval_sec</th><th>cli</th><th>actions</th></tr>{''.join(rows)}</table>")
+    notice = ""
+    if request.query_params.get("saved") == "1":
+        notice = "<div class='note'>Saved successfully.</div>"
+    elif request.query_params.get("updated") == "1":
+        notice = "<div class='note'>Updated successfully.</div>"
+    return _render_page("Searches", f"<h1>Searches</h1>{notice}<p><a href='{_admin_url('/admin/searches/new', api_key)}'>New search</a></p><table><tr><th>id</th><th>name / source</th><th>human_title</th><th>status</th><th>fail_count</th><th>last_error</th><th>last_success_at</th><th>next_run_at</th><th>poll_interval_sec</th><th>cli</th><th>actions</th></tr>{''.join(rows)}</table>")
 
 
 @router.get('/searches/new', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
 def new_search_form(request: Request):
     api_key = request.query_params.get("api_key")
-    return _render_page('New search', f"<h1>New search</h1><form method='post' action='{_admin_url('/admin/searches', api_key)}'>{_job_form()}<button type='submit'>Create</button></form>")
+    return_url = _extract_return_url(request) or _admin_url('/admin/searches', api_key)
+    return _render_page('New search', f"<h1>New search</h1><form method='post' action='{_admin_url('/admin/searches', api_key)}'>{_job_form(return_url=return_url)}<button type='submit'>Create</button></form>")
 
 
 @router.post('/searches', dependencies=[Depends(_require_admin_api_key)])
@@ -190,14 +249,16 @@ async def create_search(request: Request, db: Session = Depends(get_db)):
             raise ValueError('poll_interval_sec must be a positive integer')
         filters = _extract_filters(form, 'require_published_at' in form)
     except (ValueError, TypeError) as exc:
-        return _render_page('Validation error', f"<h1>New search</h1><form method='post' action='{_admin_url('/admin/searches', api_key)}'>{_job_form(type('O',(),form), str(exc))}<button type='submit'>Create</button></form>")
+        return_url = _extract_return_url(request, form) or _admin_url('/admin/searches', api_key)
+        links = _back_links(api_key, _safe_admin_return_url(form.get('return_url')))
+        return _render_page('Validation error', f"<h1>New search</h1><div class='error'>Nothing was saved because validation failed.</div>{links}<form method='post' action='{_admin_url('/admin/searches', api_key)}'>{_job_form(type('O',(),form), str(exc), return_url=return_url)}<button type='submit'>Create</button></form>")
     item = SearchRepository(db).create(name=name, source_url=form['source_url'].strip(), filters_json=filters, poll_interval_sec=poll)
     item.is_active = 'is_active' in form
     item.baseline_initialized = False
     item.fail_count = 0
     item.next_run_at = None
     db.commit()
-    return RedirectResponse(_admin_url('/admin/searches', api_key), status_code=303)
+    return _success_redirect(request, api_key, 'saved', form=form)
 
 
 @router.get('/searches/{search_id}/edit', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
@@ -206,7 +267,8 @@ def edit_form(search_id: int, request: Request, db: Session = Depends(get_db)):
     job = SearchRepository(db).get(search_id)
     if job is None:
         raise HTTPException(404)
-    return _render_page('Edit search', f"<h1>Edit search #{search_id}</h1><form method='post' action='{_admin_url(f'/admin/searches/{search_id}', api_key)}'>{_job_form(job)}<button type='submit'>Save</button></form>")
+    return_url = _extract_return_url(request) or _admin_url('/admin/searches', api_key)
+    return _render_page('Edit search', f"<h1>Edit search #{search_id}</h1><form method='post' action='{_admin_url(f'/admin/searches/{search_id}', api_key)}'>{_job_form(job, return_url=return_url)}<button type='submit'>Save</button></form>")
 
 
 @router.post('/searches/{search_id}', dependencies=[Depends(_require_admin_api_key)])
@@ -225,7 +287,9 @@ async def update_search(search_id: int, request: Request, db: Session = Depends(
         form.setdefault(k, '')
     try:
         name = form['name'].strip()
-        if not name or not NAME_RE.fullmatch(name):
+        if not name:
+            raise ValueError('name must match ^[a-z0-9][a-z0-9_-]{2,120}$')
+        if name != job.name and not NAME_RE.fullmatch(name):
             raise ValueError('name must match ^[a-z0-9][a-z0-9_-]{2,120}$')
         conflict = repo.get_by_name(name)
         if conflict is not None and conflict.id != search_id:
@@ -237,14 +301,17 @@ async def update_search(search_id: int, request: Request, db: Session = Depends(
             raise ValueError('poll_interval_sec must be a positive integer')
         filters = _extract_filters(form, 'require_published_at' in form)
     except (ValueError, TypeError) as exc:
-        return _render_page('Validation error', f"<h1>Edit search #{search_id}</h1><form method='post' action='{_admin_url(f'/admin/searches/{search_id}', api_key)}'>{_job_form(job, str(exc))}<button type='submit'>Save</button></form>")
+        return_url = _extract_return_url(request, form) or _admin_url('/admin/searches', api_key)
+        links = _back_links(api_key, _safe_admin_return_url(form.get('return_url')))
+        form_job = type('O', (), {**form, 'filters_json': job.filters_json, 'is_active': 'is_active' in form})
+        return _render_page('Validation error', f"<h1>Edit search #{search_id}</h1><div class='error'>Nothing was saved because validation failed.</div>{links}<form method='post' action='{_admin_url(f'/admin/searches/{search_id}', api_key)}'>{_job_form(form_job, str(exc), return_url=return_url)}<button type='submit'>Save</button></form>")
     job.name = name
     job.source_url = form['source_url'].strip()
     job.poll_interval_sec = poll
     job.filters_json = filters
     job.is_active = 'is_active' in form
     db.commit()
-    return RedirectResponse(_admin_url('/admin/searches', api_key), status_code=303)
+    return _success_redirect(request, api_key, 'updated', form=form)
 
 
 @router.post('/searches/{search_id}/activate', dependencies=[Depends(_require_admin_api_key)])
@@ -255,7 +322,7 @@ def activate(search_id: int, request: Request, db: Session = Depends(get_db)):
         raise HTTPException(404)
     job.is_active = True
     db.commit()
-    return RedirectResponse(_admin_url('/admin/searches', api_key), status_code=303)
+    return _success_redirect(request, api_key, 'updated')
 
 
 @router.post('/searches/{search_id}/deactivate', dependencies=[Depends(_require_admin_api_key)])
@@ -266,7 +333,7 @@ def deactivate(search_id: int, request: Request, db: Session = Depends(get_db)):
         raise HTTPException(404)
     job.is_active = False
     db.commit()
-    return RedirectResponse(_admin_url('/admin/searches', api_key), status_code=303)
+    return _success_redirect(request, api_key, 'updated')
 
 
 @router.post('/searches/{search_id}/reset-baseline', dependencies=[Depends(_require_admin_api_key)])
@@ -279,7 +346,7 @@ def reset_baseline(search_id: int, request: Request, db: Session = Depends(get_d
     job.baseline_initialized_at = None
     job.next_run_at = None
     db.commit()
-    return RedirectResponse(_admin_url('/admin/searches', api_key), status_code=303)
+    return _success_redirect(request, api_key, 'updated')
 
 
 @router.post('/searches/{search_id}/run-once', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
