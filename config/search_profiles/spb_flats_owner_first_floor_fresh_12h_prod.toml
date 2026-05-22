@@ -1,0 +1,16 @@
+name = "spb_flats_owner_first_floor_fresh_12h_prod"
+title = "СПб квартиры от собственника, первый этаж, свежие 12 часов"
+url = "https://www.avito.ru/sankt-peterburg/kvartiry/prodam-ASgBAgICAUSSA8YQ?f=ASgBAQICAUSSA8YQAvlO8AeYWQFAzAgQ&cd=1"
+poll_interval_sec = 600
+is_active = true
+
+[filters]
+profile = "production"
+category = "flats_sale"
+city = "spb"
+seller = "owner"
+floor = "first"
+min_area = 28
+max_price = 15000000
+max_age_hours = 12
+require_published_at = true
