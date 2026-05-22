@@ -1,4 +1,6 @@
+import fcntl
 import logging
+from pathlib import Path
 import random
 import time
 
@@ -13,6 +15,32 @@ logger = logging.getLogger(__name__)
 
 WORKER_CADENCE_SEC = 60
 WORKER_CADENCE_JITTER_SEC = 2
+
+
+class MonitorWorkerLock:
+    def __init__(self, lock_path: str):
+        self._path = Path(lock_path)
+        self._lock_file = None
+
+    def __enter__(self):
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = self._path.open("a+")
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            lock_file.close()
+            logger.error(
+                "monitor worker already running; lock_path=%s", self._path
+            )
+            raise SystemExit(1)
+        self._lock_file = lock_file
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._lock_file is not None:
+            fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+            self._lock_file.close()
+            self._lock_file = None
 
 
 def _build_parser() -> AvitoParser:
@@ -47,18 +75,19 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    init_db()
-    parser = _build_parser()
-    while True:
-        try:
-            run_monitor_cycle(parser)
-        except Exception:
-            logger.exception("worker cycle failed")
-        sleep_for = WORKER_CADENCE_SEC + random.uniform(
-            -WORKER_CADENCE_JITTER_SEC,
-            WORKER_CADENCE_JITTER_SEC,
-        )
-        time.sleep(max(1, sleep_for))
+    with MonitorWorkerLock(settings.monitor_worker_lock_path):
+        init_db()
+        parser = _build_parser()
+        while True:
+            try:
+                run_monitor_cycle(parser)
+            except Exception:
+                logger.exception("worker cycle failed")
+            sleep_for = WORKER_CADENCE_SEC + random.uniform(
+                -WORKER_CADENCE_JITTER_SEC,
+                WORKER_CADENCE_JITTER_SEC,
+            )
+            time.sleep(max(1, sleep_for))
 
 
 if __name__ == "__main__":
