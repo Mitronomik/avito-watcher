@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -408,6 +409,91 @@ def test_searches_dashboard_api_key_preserved_in_new_links(monkeypatch):
     assert f"/admin/searches/{job_id}/deactivate?api_key=secret" in page
     assert f"/admin/searches/{job_id}/reset-baseline?api_key=secret" in page
     assert f"/admin/searches/{job_id}/run-once?api_key=secret" in page
+    assert "/admin/alerts?api_key=secret" in page
+
+
+def test_alerts_empty_state_when_file_missing(monkeypatch, tmp_path):
+    client, _ = make_client(monkeypatch)
+    monkeypatch.setattr(settings, "jsonl_outbox_path", str(tmp_path / "missing.jsonl"))
+    page = client.get("/admin/alerts").text
+    assert "No alerts found yet." in page
+
+
+def test_alerts_empty_state_when_file_empty(monkeypatch, tmp_path):
+    client, _ = make_client(monkeypatch)
+    outbox = tmp_path / "alerts.jsonl"
+    outbox.write_text("", encoding="utf-8")
+    monkeypatch.setattr(settings, "jsonl_outbox_path", str(outbox))
+    page = client.get("/admin/alerts").text
+    assert "No alerts found yet." in page
+
+
+def test_alerts_latest_first_filter_limit_and_link_attrs(monkeypatch, tmp_path):
+    client, _ = make_client(monkeypatch)
+    outbox = tmp_path / "alerts.jsonl"
+    records = [
+        {"timestamp": "2026-01-01T00:00:01Z", "search_name": "alpha", "title": "first", "url": "https://www.avito.ru/1"},
+        {"timestamp": "2026-01-01T00:00:02Z", "search_name": "beta", "title": "second", "url": "https://www.avito.ru/2"},
+        {"timestamp": "2026-01-01T00:00:03Z", "search_name": "alpha", "title": "third", "url": "https://www.avito.ru/3"},
+    ]
+    outbox.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n", encoding="utf-8")
+    monkeypatch.setattr(settings, "jsonl_outbox_path", str(outbox))
+    page = client.get("/admin/alerts?search_name=alpha&limit=1").text
+    assert "third" in page
+    assert "<td>first</td>" not in page
+    assert "target='_blank'" in page
+    assert "rel='noopener noreferrer'" in page
+
+
+def test_alerts_limit_capped_and_invalid_json_skipped(monkeypatch, tmp_path):
+    client, _ = make_client(monkeypatch)
+    outbox = tmp_path / "alerts.jsonl"
+    outbox.write_text(
+        "\n".join(
+            [
+                json.dumps({"timestamp": "2026-01-01T00:00:00Z", "search_name": "a", "title": "one", "url": "https://www.avito.ru/1"}),
+                "{invalid",
+                json.dumps({"timestamp": "2026-01-01T00:00:01Z", "search_name": "b", "title": "two", "url": "https://www.avito.ru/2"}),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "jsonl_outbox_path", str(outbox))
+    page = client.get("/admin/alerts?limit=9999").text
+    assert "Skipped invalid JSONL lines: 1" in page
+    assert "value='500'" in page
+
+
+def test_alerts_api_key_preserved_in_forms_and_links(monkeypatch, tmp_path):
+    client, _ = make_client(monkeypatch)
+    outbox = tmp_path / "alerts.jsonl"
+    outbox.write_text("", encoding="utf-8")
+    monkeypatch.setattr(settings, "api_key", "secret")
+    monkeypatch.setattr(settings, "jsonl_outbox_path", str(outbox))
+    page = client.get("/admin/alerts?api_key=secret").text
+    assert "action='/admin/alerts?api_key=secret'" in page
+    assert "name='api_key' value='secret'" in page
+
+
+def test_alerts_url_href_attribute_escapes_quotes(monkeypatch, tmp_path):
+    client, _ = make_client(monkeypatch)
+    outbox = tmp_path / "alerts.jsonl"
+    outbox.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-01-01T00:00:01Z",
+                "search_name": "quote_test",
+                "title": "quoted_url",
+                "url": "https://www.avito.ru/test?x='a'&y=\"b\"",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "jsonl_outbox_path", str(outbox))
+    page = client.get("/admin/alerts").text
+    assert "href='https://www.avito.ru/test?x=&#x27;a&#x27;&amp;y=&quot;b&quot;'" in page
 
 
 def test_legacy_name_edit_without_name_change_succeeds(monkeypatch):
