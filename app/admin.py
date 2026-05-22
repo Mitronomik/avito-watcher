@@ -129,6 +129,10 @@ def _truncate(value: object, limit: int = 120) -> str:
     return f"{text[: limit - 1]}…"
 
 
+def _html_attr(value: object) -> str:
+    return html.escape(str(value or ""), quote=True)
+
+
 def _read_jsonl_alerts(path: str, search_name: str | None, limit: int) -> tuple[list[dict], int, int]:
     file_path = Path(path)
     if not file_path.exists() or not file_path.is_file():
@@ -300,25 +304,28 @@ def alerts(request: Request, limit: int = Query(default=50), search_name: str | 
     rows_data, total_loaded, invalid_count = _read_jsonl_alerts(settings.jsonl_outbox_path, normalized_search_name, effective_limit)
     rows = []
     for item in rows_data:
-        link = html.escape(str(item.get("url", "")))
+        link = str(item.get("url", ""))
+        open_link = ""
+        if link:
+            open_link = f"<a href='{_html_attr(link)}' target='_blank' rel='noopener noreferrer'>open</a>"
         rows.append(
             f"<tr><td>{html.escape(_truncate(item.get('timestamp', ''), 40))}</td><td>{html.escape(_truncate(item.get('search_name', ''), 60))}</td>"
             f"<td>{html.escape(_truncate(item.get('title', ''), 100))}</td><td>{html.escape(_truncate(item.get('price', ''), 40))}</td>"
             f"<td>{html.escape(_truncate(item.get('area_m2', ''), 30))}</td><td>{html.escape(_truncate(item.get('address', ''), 100))}</td>"
             f"<td>{html.escape(_truncate(item.get('published_label', ''), 50))}</td><td>{html.escape(_truncate(item.get('llm_summary', ''), 140))}</td>"
-            f"<td>{f"<a href='{link}' target='_blank' rel='noopener noreferrer'>open</a>" if link else ''}</td></tr>"
+            f"<td>{open_link}</td></tr>"
         )
     warning = f"<div class='note'>Skipped invalid JSONL lines: {invalid_count}</div>" if invalid_count else ""
     empty = "<p>No alerts found yet.</p>" if not rows else ""
     table = "" if not rows else f"<table><tr><th>timestamp</th><th>search_name</th><th>title</th><th>price</th><th>area_m2</th><th>address</th><th>published_label</th><th>llm_summary</th><th>url</th></tr>{''.join(rows)}</table>"
     form_action = _admin_url('/admin/alerts', api_key)
-    current_limit = html.escape(str(effective_limit))
-    current_search = html.escape(normalized_search_name or "")
+    current_limit = _html_attr(effective_limit)
+    current_search = _html_attr(normalized_search_name)
     body = (
-        f"<h1>Alerts</h1><p><a href='{_admin_url('/admin/searches', api_key)}'>Back to searches</a></p>"
+        f"<h1>Alerts</h1><p><a href='{_html_attr(_admin_url('/admin/searches', api_key))}'>Back to searches</a></p>"
         f"<p>JSONL file: <code>{html.escape(settings.jsonl_outbox_path)}</code></p>"
         f"<p>Visible: {len(rows_data)} / Loaded: {total_loaded}</p>{warning}"
-        f"<form method='get' action='{form_action}'><input type='hidden' name='api_key' value='{html.escape(api_key or '')}'>"
+        f"<form method='get' action='{_html_attr(form_action)}'><input type='hidden' name='api_key' value='{_html_attr(api_key)}'>"
         f"<div class='row'><label>search_name<input name='search_name' value='{current_search}'></label></div>"
         f"<div class='row'><label>limit<input name='limit' type='number' min='1' max='500' value='{current_limit}'></label></div>"
         f"<button type='submit'>Apply</button></form>{empty}{table}"

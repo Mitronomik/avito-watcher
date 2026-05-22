@@ -475,6 +475,27 @@ def test_alerts_api_key_preserved_in_forms_and_links(monkeypatch, tmp_path):
     assert "name='api_key' value='secret'" in page
 
 
+def test_alerts_url_href_attribute_escapes_quotes(monkeypatch, tmp_path):
+    client, _ = make_client(monkeypatch)
+    outbox = tmp_path / "alerts.jsonl"
+    outbox.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-01-01T00:00:01Z",
+                "search_name": "quote_test",
+                "title": "quoted_url",
+                "url": "https://www.avito.ru/test?x='a'&y=\"b\"",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "jsonl_outbox_path", str(outbox))
+    page = client.get("/admin/alerts").text
+    assert "href='https://www.avito.ru/test?x=&#x27;a&#x27;&amp;y=&quot;b&quot;'" in page
+
+
 def test_legacy_name_edit_without_name_change_succeeds(monkeypatch):
     client, Session = make_client(monkeypatch)
     legacy_id = create_job(Session, name="СПб коммерческая")
