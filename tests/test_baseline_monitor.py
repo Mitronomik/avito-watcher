@@ -662,6 +662,7 @@ def test_runtime_diagnostics_parses_alert_channels_with_spaces(monkeypatch):
     monkeypatch.setattr("app.services.monitor_service.settings.alert_channels", "jsonl, telegram")
     monkeypatch.setattr("app.services.monitor_service.settings.scoring_enabled", False)
     monkeypatch.setattr("app.services.monitor_service.settings.scrape_preferred_engine", "camoufox")
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_allowed_engines", "camoufox")
     monkeypatch.setattr("app.services.monitor_service.settings.scrape_headless", True)
     monkeypatch.setattr("app.services.monitor_service.settings.scrape_max_pages", 2)
     monkeypatch.setattr("app.services.monitor_service.settings.scrape_cards_per_page_limit", 25)
@@ -674,6 +675,7 @@ def test_runtime_diagnostics_parses_alert_channels_with_spaces(monkeypatch):
     assert runtime["alert_channels"] == ["jsonl", "telegram"]
     assert runtime["scoring_enabled"] is False
     assert runtime["scrape_preferred_engine"] == "camoufox"
+    assert runtime["scrape_allowed_engines"] == "camoufox"
     assert runtime["scrape_headless"] is True
     assert runtime["scrape_max_pages"] == 2
     assert runtime["scrape_cards_per_page_limit"] == 25

@@ -74,6 +74,7 @@ def runtime_diagnostics() -> dict:
         "alert_channels": alert_channels,
         "scoring_enabled": settings.scoring_enabled,
         "scrape_preferred_engine": settings.scrape_preferred_engine,
+        "scrape_allowed_engines": settings.scrape_allowed_engines,
         "scrape_headless": settings.scrape_headless,
         "scrape_max_pages": settings.scrape_max_pages,
         "scrape_cards_per_page_limit": settings.scrape_cards_per_page_limit,
