@@ -393,6 +393,38 @@ def test_health_memory_still_affects_nodriver_mode():
     assert parser._choose_start_engine(None) == _Engine.CAMOUFOX
 
 
+def test_allowed_engines_camoufox_disables_nodriver_fallback(monkeypatch):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_allowed_engines", "camoufox")
+    parser = AvitoParser(preferred_engine="camoufox")
+    try_engine = AsyncMock(return_value={"ok": False, "error_type": "possible_captcha_or_block", "error": "blocked"})
+    with patch.object(parser, "_try_engine", new=try_engine):
+        with pytest.raises(ParserError):
+            asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+    assert len(try_engine.await_args_list) == 1
+    assert try_engine.await_args_list[0].args[2] == _Engine.CAMOUFOX
+    assert parser.cycle_stats()["fallback_used"] is True
+
+
+def test_allowed_engines_nodriver_disables_camoufox_fallback(monkeypatch):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_allowed_engines", "nodriver")
+    parser = AvitoParser(preferred_engine="nodriver")
+    try_engine = AsyncMock(return_value={"ok": False, "error_type": "timeout", "error": "t"})
+    with patch.object(parser, "_try_engine", new=try_engine):
+        with pytest.raises(ParserError):
+            asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+    assert len(try_engine.await_args_list) == 1
+    assert try_engine.await_args_list[0].args[2] == _Engine.NODRIVER
+    assert parser.cycle_stats()["fallback_used"] is True
+
+
+def test_preferred_engine_outside_allowed_set_falls_back_to_first_allowed(monkeypatch):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_allowed_engines", "nodriver")
+    parser = AvitoParser(preferred_engine="camoufox")
+    assert parser._choose_start_engine(None) == _Engine.NODRIVER
+    assert parser.cycle_stats()["preferred_engine"] == "camoufox"
+    assert parser.cycle_stats()["selected_first_engine"] == "nodriver"
+
+
 def test_proxy_failure_counter_tracks_reported_failures_without_quarantine_counter():
     parser = AvitoParser()
     try_engine = AsyncMock(

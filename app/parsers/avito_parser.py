@@ -153,6 +153,9 @@ class AvitoParser:
         self._preferred_engine_mode = preferred_engine or settings.scrape_preferred_engine
         if self._preferred_engine_mode not in {"auto", "nodriver", "camoufox"}:
             raise ValueError("preferred_engine must be one of: auto, nodriver, camoufox")
+        self._allowed_engines_mode = settings.scrape_allowed_engines
+        if self._allowed_engines_mode not in {"both", "nodriver", "camoufox"}:
+            raise ValueError("scrape_allowed_engines must be one of: both, nodriver, camoufox")
         self._engine_sessions: dict[tuple[_Engine, str | None], BrowserSession] = {}
         self._engine_recent_failures: dict[tuple[_Engine, str], int] = {}
         self._cycle_active = False
@@ -166,6 +169,7 @@ class AvitoParser:
         return proxy_url or "no_proxy"
 
     def _choose_start_engine(self, proxy_url: str | None) -> _Engine:
+        allowed_engines = self._allowed_engines()
         proxy_key = self._proxy_key(proxy_url)
         nodriver_failures = self._engine_recent_failures.get((_Engine.NODRIVER, proxy_key), 0)
         if self._preferred_engine_mode == "camoufox":
@@ -175,9 +179,13 @@ class AvitoParser:
         else:
             preferred_engine = self._prefer_engine
 
-        start_engine = preferred_engine
+        start_engine = preferred_engine if preferred_engine in allowed_engines else allowed_engines[0]
         changed_by_health = False
-        if preferred_engine == _Engine.NODRIVER and nodriver_failures > 0:
+        if (
+            preferred_engine == _Engine.NODRIVER
+            and nodriver_failures > 0
+            and _Engine.CAMOUFOX in allowed_engines
+        ):
             self._cycle_counters.engine_skip_recent_failure_count += 1
             start_engine = _Engine.CAMOUFOX
             changed_by_health = True
@@ -198,6 +206,13 @@ class AvitoParser:
             nodriver_failures,
         )
         return start_engine
+
+    def _allowed_engines(self) -> tuple[_Engine, ...]:
+        if self._allowed_engines_mode == "camoufox":
+            return (_Engine.CAMOUFOX,)
+        if self._allowed_engines_mode == "nodriver":
+            return (_Engine.NODRIVER,)
+        return (_Engine.NODRIVER, _Engine.CAMOUFOX)
 
     def _record_engine_result(self, engine: _Engine, proxy_url: str | None, result: dict) -> None:
         proxy_key = self._proxy_key(proxy_url)
@@ -318,11 +333,13 @@ class AvitoParser:
             self._cycle_counters.proxy_failure_count += 1
             proxy_url = self._proxy_manager.get_proxy()
 
-        fallback = (
-            _Engine.CAMOUFOX
-            if start_engine == _Engine.NODRIVER
-            else _Engine.NODRIVER
-        )
+        allowed_engines = self._allowed_engines()
+        fallback = next((engine for engine in allowed_engines if engine != start_engine), None)
+        if fallback is None:
+            raise ParserError(
+                ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK,
+                f"Stealth engine blocked ({start_engine.value})",
+            )
 
         # Fallback attempt
         setup_error2 = await self.ensure_engine_session(fallback, proxy_url)

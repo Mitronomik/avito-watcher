@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     scrape_page_delay_ms: int = 0
     scrape_page_jitter_ms: int = 0
     scrape_preferred_engine: Literal["auto", "nodriver", "camoufox"] = "auto"
+    scrape_allowed_engines: Literal["both", "nodriver", "camoufox"] = "both"
     proxy_urls: str = ""
     alert_channels: str = "jsonl,telegram"
     email_enabled: bool = False

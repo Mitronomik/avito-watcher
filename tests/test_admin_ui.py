@@ -290,6 +290,7 @@ def test_run_once_parser_error_and_generic_and_keyboard(monkeypatch):
             "alert_channels": ["jsonl"],
             "scoring_enabled": False,
             "scrape_preferred_engine": "camoufox",
+            "scrape_allowed_engines": "both",
             "scrape_headless": True,
         },
     )

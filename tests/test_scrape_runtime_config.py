@@ -27,6 +27,11 @@ def test_scrape_preferred_engine_default_auto():
     assert settings.scrape_preferred_engine == "auto"
 
 
+def test_scrape_allowed_engines_default_both():
+    settings = Settings(database_url="sqlite:///tmp.db", _env_file=None)
+    assert settings.scrape_allowed_engines == "both"
+
+
 def test_scrape_preferred_engine_invalid_value_fails_clearly(monkeypatch):
     monkeypatch.setenv("SCRAPE_PREFERRED_ENGINE", "bad")
     with pytest.raises(Exception) as exc_info:

@@ -74,6 +74,7 @@ def test_cmd_run_once_search_success_unchanged(monkeypatch, capsys):
             "alert_channels": ["jsonl"],
             "scoring_enabled": False,
             "scrape_preferred_engine": "camoufox",
+            "scrape_allowed_engines": "both",
             "scrape_headless": True,
         },
     )
@@ -89,6 +90,7 @@ def test_cmd_run_once_search_success_unchanged(monkeypatch, capsys):
             "alert_channels": ["jsonl"],
             "scoring_enabled": False,
             "scrape_preferred_engine": "camoufox",
+            "scrape_allowed_engines": "both",
             "scrape_headless": True,
         },
     }
@@ -103,6 +105,7 @@ def test_cmd_run_once_search_success_preserves_service_runtime(monkeypatch, caps
             "alert_channels": ["jsonl"],
             "scoring_enabled": False,
             "scrape_preferred_engine": "camoufox",
+            "scrape_allowed_engines": "both",
             "scrape_headless": True,
         },
     )
