@@ -134,6 +134,20 @@ def passes_rule_filters(card: ListingCard, filters: dict | None) -> bool:
     return True
 
 
+
+
+def _filtered_sample(card: ListingCard, reason: str) -> dict:
+    return {
+        "external_id": card.external_id,
+        "title": card.title,
+        "price": card.price,
+        "area_m2": card.area_m2,
+        "address": card.address,
+        "published_label": card.published_label,
+        "url": card.url,
+        "reason": reason,
+    }
+
 def _utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
@@ -413,6 +427,7 @@ class MonitorService:
         filtered_by_rules = 0
         filtered_by_publication_date = 0
         scored = 0
+        filtered_samples: list[dict] = []
 
         for card in cards:
             now = self._now()
@@ -478,10 +493,16 @@ class MonitorService:
 
             if not passes_rule_filters(card, filters):
                 filtered_by_rules += 1
+                if len(filtered_samples) < 10:
+                    filtered_samples.append(_filtered_sample(card, reason="rules"))
                 continue
 
             if not passes_publication_filters(card, filters, now):
                 filtered_by_publication_date += 1
+                if len(filtered_samples) < 10:
+                    filtered_samples.append(
+                        _filtered_sample(card, reason="publication_date")
+                    )
                 continue
 
             listing_repo.create_listing(
@@ -557,6 +578,7 @@ class MonitorService:
             "filtered_by_publication_date": filtered_by_publication_date,
             "scored": scored,
             "total_seen": len(cards),
+            "filtered_samples": filtered_samples,
         }
 
     def run_once(self, search_job_id: int) -> dict:
