@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     google_sheets_webhook_timeout_sec: int = 15
     jsonl_outbox_enabled: bool = True
     jsonl_outbox_path: str = "./data/alerts.jsonl"
+    monitor_worker_lock_path: str = "./data/monitor_worker.lock"
     # Comma-separated proxy URLs: http://user:pass@host:port,http://...
     # Set via PROXY_URLS env var. Used by AvitoParser via _build_parser().
 
