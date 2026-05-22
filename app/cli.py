@@ -243,6 +243,8 @@ def cmd_run_once(args) -> None:
         started_at = time.perf_counter()
         try:
             result = service.run_once(args.search_id)
+            if isinstance(result, dict):
+                result.setdefault("runtime", runtime_diagnostics())
         except ParserError as exc:
             elapsed_ms = int((time.perf_counter() - started_at) * 1000)
             result = {
