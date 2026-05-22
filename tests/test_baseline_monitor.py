@@ -258,11 +258,11 @@ def test_max_price_filters_out_expensive_new_listing(db_session):
     run(service, db_session, search)
     result = run(service, db_session, search)
 
-    assert result["created"] == 1
+    assert result["created"] == 0
     assert result["filtered"] == 1
     assert result["scored"] == 0
     assert result["alerted"] == 0
-    assert scalar_count(db_session, Listing) == 2
+    assert scalar_count(db_session, Listing) == 1
     assert scalar_count(db_session, ListingSnapshot) == 0
     assert scorer.cards == []
     assert notifier.messages == []
@@ -286,11 +286,11 @@ def test_min_area_filters_out_too_small_new_listing(db_session):
     run(service, db_session, search)
     result = run(service, db_session, search)
 
-    assert result["created"] == 1
+    assert result["created"] == 0
     assert result["filtered"] == 1
     assert result["scored"] == 0
     assert result["alerted"] == 0
-    assert scalar_count(db_session, Listing) == 2
+    assert scalar_count(db_session, Listing) == 1
     assert scalar_count(db_session, ListingSnapshot) == 0
     assert scorer.cards == []
     assert notifier.messages == []
@@ -319,11 +319,11 @@ def test_exclude_keywords_filters_by_title_or_text(db_session):
     run(service, db_session, search)
     result = run(service, db_session, search)
 
-    assert result["created"] == 1
+    assert result["created"] == 0
     assert result["filtered"] == 1
     assert result["scored"] == 0
     assert result["alerted"] == 0
-    assert scalar_count(db_session, Listing) == 2
+    assert scalar_count(db_session, Listing) == 1
     assert scalar_count(db_session, ListingSnapshot) == 0
     assert scorer.cards == []
     assert notifier.messages == []
@@ -717,8 +717,9 @@ def test_max_age_hours_filters_old_listing(db_session):
     assert result["filtered_by_rules"] == 0
     assert result["filtered_by_publication_date"] == 1
     assert result["scored"] == 0
-    assert scalar_count(db_session, Listing) == 2
+    assert scalar_count(db_session, Listing) == 1
     assert scalar_count(db_session, ListingSnapshot) == 0
+    assert scalar_count(db_session, AlertSent) == 0
 
 
 def test_published_on_date_allows_matching_moscow_date(db_session):
@@ -755,6 +756,11 @@ def test_published_on_date_filters_non_matching_moscow_date(db_session):
 
     assert result["filtered_by_publication_date"] == 1
     assert result["alerted"] == 0
+    assert result["created"] == 0
+    assert result["scored"] == 0
+    assert scalar_count(db_session, Listing) == 1
+    assert scalar_count(db_session, ListingSnapshot) == 0
+    assert scalar_count(db_session, AlertSent) == 0
 
 
 def test_require_published_at_filters_unknown_published_at(db_session):
@@ -769,8 +775,13 @@ def test_require_published_at_filters_unknown_published_at(db_session):
     result = run(service, db_session, search)
 
     assert result["filtered_by_publication_date"] == 1
+    assert result["filtered"] == 1
+    assert result["created"] == 0
     assert result["scored"] == 0
     assert result["alerted"] == 0
+    assert scalar_count(db_session, Listing) == 1
+    assert scalar_count(db_session, ListingSnapshot) == 0
+    assert scalar_count(db_session, AlertSent) == 0
 
 
 def test_baseline_ignores_publication_filters_but_saves_records(db_session):
@@ -1133,7 +1144,9 @@ def test_filtered_listing_not_alerted_later_after_price_change_snapshot(db_sessi
         db_session,
         search,
     )
-    assert second_result["price_changed"] == 1
+    assert second_result["price_changed"] == 0
+    assert second_result["created"] == 0
+    assert second_result["filtered"] == 1
     assert second_result["alerted"] == 0
     assert notifier.channel.calls == 0
 

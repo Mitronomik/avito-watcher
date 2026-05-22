@@ -444,6 +444,31 @@ class MonitorService:
 
                 continue
 
+            if baseline_run:
+                listing_repo.create_listing(
+                    external_id=card.external_id,
+                    url=card.url,
+                    title=card.title,
+                    price=card.price,
+                    address=card.address,
+                    area_m2=card.area_m2,
+                    rooms=card.rooms,
+                    published_label=card.published_label,
+                    published_at=card.published_at,
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+                created += 1
+                continue
+
+            if not passes_rule_filters(card, filters):
+                filtered_by_rules += 1
+                continue
+
+            if not passes_publication_filters(card, filters, now):
+                filtered_by_publication_date += 1
+                continue
+
             listing_repo.create_listing(
                 external_id=card.external_id,
                 url=card.url,
@@ -458,17 +483,6 @@ class MonitorService:
                 last_seen_at=now,
             )
             created += 1
-
-            if baseline_run:
-                continue
-
-            if not passes_rule_filters(card, filters):
-                filtered_by_rules += 1
-                continue
-
-            if not passes_publication_filters(card, filters, now):
-                filtered_by_publication_date += 1
-                continue
 
             if settings.scoring_enabled:
                 scored += 1
