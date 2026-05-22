@@ -53,7 +53,15 @@ def test_list_and_new(monkeypatch):
     client, Session = make_client(monkeypatch)
     create_job(Session)
     assert "test_job" in client.get("/admin/searches").text
-    assert "New search" in client.get("/admin/searches/new").text
+    page = client.get("/admin/searches/new").text
+    assert "New search" in page
+    for heading in ("Basic", "Avito source", "Internal filters", "Metadata", "Runtime"):
+        assert heading in page
+    assert "name='profile'" in page
+    assert "name='category'" in page
+    assert "name='city'" in page
+    assert "name='seller'" in page
+    assert "name='floor'" in page
 
 
 def test_api_key_query_preserved_in_links_and_forms(monkeypatch):
@@ -140,6 +148,82 @@ def test_validation_numeric_and_empty_fields(monkeypatch):
         assert job.filters_json["min_area"] == 40.0
         assert "city" not in job.filters_json
         assert "profile" not in job.filters_json
+
+
+def test_edit_form_selects_existing_metadata_values(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    with Session() as s:
+        job = SearchJob(
+            name="meta_job",
+            source_url="https://www.avito.ru/spb/kvartiry",
+            poll_interval_sec=180,
+            filters_json={"profile": "smoke", "category": "commercial", "city": "murino", "seller": "agency", "floor": "not_first"},
+        )
+        s.add(job)
+        s.commit()
+        s.refresh(job)
+        job_id = job.id
+    page = client.get(f"/admin/searches/{job_id}/edit").text
+    assert "<option value='smoke' selected>smoke</option>" in page
+    assert "<option value='commercial' selected>commercial</option>" in page
+    assert "<option value='murino' selected>murino</option>" in page
+    assert "<option value='agency' selected>agency</option>" in page
+    assert "<option value='not_first' selected>not_first</option>" in page
+
+
+def test_create_freshness_preset_sets_max_age_hours(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    resp = client.post(
+        "/admin/searches",
+        data={"name": "fresh_job", "source_url": "https://www.avito.ru/a", "poll_interval_sec": "180", "freshness_preset": "12", "max_age_hours": "99"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    with Session() as s:
+        job = s.query(SearchJob).filter_by(name="fresh_job").one()
+        assert job.filters_json["max_age_hours"] == 12.0
+
+
+def test_create_freshness_custom_uses_typed_max_age_hours(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    resp = client.post(
+        "/admin/searches",
+        data={"name": "custom_fresh", "source_url": "https://www.avito.ru/a", "poll_interval_sec": "180", "freshness_preset": "custom", "max_age_hours": "36"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    with Session() as s:
+        job = s.query(SearchJob).filter_by(name="custom_fresh").one()
+        assert job.filters_json["max_age_hours"] == 36.0
+
+
+def test_validation_error_preserves_selected_and_typed_values(monkeypatch):
+    client, _ = make_client(monkeypatch)
+    bad = client.post(
+        "/admin/searches",
+        data={
+            "name": "bad_fields",
+            "source_url": "https://www.avito.ru/a",
+            "poll_interval_sec": "1",
+            "freshness_preset": "custom",
+            "max_age_hours": "oops",
+            "profile": "smoke",
+            "category": "flats_rent",
+            "city": "kudrovo",
+            "seller": "owner",
+            "floor": "first",
+            "include_keywords": "x,y",
+        },
+    )
+    page = bad.text
+    assert "max_age_hours must be a valid number" in page
+    assert "value='oops'" in page
+    assert "<option value='smoke' selected>smoke</option>" in page
+    assert "<option value='flats_rent' selected>flats_rent</option>" in page
+    assert "<option value='kudrovo' selected>kudrovo</option>" in page
+    assert "<option value='owner' selected>owner</option>" in page
+    assert "<option value='first' selected>first</option>" in page
+    assert "value='x,y'" in page
 
 
 def test_run_once_parser_error_and_generic_and_keyboard(monkeypatch):
@@ -313,4 +397,4 @@ def test_success_marker_and_notice(monkeypatch):
 def test_name_field_helper_text_visible(monkeypatch):
     client, _ = make_client(monkeypatch)
     page = client.get("/admin/searches/new").text
-    assert "Technical name. Use latin letters" in page
+    assert "Latin letters, digits, _ and -, 3-121 chars." in page

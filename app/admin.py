@@ -20,6 +20,7 @@ from app.repositories.search_repository import SearchRepository
 from app.services.monitor_service import MonitorService
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,120}$")
+FRESHNESS_PRESETS = {"12": 12.0, "24": 24.0, "48": 48.0, "72": 72.0}
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -117,7 +118,7 @@ def _keywords(value: str) -> list[str] | None:
 
 def _render_page(title: str, body: str) -> HTMLResponse:
     return HTMLResponse(f"""<!doctype html><html><head><meta charset='utf-8'><title>{html.escape(title)}</title>
-<style>body{{font-family:Arial,sans-serif;max-width:1100px;margin:1rem auto;padding:0 1rem}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccc;padding:.4rem;vertical-align:top}}input,textarea{{width:100%;padding:.35rem}}.row{{margin:.4rem 0}}.actions form{{display:inline-block;margin:.1rem}}.note{{background:#fff7d6;padding:.5rem;border:1px solid #e2c86f}}.error{{background:#ffdede;padding:.5rem;border:1px solid #d66}}.badge{{display:inline-block;padding:.12rem .4rem;border-radius:.35rem;font-size:.8rem;font-weight:600;margin:.08rem .15rem .08rem 0}}.badge-green{{background:#d9f7e6;color:#115c36;border:1px solid #94d6b1}}.badge-yellow{{background:#fff6d6;color:#745700;border:1px solid #f2d37c}}.badge-red{{background:#ffe1e1;color:#7a1212;border:1px solid #f2a5a5}}.badge-gray{{background:#eceef1;color:#3d4954;border:1px solid #c9ced4}}.preview{{font-size:.88rem;word-break:break-all}}code{{font-size:.84rem}}</style></head><body>{body}</body></html>""")
+<style>body{{font-family:Arial,sans-serif;max-width:1100px;margin:1rem auto;padding:0 1rem}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccc;padding:.4rem;vertical-align:top}}input,textarea,select{{width:100%;padding:.35rem}}.row{{margin:.4rem 0}}.section{{border:1px solid #dfe3e8;border-radius:.4rem;padding:.7rem .8rem;margin:.7rem 0;background:#fafbfc}}.section h3{{margin:.1rem 0 .6rem 0}}.checkbox input{{width:auto;margin-right:.35rem}}.actions form{{display:inline-block;margin:.1rem}}.note{{background:#fff7d6;padding:.5rem;border:1px solid #e2c86f}}.error{{background:#ffdede;padding:.5rem;border:1px solid #d66}}.badge{{display:inline-block;padding:.12rem .4rem;border-radius:.35rem;font-size:.8rem;font-weight:600;margin:.08rem .15rem .08rem 0}}.badge-green{{background:#d9f7e6;color:#115c36;border:1px solid #94d6b1}}.badge-yellow{{background:#fff6d6;color:#745700;border:1px solid #f2d37c}}.badge-red{{background:#ffe1e1;color:#7a1212;border:1px solid #f2a5a5}}.badge-gray{{background:#eceef1;color:#3d4954;border:1px solid #c9ced4}}.preview{{font-size:.88rem;word-break:break-all}}code{{font-size:.84rem}}</style></head><body>{body}</body></html>""")
 
 
 def _badge(text: str, level: str) -> str:
@@ -136,30 +137,48 @@ def _job_form(job=None, error: str = "", return_url: str = "") -> str:
         if job and hasattr(job, name):
             return getattr(job, name)
         return filters.get(name, default)
+    def fv(name, default=""):
+        if job and hasattr(job, name):
+            return getattr(job, name)
+        return filters.get(name, default)
+
+    def _selected(value: str, current: str) -> str:
+        return "selected" if value == current else ""
 
     checked_active = "checked" if (getattr(job, "is_active", True) if job else True) else ""
     checked_req_pub = "checked" if filters.get("require_published_at") else ""
+    profile_value = str(fv("profile", "production"))
+    category_value = str(fv("category", ""))
+    city_value = str(fv("city", ""))
+    seller_value = str(fv("seller", ""))
+    floor_value = str(fv("floor", ""))
     return f"""{'<div class="error">'+html.escape(error)+'</div>' if error else ''}
-<div class='row'>human_title<input name='human_title' value='{html.escape(str(filters.get("human_title", "")))}'></div>
-<div class='row'>name<input name='name' value='{html.escape(str(v("name", "")))}' required><div class='preview'>Technical name. Use latin letters, digits, _ or -. Existing legacy names may remain unchanged.</div></div><input type='hidden' name='return_url' value='{html.escape(return_url)}'>
-<div class='row'>source_url<textarea name='source_url' rows='3' required>{html.escape(str(v("source_url", "")))}</textarea></div>
-<div class='note'>Some Avito constraints such as owner/first floor are currently controlled by the Avito URL. Internal filters below are additional safety filters.</div>
-<div class='row'>is_active <input type='checkbox' name='is_active' {checked_active}></div>
-<div class='row'>poll_interval_sec<input name='poll_interval_sec' type='number' min='1' value='{html.escape(str(v("poll_interval_sec", 180)))}'></div>
-<div class='row'>min_price<input name='min_price' value='{html.escape(str(filters.get("min_price", "")))}'></div>
-<div class='row'>max_price<input name='max_price' value='{html.escape(str(filters.get("max_price", "")))}'></div>
-<div class='row'>min_area<input name='min_area' value='{html.escape(str(filters.get("min_area", "")))}'></div>
-<div class='row'>max_area<input name='max_area' value='{html.escape(str(filters.get("max_area", "")))}'></div>
-<div class='row'>max_age_hours<input name='max_age_hours' value='{html.escape(str(filters.get("max_age_hours", "")))}'></div>
-<div class='row'>require_published_at <input type='checkbox' name='require_published_at' {checked_req_pub}></div>
-<div class='row'>include_keywords<input name='include_keywords' value='{html.escape(",".join(filters.get("include_keywords", [])) if isinstance(filters.get("include_keywords"), list) else str(filters.get("include_keywords", "")))}'></div>
-<div class='row'>exclude_keywords<input name='exclude_keywords' value='{html.escape(",".join(filters.get("exclude_keywords", [])) if isinstance(filters.get("exclude_keywords"), list) else str(filters.get("exclude_keywords", "")))}'></div>
-<div class='row'>location_keywords<input name='location_keywords' value='{html.escape(",".join(filters.get("location_keywords", [])) if isinstance(filters.get("location_keywords"), list) else str(filters.get("location_keywords", "")))}'></div>
-<div class='row'>profile<input name='profile' value='{html.escape(str(filters.get("profile", "production")))}'></div>
-<div class='row'>category<input name='category' value='{html.escape(str(filters.get("category", "")))}'></div>
-<div class='row'>city<input name='city' value='{html.escape(str(filters.get("city", "")))}'></div>
-<div class='row'>seller<input name='seller' value='{html.escape(str(filters.get("seller", "")))}'></div>
-<div class='row'>floor<input name='floor' value='{html.escape(str(filters.get("floor", "")))}'></div>
+<input type='hidden' name='return_url' value='{html.escape(return_url)}'>
+<div class='section'><h3>Basic</h3>
+<div class='row'><label>Human title<input name='human_title' value='{html.escape(str(fv("human_title", "")))}'></label></div>
+<div class='row'><label>Technical name<input name='name' value='{html.escape(str(v("name", "")))}' required></label><div class='preview'>Latin letters, digits, _ and -, 3-121 chars. Existing legacy names may remain unchanged when not renamed.</div></div>
+<div class='row checkbox'><label><input type='checkbox' name='is_active' {checked_active}> Active</label></div></div>
+<div class='section'><h3>Avito source</h3>
+<div class='row'><label>Avito search URL<textarea name='source_url' rows='3' required>{html.escape(str(v("source_url", "")))}</textarea></label></div>
+<div class='note'>Настройте основные фильтры на Avito, затем вставьте URL сюда. Ограничения вроде собственника и первого этажа пока надежнее задавать в URL Avito.</div></div>
+<div class='section'><h3>Internal filters</h3>
+<div class='row'><label>Freshness preset<select name='freshness_preset'><option value='custom' {_selected('custom', str(fv("freshness_preset", "custom")))}>custom</option><option value='12' {_selected("12", str(fv("freshness_preset", "custom")))}>12 hours</option><option value='24' {_selected("24", str(fv("freshness_preset", "custom")))}>24 hours</option><option value='48' {_selected("48", str(fv("freshness_preset", "custom")))}>48 hours</option><option value='72' {_selected("72", str(fv("freshness_preset", "custom")))}>72 hours</option></select></label></div>
+<div class='row'><label>Freshness, hours<input name='max_age_hours' value='{html.escape(str(fv("max_age_hours", "")))}'></label></div>
+<div class='row checkbox'><label><input type='checkbox' name='require_published_at' {checked_req_pub}> Require publication date</label></div>
+<div class='row'><label>Price from<input name='min_price' value='{html.escape(str(fv("min_price", "")))}'></label></div>
+<div class='row'><label>Price to<input name='max_price' value='{html.escape(str(fv("max_price", "")))}'></label></div>
+<div class='row'><label>Area from<input name='min_area' value='{html.escape(str(fv("min_area", "")))}'></label></div>
+<div class='row'><label>Area to<input name='max_area' value='{html.escape(str(fv("max_area", "")))}'></label></div>
+<div class='row'><label>Include keywords<input name='include_keywords' value='{html.escape(",".join(fv("include_keywords", [])) if isinstance(fv("include_keywords", []), list) else str(fv("include_keywords", "")))}'></label></div>
+<div class='row'><label>Exclude keywords<input name='exclude_keywords' value='{html.escape(",".join(fv("exclude_keywords", [])) if isinstance(fv("exclude_keywords", []), list) else str(fv("exclude_keywords", "")))}'></label></div>
+<div class='row'><label>Location keywords<input name='location_keywords' value='{html.escape(",".join(fv("location_keywords", [])) if isinstance(fv("location_keywords", []), list) else str(fv("location_keywords", "")))}'></label><div class='preview'>Keywords are comma-separated.</div></div></div>
+<div class='section'><h3>Metadata</h3><div class='preview'>seller/floor/category/city are metadata for now unless current code supports them directly. Owner/first floor should still be controlled by Avito URL.</div>
+<div class='row'><label>Profile<select name='profile'><option value='production' {_selected('production', profile_value)}>production</option><option value='smoke' {_selected('smoke', profile_value)}>smoke</option><option value='test' {_selected('test', profile_value)}>test</option></select></label></div>
+<div class='row'><label>Category<select name='category'><option value='' {_selected('', category_value)}>empty / not specified</option><option value='flats_sale' {_selected('flats_sale', category_value)}>flats_sale</option><option value='flats_rent' {_selected('flats_rent', category_value)}>flats_rent</option><option value='commercial' {_selected('commercial', category_value)}>commercial</option></select></label></div>
+<div class='row'><label>City<select name='city'><option value='' {_selected('', city_value)}>empty / not specified</option><option value='spb' {_selected('spb', city_value)}>spb</option><option value='kudrovo' {_selected('kudrovo', city_value)}>kudrovo</option><option value='murino' {_selected('murino', city_value)}>murino</option><option value='len_oblast' {_selected('len_oblast', city_value)}>len_oblast</option></select></label></div>
+<div class='row'><label>Seller<select name='seller'><option value='' {_selected('', seller_value)}>empty / not specified</option><option value='owner' {_selected('owner', seller_value)}>owner</option><option value='agency' {_selected('agency', seller_value)}>agency</option><option value='any' {_selected('any', seller_value)}>any</option></select></label></div>
+<div class='row'><label>Floor<select name='floor'><option value='' {_selected('', floor_value)}>empty / not specified</option><option value='first' {_selected('first', floor_value)}>first</option><option value='not_first' {_selected('not_first', floor_value)}>not_first</option><option value='any' {_selected('any', floor_value)}>any</option></select></label></div></div>
+<div class='section'><h3>Runtime</h3><div class='row'><label>Check interval, seconds<input name='poll_interval_sec' type='number' min='1' value='{html.escape(str(v("poll_interval_sec", 180)))}'></label></div></div>
 """
 
 
@@ -167,10 +186,17 @@ def _extract_filters(form: dict[str, str], require_published_at: bool) -> dict:
     out = {}
     if form["human_title"].strip():
         out["human_title"] = form["human_title"].strip()
-    for n in ("min_price", "max_price", "min_area", "max_area", "max_age_hours"):
+    freshness_preset = form.get("freshness_preset", "custom").strip()
+    for n in ("min_price", "max_price", "min_area", "max_area"):
         num = _num(form[n], n)
         if num is not None:
             out[n] = num
+    if freshness_preset in FRESHNESS_PRESETS:
+        out["max_age_hours"] = FRESHNESS_PRESETS[freshness_preset]
+    else:
+        max_age_hours = _num(form["max_age_hours"], "max_age_hours")
+        if max_age_hours is not None:
+            out["max_age_hours"] = max_age_hours
     if require_published_at:
         out["require_published_at"] = True
     for n in ("include_keywords", "exclude_keywords", "location_keywords"):
@@ -234,7 +260,7 @@ async def create_search(request: Request, db: Session = Depends(get_db)):
     form.setdefault('name', '')
     form.setdefault('source_url', '')
     form.setdefault('poll_interval_sec', '180')
-    for k in ('min_price', 'max_price', 'min_area', 'max_area', 'max_age_hours', 'include_keywords', 'exclude_keywords', 'location_keywords', 'profile', 'category', 'city', 'seller', 'floor'):
+    for k in ('min_price', 'max_price', 'min_area', 'max_area', 'max_age_hours', 'freshness_preset', 'include_keywords', 'exclude_keywords', 'location_keywords', 'profile', 'category', 'city', 'seller', 'floor'):
         form.setdefault(k, '')
     try:
         name = form['name'].strip()
@@ -283,7 +309,7 @@ async def update_search(search_id: int, request: Request, db: Session = Depends(
     form.setdefault('name', '')
     form.setdefault('source_url', '')
     form.setdefault('poll_interval_sec', '180')
-    for k in ('min_price', 'max_price', 'min_area', 'max_area', 'max_age_hours', 'include_keywords', 'exclude_keywords', 'location_keywords', 'profile', 'category', 'city', 'seller', 'floor'):
+    for k in ('min_price', 'max_price', 'min_area', 'max_area', 'max_age_hours', 'freshness_preset', 'include_keywords', 'exclude_keywords', 'location_keywords', 'profile', 'category', 'city', 'seller', 'floor'):
         form.setdefault(k, '')
     try:
         name = form['name'].strip()
