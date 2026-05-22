@@ -117,3 +117,21 @@ def test_cmd_run_once_without_search_id_uses_run_all(monkeypatch, capsys):
 
     output = json.loads(capsys.readouterr().out)
     assert output == {"ok": True, "mode": "all"}
+
+
+def test_cmd_admin_server_runs_app_instance_without_custom_uvicorn_kwargs(monkeypatch):
+    captured = {}
+
+    def fake_run(app, host, port):
+        captured["app"] = app
+        captured["host"] = host
+        captured["port"] = port
+
+    monkeypatch.setattr(cli.uvicorn, "run", fake_run)
+
+    cli.cmd_admin_server(Namespace(host="127.0.0.1", port=8000))
+
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 8000
+    assert captured["app"] is not None
+    assert any(route.path == "/admin/searches" for route in captured["app"].routes)

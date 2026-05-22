@@ -287,7 +287,10 @@ def cmd_run_telegram_bot(args) -> None:
 
 
 def cmd_admin_server(args) -> None:
-    uvicorn.run("app.main:create_app", host=args.host, port=args.port, factory=True, admin_ui_enabled=True)
+    from app.main import create_app
+
+    app = create_app(admin_ui_enabled=True)
+    uvicorn.run(app, host=args.host, port=args.port)
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="avito-watcher")

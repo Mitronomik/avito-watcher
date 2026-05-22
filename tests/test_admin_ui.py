@@ -13,6 +13,16 @@ from app.models.search_job import SearchJob
 from app.parsers.errors import ParserError, ParserErrorType
 
 
+def test_create_app_default_admin_routes_disabled():
+    app = create_app()
+    assert not any(route.path == "/admin/searches" for route in app.routes)
+
+
+def test_create_app_with_admin_enabled_includes_admin_routes():
+    app = create_app(admin_ui_enabled=True)
+    assert any(route.path == "/admin/searches" for route in app.routes)
+
+
 def make_client(monkeypatch):
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(bind=engine)
