@@ -263,9 +263,10 @@ def _extract_filters(form: dict[str, str], require_published_at: bool) -> dict:
 @router.get("/searches", response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
 def searches(request: Request, db: Session = Depends(get_db)):
     api_key = request.query_params.get("api_key")
+    all_searches = SearchRepository(db).list_all()
     rows = []
     now = datetime.utcnow()
-    for s in SearchRepository(db).list_all():
+    for s in all_searches:
         is_error = bool((s.last_error or "").strip()) or s.fail_count > 0
         is_due = s.is_active and (s.next_run_at is None or s.next_run_at <= now)
         is_waiting = s.is_active and not is_due
@@ -293,7 +294,38 @@ def searches(request: Request, db: Session = Depends(get_db)):
         notice = "<div class='note'>Saved successfully.</div>"
     elif request.query_params.get("updated") == "1":
         notice = "<div class='note'>Updated successfully.</div>"
-    return _render_page("Searches", f"<h1>Searches</h1>{notice}<p><a href='{_admin_url('/admin/searches/new', api_key)}'>New search</a> · <a href='{_admin_url('/admin/alerts', api_key)}'>Alerts</a></p><table><tr><th>id</th><th>name / source</th><th>human_title</th><th>status</th><th>fail_count</th><th>last_error</th><th>last_success_at</th><th>next_run_at</th><th>poll_interval_sec</th><th>cli</th><th>actions</th></tr>{''.join(rows)}</table>")
+    active_searches = [s for s in all_searches if s.is_active]
+    due_now_count = sum(1 for s in active_searches if s.next_run_at is None or s.next_run_at <= now)
+    last_success = max((s.last_success_at for s in active_searches if s.last_success_at), default=None)
+    recent_error = "—"
+    for s in sorted(
+        active_searches,
+        key=lambda item: item.last_checked_at or datetime.min,
+        reverse=True,
+    ):
+        if (s.last_error or "").strip():
+            recent_error = _truncate(s.last_error, 160)
+            break
+    runtime = runtime_diagnostics()
+    lock_path = settings.monitor_worker_lock_path
+    lock_exists = Path(lock_path).exists()
+    runtime_alert_channels = ", ".join(runtime.get("alert_channels") or [])
+    runtime_block = (
+        "<section><h2>Worker status</h2>"
+        "<p>The worker is a separate long-running process. Admin UI does not start or stop it.</p>"
+        f"<p><strong>Suggested command:</strong> <code>python3 -m app.workers.monitor</code><br>"
+        f"<strong>Lock path:</strong> <code>{html.escape(lock_path)}</code><br>"
+        f"<strong>Lock file:</strong> {'exists' if lock_exists else 'missing'}<br>"
+        f"<strong>Runtime:</strong> alert_channels={html.escape(runtime_alert_channels or '—')}; "
+        f"scoring_enabled={html.escape(str(runtime.get('scoring_enabled')))}; "
+        f"scrape_preferred_engine={html.escape(str(runtime.get('scrape_preferred_engine')))}; "
+        f"scrape_headless={html.escape(str(runtime.get('scrape_headless')))}<br>"
+        f"<strong>Active searches:</strong> {len(active_searches)}<br>"
+        f"<strong>Due now:</strong> {due_now_count}<br>"
+        f"<strong>Last success:</strong> {html.escape(str(last_success or '—'))}<br>"
+        f"<strong>Last error:</strong> {html.escape(recent_error)}</p></section>"
+    )
+    return _render_page("Searches", f"<h1>Searches</h1>{notice}<p><a href='{_admin_url('/admin/searches/new', api_key)}'>New search</a> · <a href='{_admin_url('/admin/alerts', api_key)}'>Alerts</a></p>{runtime_block}<table><tr><th>id</th><th>name / source</th><th>human_title</th><th>status</th><th>fail_count</th><th>last_error</th><th>last_success_at</th><th>next_run_at</th><th>poll_interval_sec</th><th>cli</th><th>actions</th></tr>{''.join(rows)}</table>")
 
 
 @router.get('/alerts', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])

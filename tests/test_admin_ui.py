@@ -412,6 +412,99 @@ def test_searches_dashboard_api_key_preserved_in_new_links(monkeypatch):
     assert "/admin/alerts?api_key=secret" in page
 
 
+def test_searches_dashboard_worker_status_block(monkeypatch, tmp_path):
+    client, Session = make_client(monkeypatch)
+    lock_path = tmp_path / "monitor.lock"
+    lock_path.write_text("lock", encoding="utf-8")
+    monkeypatch.setattr(settings, "monitor_worker_lock_path", str(lock_path))
+    monkeypatch.setattr(settings, "alert_channels", "telegram, jsonl")
+    monkeypatch.setattr(settings, "scoring_enabled", True)
+    monkeypatch.setattr(settings, "scrape_preferred_engine", "playwright")
+    monkeypatch.setattr(settings, "scrape_headless", False)
+    monkeypatch.setattr(settings, "api_key", "secret")
+    now = datetime.utcnow()
+    with Session() as s:
+        active_due = SearchJob(
+            name="active_due_worker",
+            source_url="https://www.avito.ru/a",
+            poll_interval_sec=120,
+            is_active=True,
+            baseline_initialized=True,
+            next_run_at=None,
+            last_success_at=now,
+            last_error="",
+        )
+        active_waiting_with_error = SearchJob(
+            name="active_waiting_worker",
+            source_url="https://www.avito.ru/b",
+            poll_interval_sec=120,
+            is_active=True,
+            baseline_initialized=True,
+            next_run_at=datetime(2999, 1, 1),
+            last_success_at=datetime(2020, 1, 1),
+            last_error="E" * 220,
+        )
+        inactive = SearchJob(
+            name="inactive_worker",
+            source_url="https://www.avito.ru/c",
+            poll_interval_sec=120,
+            is_active=False,
+            baseline_initialized=True,
+            next_run_at=None,
+            last_success_at=datetime(2099, 1, 1),
+            last_error="ignored",
+        )
+        s.add_all([active_due, active_waiting_with_error, inactive])
+        s.commit()
+    page = client.get("/admin/searches?api_key=secret").text
+    assert "Worker status" in page
+    assert "python3 -m app.workers.monitor" in page
+    assert str(lock_path) in page
+    assert "Lock file:</strong> exists" in page
+    assert "alert_channels=telegram, jsonl" in page
+    assert "scrape_preferred_engine=playwright" in page
+    assert "scoring_enabled=True" in page
+    assert "scrape_headless=False" in page
+    assert "Active searches:</strong> 2" in page
+    assert "Due now:</strong> 1" in page
+    assert f"Last success:</strong> {now}" in page
+    assert ("E" * 160) in page
+    assert ("E" * 161) not in page
+    assert "separate long-running process" in page
+    assert "/admin/searches/new?api_key=secret" in page
+    assert "start worker" not in page.lower()
+    assert "stop worker" not in page.lower()
+
+
+def test_worker_status_last_error_uses_latest_last_checked_at_not_id(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    with Session() as s:
+        newer_checked_lower_id = SearchJob(
+            name="newer_checked_lower_id",
+            source_url="https://www.avito.ru/newer",
+            poll_interval_sec=120,
+            is_active=True,
+            baseline_initialized=True,
+            last_checked_at=datetime(2026, 1, 2, 12, 0, 0),
+            last_error="newer error",
+        )
+        older_checked_higher_id = SearchJob(
+            name="older_checked_higher_id",
+            source_url="https://www.avito.ru/older",
+            poll_interval_sec=120,
+            is_active=True,
+            baseline_initialized=True,
+            last_checked_at=datetime(2026, 1, 1, 12, 0, 0),
+            last_error="older error",
+        )
+        s.add_all([newer_checked_lower_id, older_checked_higher_id])
+        s.commit()
+        assert newer_checked_lower_id.id < older_checked_higher_id.id
+    page = client.get("/admin/searches").text
+    assert "Last error:</strong> newer error" in page
+    assert "Last error:</strong> older error" not in page
+
+
 def test_alerts_empty_state_when_file_missing(monkeypatch, tmp_path):
     client, _ = make_client(monkeypatch)
     monkeypatch.setattr(settings, "jsonl_outbox_path", str(tmp_path / "missing.jsonl"))
