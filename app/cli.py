@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import os
+import time
 from app.bot.telegram_commands import build_telegram_application
 from app.parsers.avito_parser import AvitoParser
 from app.parsers.errors import ParserError
@@ -11,6 +12,16 @@ from app.db.init_db import init_db
 from app.db.session import SessionLocal
 from app.repositories.search_repository import SearchRepository
 from app.services.monitor_service import MonitorService
+
+
+def _parser_stats_snapshot(parser_instance: "AvitoParser") -> dict:
+    cycle_stats_fn = getattr(parser_instance, "cycle_stats", None)
+    if not callable(cycle_stats_fn):
+        return {}
+    stats = cycle_stats_fn()
+    if not isinstance(stats, dict):
+        return {}
+    return stats
 
 
 def _build_parser() -> "AvitoParser":
@@ -81,9 +92,34 @@ def cmd_seed_search(args) -> None:
 
 def cmd_run_once(args) -> None:
     init_db()
-    service = MonitorService(parser=_build_parser())
+    parser_instance = _build_parser()
+    service = MonitorService(parser=parser_instance)
     if args.search_id is not None:
-        result = service.run_once(args.search_id)
+        started_at = time.perf_counter()
+        try:
+            result = service.run_once(args.search_id)
+        except ParserError as exc:
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            result = {
+                "ok": False,
+                "search_id": args.search_id,
+                "error_type": exc.error_type.value,
+                "error": str(exc),
+                "elapsed_ms": elapsed_ms,
+                "parser_stats": _parser_stats_snapshot(parser_instance),
+            }
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            result = {
+                "ok": False,
+                "search_id": args.search_id,
+                "error_type": exc.__class__.__name__,
+                "error": str(exc),
+                "elapsed_ms": elapsed_ms,
+                "parser_stats": _parser_stats_snapshot(parser_instance),
+            }
     else:
         result = service.run_all_searches()
     print(json.dumps(result, ensure_ascii=False, indent=2))
