@@ -181,3 +181,65 @@ def test_run_once_parser_error_and_generic_and_keyboard(monkeypatch):
     monkeypatch.setattr("app.admin.MonitorService", InterruptService)
     with pytest.raises(KeyboardInterrupt):
         client.post(f"/admin/searches/{job_id}/run-once")
+
+
+def test_searches_dashboard_statuses_actions_and_previews(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    with Session() as s:
+        due_error = SearchJob(
+            name="due_error",
+            source_url="https://www.avito.ru/moskva/kvartiry/dlinnyy-url/" + ("a" * 180),
+            poll_interval_sec=180,
+            is_active=True,
+            baseline_initialized=False,
+            next_run_at=None,
+            fail_count=1,
+            last_error="X" * 240,
+        )
+        waiting_healthy = SearchJob(
+            name="waiting_healthy",
+            source_url="https://www.avito.ru/spb/kommercheskaya_nedvizhimost",
+            poll_interval_sec=180,
+            is_active=True,
+            baseline_initialized=True,
+            next_run_at=datetime(2999, 1, 1),
+            fail_count=0,
+            last_error="",
+        )
+        inactive = SearchJob(
+            name="inactive",
+            source_url="https://www.avito.ru/kazan/kvartiry",
+            poll_interval_sec=180,
+            is_active=False,
+            baseline_initialized=True,
+            next_run_at=datetime(2999, 1, 1),
+            fail_count=0,
+            last_error="",
+        )
+        s.add_all([due_error, waiting_healthy, inactive])
+        s.commit()
+        s.refresh(due_error)
+        s.refresh(waiting_healthy)
+
+    page = client.get("/admin/searches").text
+    assert "Active" in page and "Inactive" in page
+    assert "Baseline ready" in page and "Needs baseline" in page
+    assert "Error" in page and "Healthy" in page
+    assert "Due" in page and "Waiting" in page
+    assert "due now" in page
+    assert "target='_blank'" in page and "rel='noopener noreferrer'" in page
+    assert f"python3 -m app.cli run-once --search-id {due_error.id}" in page
+    assert f"python3 -m app.cli run-once --search-id {waiting_healthy.id}" in page
+    assert ("X" * 160) in page
+    assert ("X" * 161) not in page
+
+
+def test_searches_dashboard_api_key_preserved_in_new_links(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    job_id = create_job(Session, name="api_keep")
+    monkeypatch.setattr(settings, "api_key", "secret")
+    page = client.get("/admin/searches?api_key=secret").text
+    assert f"/admin/searches/{job_id}/edit?api_key=secret" in page
+    assert f"/admin/searches/{job_id}/deactivate?api_key=secret" in page
+    assert f"/admin/searches/{job_id}/reset-baseline?api_key=secret" in page
+    assert f"/admin/searches/{job_id}/run-once?api_key=secret" in page

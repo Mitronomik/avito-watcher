@@ -4,6 +4,7 @@ import html
 import json
 import re
 import time
+from datetime import datetime
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security, status
@@ -63,7 +64,11 @@ def _keywords(value: str) -> list[str] | None:
 
 def _render_page(title: str, body: str) -> HTMLResponse:
     return HTMLResponse(f"""<!doctype html><html><head><meta charset='utf-8'><title>{html.escape(title)}</title>
-<style>body{{font-family:Arial,sans-serif;max-width:1100px;margin:1rem auto;padding:0 1rem}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccc;padding:.4rem;vertical-align:top}}input,textarea{{width:100%;padding:.35rem}}.row{{margin:.4rem 0}}.actions form{{display:inline-block;margin:.1rem}}.note{{background:#fff7d6;padding:.5rem;border:1px solid #e2c86f}}.error{{background:#ffdede;padding:.5rem;border:1px solid #d66}}</style></head><body>{body}</body></html>""")
+<style>body{{font-family:Arial,sans-serif;max-width:1100px;margin:1rem auto;padding:0 1rem}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccc;padding:.4rem;vertical-align:top}}input,textarea{{width:100%;padding:.35rem}}.row{{margin:.4rem 0}}.actions form{{display:inline-block;margin:.1rem}}.note{{background:#fff7d6;padding:.5rem;border:1px solid #e2c86f}}.error{{background:#ffdede;padding:.5rem;border:1px solid #d66}}.badge{{display:inline-block;padding:.12rem .4rem;border-radius:.35rem;font-size:.8rem;font-weight:600;margin:.08rem .15rem .08rem 0}}.badge-green{{background:#d9f7e6;color:#115c36;border:1px solid #94d6b1}}.badge-yellow{{background:#fff6d6;color:#745700;border:1px solid #f2d37c}}.badge-red{{background:#ffe1e1;color:#7a1212;border:1px solid #f2a5a5}}.badge-gray{{background:#eceef1;color:#3d4954;border:1px solid #c9ced4}}.preview{{font-size:.88rem;word-break:break-all}}code{{font-size:.84rem}}</style></head><body>{body}</body></html>""")
+
+
+def _badge(text: str, level: str) -> str:
+    return f"<span class='badge badge-{level}'>{html.escape(text)}</span>"
 
 
 async def _parse_form(request: Request) -> dict[str, str]:
@@ -129,11 +134,31 @@ def _extract_filters(form: dict[str, str], require_published_at: bool) -> dict:
 def searches(request: Request, db: Session = Depends(get_db)):
     api_key = request.query_params.get("api_key")
     rows = []
+    now = datetime.utcnow()
     for s in SearchRepository(db).list_all():
-        rows.append(
-            f"<tr><td>{s.id}</td><td>{html.escape(s.name)}</td><td>{html.escape(str((s.filters_json or {}).get('human_title','')))}</td><td>{s.is_active}</td><td>{s.baseline_initialized}</td><td>{s.fail_count}</td><td>{html.escape(s.last_error or '')}</td><td>{s.last_success_at or ''}</td><td>{s.next_run_at or ''}</td><td>{s.poll_interval_sec}</td><td class='actions'><a href='{_admin_url(f'/admin/searches/{s.id}/edit', api_key)}'>edit</a><form method='post' action='{_admin_url(f'/admin/searches/{s.id}/{"deactivate" if s.is_active else "activate"}', api_key)}'><button>{'deactivate' if s.is_active else 'activate'}</button></form><form method='post' action='{_admin_url(f'/admin/searches/{s.id}/reset-baseline', api_key)}'><button>reset baseline</button></form><form method='post' action='{_admin_url(f'/admin/searches/{s.id}/run-once', api_key)}'><button>run once</button></form></td></tr>"
+        is_error = bool((s.last_error or "").strip()) or s.fail_count > 0
+        is_due = s.is_active and (s.next_run_at is None or s.next_run_at <= now)
+        is_waiting = s.is_active and not is_due
+        status_badges = "".join(
+            [
+                _badge("Active", "green") if s.is_active else _badge("Inactive", "gray"),
+                _badge("Baseline ready", "green") if s.baseline_initialized else _badge("Needs baseline", "yellow"),
+                _badge("Error", "red") if is_error else _badge("Healthy", "green"),
+                _badge("Due", "yellow") if is_due else (_badge("Waiting", "gray") if is_waiting else _badge("Waiting", "gray")),
+            ]
         )
-    return _render_page("Searches", f"<h1>Searches</h1><p><a href='{_admin_url('/admin/searches/new', api_key)}'>New search</a></p><table><tr><th>id</th><th>name</th><th>human_title</th><th>active</th><th>baseline</th><th>fail_count</th><th>last_error</th><th>last_success_at</th><th>next_run_at</th><th>poll_interval_sec</th><th>actions</th></tr>{''.join(rows)}</table>")
+        last_error_preview = html.escape((s.last_error or "")[:160])
+        source_url_preview = html.escape(s.source_url[:140])
+        next_run_cell = f"{s.next_run_at or ''}{' ' + _badge('due now', 'yellow') if is_due else ''}"
+        open_avito = (
+            f"<a href='{html.escape(s.source_url)}' target='_blank' rel='noopener noreferrer'>open avito</a>"
+            if s.source_url
+            else ""
+        )
+        rows.append(
+            f"<tr><td>{s.id}</td><td>{html.escape(s.name)}<div class='preview'>{source_url_preview}</div></td><td>{html.escape(str((s.filters_json or {}).get('human_title','')))}</td><td>{status_badges}</td><td>{s.fail_count}</td><td class='preview'>{last_error_preview}</td><td>{s.last_success_at or ''}</td><td>{next_run_cell}</td><td>{s.poll_interval_sec}</td><td><code>python3 -m app.cli run-once --search-id {s.id}</code></td><td class='actions'><a href='{_admin_url(f'/admin/searches/{s.id}/edit', api_key)}'>edit</a> {open_avito}<form method='post' action='{_admin_url(f'/admin/searches/{s.id}/{"deactivate" if s.is_active else "activate"}', api_key)}'><button>{'deactivate' if s.is_active else 'activate'}</button></form><form method='post' action='{_admin_url(f'/admin/searches/{s.id}/reset-baseline', api_key)}'><button>reset baseline</button></form><form method='post' action='{_admin_url(f'/admin/searches/{s.id}/run-once', api_key)}'><button>run once</button></form></td></tr>"
+        )
+    return _render_page("Searches", f"<h1>Searches</h1><p><a href='{_admin_url('/admin/searches/new', api_key)}'>New search</a></p><table><tr><th>id</th><th>name / source</th><th>human_title</th><th>status</th><th>fail_count</th><th>last_error</th><th>last_success_at</th><th>next_run_at</th><th>poll_interval_sec</th><th>cli</th><th>actions</th></tr>{''.join(rows)}</table>")
 
 
 @router.get('/searches/new', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
