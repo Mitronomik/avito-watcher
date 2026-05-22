@@ -85,23 +85,28 @@ def runtime_diagnostics() -> dict:
 
 
 def passes_rule_filters(card: ListingCard, filters: dict | None) -> bool:
+    return not explain_rule_filter_failures(card, filters)
+
+
+def explain_rule_filter_failures(card: ListingCard, filters: dict | None) -> list[str]:
     filters = filters or {}
+    failures: list[str] = []
 
     min_price = _as_float(filters.get("min_price"))
     if min_price is not None and (card.price is None or card.price < min_price):
-        return False
+        failures.append("min_price")
 
     max_price = _as_float(filters.get("max_price"))
     if max_price is not None and (card.price is None or card.price > max_price):
-        return False
+        failures.append("max_price")
 
     min_area = _as_float(filters.get("min_area") or filters.get("min_area_m2"))
     if min_area is not None and (card.area_m2 is None or card.area_m2 < min_area):
-        return False
+        failures.append("min_area")
 
     max_area = _as_float(filters.get("max_area") or filters.get("max_area_m2"))
     if max_area is not None and (card.area_m2 is None or card.area_m2 > max_area):
-        return False
+        failures.append("max_area")
 
     text = " ".join(
         part
@@ -116,11 +121,11 @@ def passes_rule_filters(card: ListingCard, filters: dict | None) -> bool:
 
     include_keywords = _as_keywords(filters.get("include_keywords"))
     if include_keywords and not any(keyword in text for keyword in include_keywords):
-        return False
+        failures.append("include_keywords")
 
     exclude_keywords = _as_keywords(filters.get("exclude_keywords"))
     if exclude_keywords and any(keyword in text for keyword in exclude_keywords):
-        return False
+        failures.append("exclude_keywords")
 
     location_text = " ".join(
         part
@@ -135,15 +140,20 @@ def passes_rule_filters(card: ListingCard, filters: dict | None) -> bool:
     if location_keywords and not any(
         keyword in location_text for keyword in location_keywords
     ):
-        return False
+        failures.append("location_keywords")
 
-    return True
-
-
+    return failures
 
 
-def _filtered_sample(card: ListingCard, reason: str) -> dict:
-    return {
+
+
+def _filtered_sample(
+    card: ListingCard,
+    reason: str,
+    rule_failures: list[str] | None = None,
+    publication_date_failures: list[str] | None = None,
+) -> dict:
+    sample = {
         "external_id": card.external_id,
         "title": card.title,
         "price": card.price,
@@ -153,6 +163,11 @@ def _filtered_sample(card: ListingCard, reason: str) -> dict:
         "url": card.url,
         "reason": reason,
     }
+    if rule_failures:
+        sample["rule_failures"] = rule_failures
+    if publication_date_failures:
+        sample["publication_date_failures"] = publication_date_failures
+    return sample
 
 def _utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
@@ -181,25 +196,34 @@ def passes_publication_filters(
     filters: dict | None,
     now: datetime | None = None,
 ) -> bool:
+    return not explain_publication_filter_failures(card, filters, now)
+
+
+def explain_publication_filter_failures(
+    card: ListingCard,
+    filters: dict | None,
+    now: datetime | None = None,
+) -> list[str]:
     filters = filters or {}
+    failures: list[str] = []
     published_at = card.published_at
 
     if filters.get("require_published_at") is True and published_at is None:
-        return False
+        failures.append("missing_published_at")
 
     if published_at is None:
-        return True
+        return failures
 
     published_at = _as_utc_naive(published_at)
     now = _as_utc_naive(now or _utcnow())
 
     max_age_hours = _as_float(filters.get("max_age_hours"))
     if max_age_hours is not None and published_at < now - timedelta(hours=max_age_hours):
-        return False
+        failures.append("older_than_max_age_hours")
 
     published_after = _parse_iso_datetime(filters.get("published_after"))
     if published_after is not None and published_at <= published_after:
-        return False
+        failures.append("before_or_equal_published_after")
 
     published_on_date = filters.get("published_on_date")
     if isinstance(published_on_date, str) and published_on_date.strip():
@@ -209,13 +233,14 @@ def passes_publication_filters(
             ).date()
         except ValueError:
             expected_date = None
+            failures.append("invalid_published_on_date")
         if expected_date is not None:
             # Publication dates are stored as naive UTC; convert to Moscow local date for date-only filters.
             local_date = published_at.replace(tzinfo=UTC).astimezone(MOSCOW_TZ).date()
             if local_date != expected_date:
-                return False
+                failures.append("published_on_date_mismatch")
 
-    return True
+    return failures
 
 
 class MonitorService:
@@ -517,17 +542,31 @@ class MonitorService:
                 created += 1
                 continue
 
-            if not passes_rule_filters(card, filters):
+            rule_failures = explain_rule_filter_failures(card, filters)
+            if rule_failures:
                 filtered_by_rules += 1
                 if len(filtered_samples) < 10:
-                    filtered_samples.append(_filtered_sample(card, reason="rules"))
+                    filtered_samples.append(
+                        _filtered_sample(
+                            card,
+                            reason="rules",
+                            rule_failures=rule_failures,
+                        )
+                    )
                 continue
 
-            if not passes_publication_filters(card, filters, now):
+            publication_date_failures = explain_publication_filter_failures(
+                card, filters, now
+            )
+            if publication_date_failures:
                 filtered_by_publication_date += 1
                 if len(filtered_samples) < 10:
                     filtered_samples.append(
-                        _filtered_sample(card, reason="publication_date")
+                        _filtered_sample(
+                            card,
+                            reason="publication_date",
+                            publication_date_failures=publication_date_failures,
+                        )
                     )
                 continue
 
