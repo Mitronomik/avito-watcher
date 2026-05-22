@@ -5,6 +5,7 @@ import os
 import time
 import re
 import tomllib
+import uvicorn
 from pathlib import Path
 from urllib.parse import urlparse
 from app.bot.telegram_commands import build_telegram_application
@@ -283,6 +284,11 @@ def cmd_run_telegram_bot(args) -> None:
     application.run_polling()
 
 
+
+
+def cmd_admin_server(args) -> None:
+    uvicorn.run("app.main:app", host=args.host, port=args.port)
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="avito-watcher")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -314,6 +320,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     telegram_bot = sub.add_parser("telegram-bot", help="Run Telegram command bot")
     telegram_bot.set_defaults(func=cmd_run_telegram_bot)
+
+    admin_server = sub.add_parser("admin-server", help="Run local admin UI server")
+    admin_server.add_argument("--host", default="127.0.0.1")
+    admin_server.add_argument("--port", type=int, default=8000)
+    admin_server.set_defaults(func=cmd_admin_server)
 
     return parser
 
