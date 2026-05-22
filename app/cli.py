@@ -3,8 +3,10 @@ import asyncio
 import json
 import os
 import time
+import re
 import tomllib
 from pathlib import Path
+from urllib.parse import urlparse
 from app.bot.telegram_commands import build_telegram_application
 from app.parsers.avito_parser import AvitoParser
 from app.parsers.errors import ParserError
@@ -93,8 +95,19 @@ def cmd_seed_search(args) -> None:
 
 
 
+PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,120}$")
+
+
 def _validation_error(message: str) -> dict:
     return {"ok": False, "error_type": "validation_error", "error": message}
+
+
+def _is_avito_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    hostname = (parsed.hostname or "").lower()
+    return hostname == "avito.ru" or hostname.endswith(".avito.ru")
 
 
 def _load_search_profile(path: str) -> dict:
@@ -117,8 +130,12 @@ def _load_search_profile(path: str) -> dict:
     url = profile.get("url")
     if not isinstance(name, str) or not name.strip():
         raise ValueError("name is required and must be a non-empty string")
+    if not PROFILE_NAME_RE.fullmatch(name.strip()):
+        raise ValueError("name must match ^[a-z0-9][a-z0-9_-]{2,120}$")
     if not isinstance(url, str) or not url.strip():
         raise ValueError("url is required and must be a non-empty string")
+    if not _is_avito_url(url.strip()):
+        raise ValueError("url must be a valid avito.ru URL")
 
     poll_interval_sec = profile.get("poll_interval_sec")
     if poll_interval_sec is not None and (not isinstance(poll_interval_sec, int) or isinstance(poll_interval_sec, bool) or poll_interval_sec <= 0):
@@ -149,6 +166,10 @@ def _load_search_profile(path: str) -> dict:
 
 
 def cmd_upsert_search_profile(args) -> None:
+    if args.activate and args.deactivate:
+        print(json.dumps(_validation_error("--activate and --deactivate cannot be used together"), ensure_ascii=False, indent=2))
+        return
+
     try:
         profile = _load_search_profile(args.file)
     except ValueError as exc:
@@ -202,7 +223,7 @@ def cmd_upsert_search_profile(args) -> None:
             "baseline_initialized": target.baseline_initialized,
             "poll_interval_sec": target.poll_interval_sec,
             "filters_json": target.filters_json,
-            "source_url_preview": target.source_url,
+            "source_url_preview": target.source_url[:180],
         }
 
         if args.dry_run:
@@ -272,7 +293,7 @@ def build_parser() -> argparse.ArgumentParser:
     seed.add_argument("--interval", type=int, default=180)
     seed.set_defaults(func=cmd_seed_search)
 
-    upsert_profile = sub.add_parser("upsert-search-profile", help="Upsert a search job from TOML profile")
+    upsert_profile = sub.add_parser("upsert-search-profile", help="Upsert a search job from TOML profile (technical import/export for DevOps)")
     upsert_profile.add_argument("--file", required=True)
     upsert_profile.add_argument("--reset-baseline", action="store_true")
     upsert_profile.add_argument("--activate", action="store_true")
