@@ -476,6 +476,35 @@ def test_searches_dashboard_worker_status_block(monkeypatch, tmp_path):
     assert "stop worker" not in page.lower()
 
 
+def test_worker_status_last_error_uses_latest_last_checked_at_not_id(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    with Session() as s:
+        newer_checked_lower_id = SearchJob(
+            name="newer_checked_lower_id",
+            source_url="https://www.avito.ru/newer",
+            poll_interval_sec=120,
+            is_active=True,
+            baseline_initialized=True,
+            last_checked_at=datetime(2026, 1, 2, 12, 0, 0),
+            last_error="newer error",
+        )
+        older_checked_higher_id = SearchJob(
+            name="older_checked_higher_id",
+            source_url="https://www.avito.ru/older",
+            poll_interval_sec=120,
+            is_active=True,
+            baseline_initialized=True,
+            last_checked_at=datetime(2026, 1, 1, 12, 0, 0),
+            last_error="older error",
+        )
+        s.add_all([newer_checked_lower_id, older_checked_higher_id])
+        s.commit()
+        assert newer_checked_lower_id.id < older_checked_higher_id.id
+    page = client.get("/admin/searches").text
+    assert "Last error:</strong> newer error" in page
+    assert "Last error:</strong> older error" not in page
+
+
 def test_alerts_empty_state_when_file_missing(monkeypatch, tmp_path):
     client, _ = make_client(monkeypatch)
     monkeypatch.setattr(settings, "jsonl_outbox_path", str(tmp_path / "missing.jsonl"))

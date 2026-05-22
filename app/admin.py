@@ -298,7 +298,11 @@ def searches(request: Request, db: Session = Depends(get_db)):
     due_now_count = sum(1 for s in active_searches if s.next_run_at is None or s.next_run_at <= now)
     last_success = max((s.last_success_at for s in active_searches if s.last_success_at), default=None)
     recent_error = "—"
-    for s in sorted(active_searches, key=lambda item: item.id, reverse=True):
+    for s in sorted(
+        active_searches,
+        key=lambda item: item.last_checked_at or datetime.min,
+        reverse=True,
+    ):
         if (s.last_error or "").strip():
             recent_error = _truncate(s.last_error, 160)
             break
