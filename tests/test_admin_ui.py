@@ -171,6 +171,31 @@ def test_edit_form_selects_existing_metadata_values(monkeypatch):
     assert "<option value='not_first' selected>not_first</option>" in page
 
 
+@pytest.mark.parametrize(
+    ("max_age_hours", "expected_option"),
+    [
+        (12, "<option value='12' selected>12 hours</option>"),
+        (24, "<option value='24' selected>24 hours</option>"),
+        (36, "<option value='custom' selected>custom</option>"),
+    ],
+)
+def test_edit_form_inferrs_freshness_preset_from_max_age_hours(monkeypatch, max_age_hours, expected_option):
+    client, Session = make_client(monkeypatch)
+    with Session() as s:
+        job = SearchJob(
+            name=f"fresh_infer_{max_age_hours}",
+            source_url="https://www.avito.ru/spb/kvartiry",
+            poll_interval_sec=180,
+            filters_json={"max_age_hours": max_age_hours},
+        )
+        s.add(job)
+        s.commit()
+        s.refresh(job)
+        job_id = job.id
+    page = client.get(f"/admin/searches/{job_id}/edit").text
+    assert expected_option in page
+
+
 def test_create_freshness_preset_sets_max_age_hours(monkeypatch):
     client, Session = make_client(monkeypatch)
     resp = client.post(
@@ -224,6 +249,24 @@ def test_validation_error_preserves_selected_and_typed_values(monkeypatch):
     assert "<option value='owner' selected>owner</option>" in page
     assert "<option value='first' selected>first</option>" in page
     assert "value='x,y'" in page
+
+
+def test_validation_error_keeps_submitted_custom_freshness_preset_selected(monkeypatch):
+    client, _ = make_client(monkeypatch)
+    bad = client.post(
+        "/admin/searches",
+        data={"name": "fresh_custom_bad", "source_url": "https://www.avito.ru/a", "poll_interval_sec": "1", "freshness_preset": "custom", "max_age_hours": "oops"},
+    )
+    assert "<option value='custom' selected>custom</option>" in bad.text
+
+
+def test_validation_error_keeps_submitted_12_freshness_preset_selected(monkeypatch):
+    client, _ = make_client(monkeypatch)
+    bad = client.post(
+        "/admin/searches",
+        data={"name": "!!", "source_url": "https://www.avito.ru/a", "poll_interval_sec": "1", "freshness_preset": "12", "max_age_hours": "oops"},
+    )
+    assert "<option value='12' selected>12 hours</option>" in bad.text
 
 
 def test_run_once_parser_error_and_generic_and_keyboard(monkeypatch):

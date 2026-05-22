@@ -145,8 +145,23 @@ def _job_form(job=None, error: str = "", return_url: str = "") -> str:
     def _selected(value: str, current: str) -> str:
         return "selected" if value == current else ""
 
+    def _freshness_preset_value() -> str:
+        explicit = str(fv("freshness_preset", "")).strip()
+        if explicit:
+            return explicit
+        max_age = fv("max_age_hours", "")
+        try:
+            parsed = float(str(max_age).strip())
+        except (TypeError, ValueError):
+            return "custom"
+        for preset_key, preset_hours in FRESHNESS_PRESETS.items():
+            if parsed == preset_hours:
+                return preset_key
+        return "custom"
+
     checked_active = "checked" if (getattr(job, "is_active", True) if job else True) else ""
     checked_req_pub = "checked" if filters.get("require_published_at") else ""
+    freshness_preset_value = _freshness_preset_value()
     profile_value = str(fv("profile", "production"))
     category_value = str(fv("category", ""))
     city_value = str(fv("city", ""))
@@ -162,7 +177,7 @@ def _job_form(job=None, error: str = "", return_url: str = "") -> str:
 <div class='row'><label>Avito search URL<textarea name='source_url' rows='3' required>{html.escape(str(v("source_url", "")))}</textarea></label></div>
 <div class='note'>Настройте основные фильтры на Avito, затем вставьте URL сюда. Ограничения вроде собственника и первого этажа пока надежнее задавать в URL Avito.</div></div>
 <div class='section'><h3>Internal filters</h3>
-<div class='row'><label>Freshness preset<select name='freshness_preset'><option value='custom' {_selected('custom', str(fv("freshness_preset", "custom")))}>custom</option><option value='12' {_selected("12", str(fv("freshness_preset", "custom")))}>12 hours</option><option value='24' {_selected("24", str(fv("freshness_preset", "custom")))}>24 hours</option><option value='48' {_selected("48", str(fv("freshness_preset", "custom")))}>48 hours</option><option value='72' {_selected("72", str(fv("freshness_preset", "custom")))}>72 hours</option></select></label></div>
+<div class='row'><label>Freshness preset<select name='freshness_preset'><option value='custom' {_selected('custom', freshness_preset_value)}>custom</option><option value='12' {_selected("12", freshness_preset_value)}>12 hours</option><option value='24' {_selected("24", freshness_preset_value)}>24 hours</option><option value='48' {_selected("48", freshness_preset_value)}>48 hours</option><option value='72' {_selected("72", freshness_preset_value)}>72 hours</option></select></label></div>
 <div class='row'><label>Freshness, hours<input name='max_age_hours' value='{html.escape(str(fv("max_age_hours", "")))}'></label></div>
 <div class='row checkbox'><label><input type='checkbox' name='require_published_at' {checked_req_pub}> Require publication date</label></div>
 <div class='row'><label>Price from<input name='min_price' value='{html.escape(str(fv("min_price", "")))}'></label></div>
