@@ -10,6 +10,8 @@ _FILTER_KEYS = frozenset({
     "published_after",
     "published_on_date",
     "require_published_at",
+    "missing_published_at_policy",
+    "source_sort",
 })
 
 
@@ -24,6 +26,8 @@ class SearchCreate(BaseModel):
     published_after: str | None = None
     published_on_date: str | None = None
     require_published_at: bool | None = None
+    missing_published_at_policy: str | None = None
+    source_sort: str | None = None
 
     def filters_only(self) -> dict:
         """Return only the filter fields (excludes name, source_url)."""

@@ -261,8 +261,13 @@ NUMERIC_FILTER_KEYS = {"min_price", "max_price", "min_area", "max_area", "max_ag
 KEYWORD_FILTER_KEYS = {"include_keywords", "exclude_keywords", "location_keywords"}
 DATE_FILTER_KEYS = {"published_after", "published_on_date"}
 BOOL_FILTER_KEYS = {"require_published_at"}
+STRING_FILTER_KEYS = {"missing_published_at_policy", "source_sort"}
 SUPPORTED_FILTER_KEYS = (
-    NUMERIC_FILTER_KEYS | KEYWORD_FILTER_KEYS | DATE_FILTER_KEYS | BOOL_FILTER_KEYS
+    NUMERIC_FILTER_KEYS
+    | KEYWORD_FILTER_KEYS
+    | DATE_FILTER_KEYS
+    | BOOL_FILTER_KEYS
+    | STRING_FILTER_KEYS
 )
 BOOL_VALUES = {
     "true": True,
@@ -336,6 +341,17 @@ def _parse_filter_value(key: str, raw_value: str) -> tuple[Any, str | None]:
             date.fromisoformat(raw_value)
         except ValueError:
             return None, f"Invalid date for {key}: {raw_value}. Use YYYY-MM-DD."
+        return raw_value, None
+
+    if key == "missing_published_at_policy":
+        if raw_value not in {"reject", "allow", "allow_when_date_sorted"}:
+            return None, (
+                "Invalid value for missing_published_at_policy: "
+                f"{raw_value}. Use reject|allow|allow_when_date_sorted."
+            )
+        return raw_value, None
+
+    if key == "source_sort":
         return raw_value, None
 
     if key == "published_after":

@@ -194,6 +194,26 @@ def _parse_iso_datetime(value: object) -> datetime | None:
         return None
 
 
+def _missing_published_at_policy(filters: dict | None) -> str:
+    if not isinstance(filters, dict):
+        return "reject"
+    policy = filters.get("missing_published_at_policy")
+    if policy in {"reject", "allow", "allow_when_date_sorted"}:
+        return policy
+    return "reject"
+
+
+def _is_missing_published_at_allowed(filters: dict | None) -> bool:
+    policy = _missing_published_at_policy(filters)
+    if policy == "allow":
+        return True
+    if policy != "allow_when_date_sorted":
+        return False
+    if not isinstance(filters, dict):
+        return False
+    return filters.get("source_sort") == "date"
+
+
 def passes_publication_filters(
     card: ListingCard,
     filters: dict | None,
@@ -212,7 +232,11 @@ def explain_publication_filter_failures(
     failures: list[str] = []
     published_at = card.published_at
 
-    if filters.get("require_published_at") is True and published_at is None:
+    if (
+        filters.get("require_published_at") is True
+        and published_at is None
+        and not _is_missing_published_at_allowed(filters)
+    ):
         failures.append("missing_published_at")
 
     if published_at is None:
@@ -484,6 +508,8 @@ class MonitorService:
         filtered_by_publication_date = 0
         scored = 0
         filtered_samples: list[dict] = []
+        publication_missing_allowed_count = 0
+        publication_missing_rejected_count = 0
 
         for card in cards:
             now = self._now()
@@ -561,6 +587,11 @@ class MonitorService:
                 continue
 
             publication_date_failures = explain_publication_filter_failures(card, filters, now)
+            if filters.get("require_published_at") is True and card.published_at is None:
+                if "missing_published_at" in publication_date_failures:
+                    publication_missing_rejected_count += 1
+                elif _is_missing_published_at_allowed(filters):
+                    publication_missing_allowed_count += 1
             if publication_date_failures:
                 publication_date_all_diagnostics = explain_publication_filter_failures(
                     card, filters, now, include_non_blocking=True
@@ -572,6 +603,15 @@ class MonitorService:
                 ]
                 filtered_by_publication_date += 1
                 if len(filtered_samples) < 10:
+                    if (
+                        filters.get("require_published_at") is True
+                        and card.published_at is None
+                        and _is_missing_published_at_allowed(filters)
+                    ):
+                        publication_date_warnings = [
+                            *publication_date_warnings,
+                            "missing_published_at_allowed",
+                        ]
                     filtered_samples.append(
                         _filtered_sample(
                             card,
@@ -656,6 +696,8 @@ class MonitorService:
             "scored": scored,
             "total_seen": len(cards),
             "filtered_samples": filtered_samples,
+            "publication_missing_allowed_count": publication_missing_allowed_count,
+            "publication_missing_rejected_count": publication_missing_rejected_count,
         }
 
     def run_once(self, search_job_id: int) -> dict:

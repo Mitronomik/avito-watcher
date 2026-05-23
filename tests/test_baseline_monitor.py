@@ -926,6 +926,73 @@ def test_filtered_samples_missing_published_at_failure_detail(db_session):
     ]
 
 
+def test_missing_published_at_policy_allow_allows_card(db_session):
+    search = make_search(
+        db_session,
+        filters_json={"require_published_at": True, "missing_published_at_policy": "allow"},
+    )
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_publication_date"] == 0
+    assert result["created"] == 1
+    assert result["alerted"] == 1
+    assert result["publication_missing_allowed_count"] == 1
+    assert result["publication_missing_rejected_count"] == 0
+
+
+def test_missing_published_at_policy_allow_when_date_sorted_allows_card(db_session):
+    search = make_search(
+        db_session,
+        filters_json={
+            "require_published_at": True,
+            "missing_published_at_policy": "allow_when_date_sorted",
+            "source_sort": "date",
+        },
+    )
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_publication_date"] == 0
+    assert result["created"] == 1
+    assert result["publication_missing_allowed_count"] == 1
+    assert result["publication_missing_rejected_count"] == 0
+
+
+def test_missing_published_at_policy_allow_when_not_date_sorted_rejects(db_session):
+    search = make_search(
+        db_session,
+        filters_json={
+            "require_published_at": True,
+            "missing_published_at_policy": "allow_when_date_sorted",
+        },
+    )
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_publication_date"] == 1
+    assert result["publication_missing_allowed_count"] == 0
+    assert result["publication_missing_rejected_count"] == 1
+
+
 def test_filtered_samples_capped_at_ten(db_session):
     search = make_search(db_session, filters_json={"min_price": 1_000_000.0})
     first_batch = [card("1")]
@@ -1069,6 +1136,8 @@ def test_require_published_at_filters_unknown_published_at(db_session):
     assert scalar_count(db_session, Listing) == 1
     assert scalar_count(db_session, ListingSnapshot) == 0
     assert scalar_count(db_session, AlertSent) == 0
+    assert result["publication_missing_allowed_count"] == 0
+    assert result["publication_missing_rejected_count"] == 1
 
 
 def test_baseline_ignores_publication_filters_but_saves_records(db_session):
