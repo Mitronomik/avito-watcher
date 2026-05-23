@@ -117,7 +117,8 @@ def test_layout_changed_debug_dump_enabled_creates_html_and_json(tmp_path, monke
     parser = AvitoParser()
     html = (
         "<html><head><title>Avito test</title></head>"
-        "<body><script>window.__initialData={}</script><main>no cards</main></body></html>"
+        '<body><script>window.__initialData__={}</script><div data-marker="item-title"></div>'
+        '<div data-marker="item-view/item-date"></div><main>no cards</main></body></html>'
     )
     monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_debug_dump_html", True)
     monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_debug_dump_dir", str(tmp_path))
@@ -125,7 +126,7 @@ def test_layout_changed_debug_dump_enabled_creates_html_and_json(tmp_path, monke
 
     with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
         with pytest.raises(ParserError) as exc_info:
-            asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry?p=4"))
+            asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry?p=3"))
 
     assert exc_info.value.error_type == ParserErrorType.LAYOUT_CHANGED
     html_files = list(tmp_path.glob("*.html"))
@@ -136,19 +137,21 @@ def test_layout_changed_debug_dump_enabled_creates_html_and_json(tmp_path, monke
 
     metadata = json.loads(meta_files[0].read_text(encoding="utf-8"))
     assert metadata["error_type"] == ParserErrorType.LAYOUT_CHANGED.value
-    assert metadata["url_preview"] == "https://www.avito.ru/moskva/kvartiry?p=4"
-    assert metadata["page"] == 4
+    assert metadata["url_preview"] == "https://www.avito.ru/moskva/kvartiry?p=3"
+    assert metadata["page"] == 3
     assert metadata["html_length"] == len(html)
     assert metadata["html_sha256"] == hashlib.sha256(html.encode("utf-8")).hexdigest()
     assert metadata["title"] == "Avito test"
     assert metadata["has_data_marker_item"] is False
-    assert metadata["has_item_title"] is False
-    assert metadata["has_item_view"] is False
+    assert metadata["has_item_title"] is True
+    assert metadata["has_item_view"] is True
     assert metadata["has_hydration_or_initial_data"] is True
     assert metadata["looks_like_block_or_captcha"] is False
     assert metadata["empty_results_detected"] is False
     assert metadata["dump_html_path"].endswith(".html")
     assert metadata["dump_meta_path"].endswith(".json")
+    assert html_files[0].exists()
+    assert meta_files[0].exists()
 
 
 def test_layout_changed_debug_dump_write_failure_still_raises_layout_changed(tmp_path, monkeypatch):
@@ -156,7 +159,7 @@ def test_layout_changed_debug_dump_write_failure_still_raises_layout_changed(tmp
     html = "<html><head><title>Avito</title></head><body>no cards</body></html>"
     monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_debug_dump_html", True)
     monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_debug_dump_dir", str(tmp_path))
-    monkeypatch.setattr("pathlib.Path.write_text", Mock(side_effect=OSError("disk full")))
+    monkeypatch.setattr("pathlib.Path.mkdir", Mock(side_effect=RuntimeError("disk full")))
 
     with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
         with pytest.raises(ParserError) as exc_info:

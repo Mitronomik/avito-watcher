@@ -523,9 +523,10 @@ class AvitoParser:
             return
 
         html_hash = hashlib.sha256(page_html.encode("utf-8")).hexdigest()
+        url_hash = hashlib.sha256(search_url.encode("utf-8")).hexdigest()
         page = self._infer_page_from_url(search_url)
-        timestamp = self._now().strftime("%Y%m%dT%H%M%SZ")
-        base_name = f"layout_changed_{timestamp}_p{page}_{html_hash[:12]}"
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        base_name = f"{timestamp}_{ParserErrorType.LAYOUT_CHANGED.value}_p{page}_{url_hash[:12]}"
         dump_dir = Path(settings.scrape_debug_dump_dir)
         dump_html_path = dump_dir / f"{base_name}.html"
         dump_meta_path = dump_dir / f"{base_name}.json"
@@ -543,7 +544,14 @@ class AvitoParser:
             "has_item_view": "item-view" in page_html,
             "has_hydration_or_initial_data": any(
                 marker in page_html
-                for marker in ("__INITIAL_STATE__", "__NEXT_DATA__", "window.__initialData")
+                for marker in (
+                    "__initialData__",
+                    "__INITIAL_STATE__",
+                    "initialData",
+                    "initialState",
+                    "hydration",
+                    "window.__",
+                )
             ),
             "looks_like_block_or_captcha": self._looks_like_captcha_or_block(title, body_text),
             "empty_results_detected": self._looks_like_empty_results(body_text),
@@ -554,9 +562,18 @@ class AvitoParser:
             dump_dir.mkdir(parents=True, exist_ok=True)
             dump_html_path.write_text(clipped_html, encoding="utf-8")
             dump_meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-            logger.warning("Layout changed debug dump saved: html=%s meta=%s", dump_html_path, dump_meta_path)
+            logger.warning(
+                "avito_parser.debug_dump saved error_type=%s html_path=%s meta_path=%s",
+                ParserErrorType.LAYOUT_CHANGED.value,
+                dump_html_path,
+                dump_meta_path,
+            )
         except Exception as exc:
-            logger.warning("Layout changed debug dump failed: dir=%s error=%s", dump_dir, exc)
+            logger.warning(
+                "avito_parser.debug_dump failed error_type=%s error=%s",
+                ParserErrorType.LAYOUT_CHANGED.value,
+                exc,
+            )
 
     @staticmethod
     def _infer_page_from_url(search_url: str) -> int:
