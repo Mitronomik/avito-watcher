@@ -11,11 +11,13 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import APIKeyHeader
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.cli import _build_parser, _parser_stats_snapshot
 from app.core.config import settings
 from app.db.session import get_db
+from app.models.listing import Listing
 from app.parsers.errors import ParserError
 from app.repositories.search_repository import SearchRepository
 from app.services.monitor_service import MonitorService, runtime_diagnostics
@@ -339,7 +341,7 @@ def searches(request: Request, db: Session = Depends(get_db)):
         f"<strong>Last success:</strong> {html.escape(str(last_success or '—'))}<br>"
         f"<strong>Last error:</strong> {html.escape(recent_error)}</p></section>"
     )
-    return _render_page("Searches", f"<h1>Searches</h1>{notice}<p><a href='{_admin_url('/admin/searches/new', api_key)}'>New search</a> · <a href='{_admin_url('/admin/alerts', api_key)}'>Alerts</a></p>{runtime_block}<table><tr><th>id</th><th>name / source</th><th>human_title</th><th>status</th><th>fail_count</th><th>last_error</th><th>last_success_at</th><th>next_run_at</th><th>poll_interval_sec</th><th>cli</th><th>actions</th></tr>{''.join(rows)}</table>")
+    return _render_page("Searches", f"<h1>Searches</h1>{notice}<p><a href='{_admin_url('/admin/searches/new', api_key)}'>New search</a> · <a href='{_admin_url('/admin/alerts', api_key)}'>Alerts</a> · <a href='{_admin_url('/admin/listings', api_key)}'>Listings</a></p>{runtime_block}<table><tr><th>id</th><th>name / source</th><th>human_title</th><th>status</th><th>fail_count</th><th>last_error</th><th>last_success_at</th><th>next_run_at</th><th>poll_interval_sec</th><th>cli</th><th>actions</th></tr>{''.join(rows)}</table>")
 
 
 @router.get('/alerts', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
@@ -368,7 +370,7 @@ def alerts(request: Request, limit: int = Query(default=50), search_name: str | 
     current_limit = _html_attr(effective_limit)
     current_search = _html_attr(normalized_search_name)
     body = (
-        f"<h1>Alerts</h1><p><a href='{_html_attr(_admin_url('/admin/searches', api_key))}'>Back to searches</a></p>"
+        f"<h1>Alerts</h1><p><a href='{_html_attr(_admin_url('/admin/searches', api_key))}'>Back to searches</a> · <a href='{_html_attr(_admin_url('/admin/listings', api_key))}'>Listings</a></p>"
         f"<p>JSONL file: <code>{html.escape(settings.jsonl_outbox_path)}</code></p>"
         f"<p>Visible: {len(rows_data)} / Loaded: {total_loaded}</p>{warning}"
         f"<form method='get' action='{_html_attr(form_action)}'><input type='hidden' name='api_key' value='{_html_attr(api_key)}'>"
@@ -378,6 +380,58 @@ def alerts(request: Request, limit: int = Query(default=50), search_name: str | 
     )
     return _render_page('Alerts', body)
 
+
+
+
+@router.get('/listings', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
+def listings(request: Request, db: Session = Depends(get_db), limit: int = Query(default=100), q: str | None = Query(default=None), published: str = Query(default='any')):
+    api_key = request.query_params.get('api_key')
+    effective_limit = max(1, min(limit, 500))
+    query_text = (q or '').strip()
+    normalized_published = published if published in {'any', 'missing', 'present'} else 'any'
+
+    stmt = select(Listing)
+    if query_text:
+        pattern = f"%{query_text}%"
+        stmt = stmt.where(
+            or_(
+                Listing.title.ilike(pattern),
+                Listing.address.ilike(pattern),
+                Listing.external_id.ilike(pattern),
+            )
+        )
+    if normalized_published == 'missing':
+        stmt = stmt.where(or_(Listing.published_label.is_(None), Listing.published_label == ''))
+    elif normalized_published == 'present':
+        stmt = stmt.where(Listing.published_label != '')
+
+    items = db.scalars(stmt.order_by(Listing.last_seen_at.desc(), Listing.id.desc()).limit(effective_limit)).all()
+    rows = []
+    for item in items:
+        open_link = f"<a href='{_html_attr(item.url)}' target='_blank' rel='noopener noreferrer'>open</a>" if item.url else ''
+        rows.append(
+            f"<tr><td>{item.id}</td><td>{html.escape(item.external_id or '')}</td><td>{html.escape(item.title or '')}</td>"
+            f"<td>{html.escape(str(item.price or ''))}</td><td>{html.escape(str(item.area_m2 or ''))}</td><td>{html.escape(item.address or '')}</td>"
+            f"<td>{html.escape(item.published_label or '')}</td><td>{html.escape(str(item.first_seen_at or ''))}</td><td>{html.escape(str(item.last_seen_at or ''))}</td><td>{open_link}</td></tr>"
+        )
+    empty = '<p>No listings found yet.</p>' if not rows else ''
+    table = '' if not rows else f"<table><tr><th>id</th><th>external_id</th><th>title</th><th>price</th><th>area_m2</th><th>address</th><th>published_label</th><th>first_seen_at</th><th>last_seen_at</th><th>url</th></tr>{''.join(rows)}</table>"
+    form_action = _admin_url('/admin/listings', api_key)
+    current_q = _html_attr(query_text)
+    current_limit = _html_attr(effective_limit)
+    body = (
+        f"<h1>Listings</h1><p><a href='{_html_attr(_admin_url('/admin/searches', api_key))}'>Back to searches</a> · <a href='{_html_attr(_admin_url('/admin/alerts', api_key))}'>Alerts</a></p>"
+        f"<form method='get' action='{_html_attr(form_action)}'><input type='hidden' name='api_key' value='{_html_attr(api_key)}'>"
+        f"<div class='row'><label>q<input name='q' value='{current_q}'></label></div>"
+        f"<div class='row'><label>published<select name='published'>"
+        f"<option value='any' {'selected' if normalized_published == 'any' else ''}>any</option>"
+        f"<option value='missing' {'selected' if normalized_published == 'missing' else ''}>missing</option>"
+        f"<option value='present' {'selected' if normalized_published == 'present' else ''}>present</option>"
+        f"</select></label></div>"
+        f"<div class='row'><label>limit<input name='limit' type='number' min='1' max='500' value='{current_limit}'></label></div>"
+        f"<button type='submit'>Apply</button></form>{empty}{table}"
+    )
+    return _render_page('Listings', body)
 
 @router.get('/searches/new', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
 def new_search_form(request: Request):
