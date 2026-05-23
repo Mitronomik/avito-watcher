@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
@@ -500,6 +501,27 @@ def test_run_all_searches_records_one_failure_and_continues_next_search(
     assert first.last_error == "parser failed"
     assert second.baseline_initialized is True
     assert second.fail_count == 0
+
+
+def test_run_all_searches_failure_log_includes_structured_search_context(
+    monkeypatch, db_session, caplog
+):
+    source_url = "https://www.avito.ru/moskva/kvartiry/" + ("a" * 300)
+    search = make_search(db_session, name="ctx_name", source_url=source_url)
+    patch_session_local(monkeypatch, db_session)
+    parser = FakeParser([RuntimeError("parser failed")])
+
+    caplog.set_level(logging.ERROR)
+    MonitorService(parser=parser, scorer=FakeScorer(), notifier=FakeNotifier()).run_all_searches()
+
+    assert len(caplog.records) >= 1
+    record = caplog.records[-1]
+    assert getattr(record, "search_id", None) == search.id
+    assert getattr(record, "search_name", None) == "ctx_name"
+    source_url_preview = getattr(record, "source_url_preview", "")
+    assert source_url_preview == source_url[:220]
+    assert len(source_url_preview) == 220
+    assert getattr(record, "last_error", None) == "parser failed"
 
 
 def test_run_all_searches_skips_inactive_search(monkeypatch, db_session):

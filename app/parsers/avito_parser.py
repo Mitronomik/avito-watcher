@@ -319,24 +319,24 @@ class AvitoParser:
             self._cycle_counters.engine_used = start_engine.value
             return result["html"]
 
+        allowed_engines = self._allowed_engines()
+        fallback = next((engine for engine in allowed_engines if engine != start_engine), None)
         _log.warning(
-            "avito_parser: %s blocked (error_type=%s), switching engine",
+            "avito_parser.engine_failure engine=%s error_type=%s allowed_engines=%s fallback_available=%s",
             start_engine.value,
             result.get("error_type"),
+            ",".join(engine.value for engine in allowed_engines),
+            bool(fallback),
         )
         if result.get("error_type") == "possible_captcha_or_block":
             self._cycle_counters.block_detected_count += 1
         else:
             self._cycle_counters.engine_error_count += 1
-        self._cycle_counters.engine_fallback_count += 1
-        self._cycle_counters.fallback_used = True
         if proxy_url and self._proxy_manager:
             self._proxy_manager.report_failure(proxy_url)
             self._cycle_counters.proxy_failure_count += 1
             proxy_url = self._proxy_manager.get_proxy()
 
-        allowed_engines = self._allowed_engines()
-        fallback = next((engine for engine in allowed_engines if engine != start_engine), None)
         if fallback is None:
             raise ParserError(
                 ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK,
@@ -344,6 +344,8 @@ class AvitoParser:
             )
 
         # Fallback attempt
+        self._cycle_counters.engine_fallback_count += 1
+        self._cycle_counters.fallback_used = True
         setup_error2 = await self.ensure_engine_session(fallback, proxy_url)
         result2 = setup_error2 or await self._try_engine(url, proxy_url, fallback)
         self._record_engine_result(fallback, proxy_url, result2)

@@ -280,6 +280,11 @@ def explain_publication_filter_failures(
     return failures
 
 
+def _source_url_preview(url: str, limit: int = 220) -> str:
+    safe_url = (url or "").strip()
+    return safe_url[:limit]
+
+
 class MonitorService:
     def __init__(
         self,
@@ -824,7 +829,20 @@ class MonitorService:
                     try:
                         result = await self.process_search(db, search)
                     except Exception as exc:
-                        logger.exception("search check failed", extra={"search": search.name})
+                        error_type = getattr(exc, "error_type", None)
+                        logger.exception(
+                            "search check failed",
+                            extra={
+                                "search": search.name,
+                                "search_id": search.id,
+                                "search_name": search.name,
+                                "source_url_preview": _source_url_preview(search.source_url),
+                                "last_error": str(exc),
+                                "error_type": (
+                                    error_type.value if hasattr(error_type, "value") else error_type
+                                ),
+                            },
+                        )
                         result = {
                             "search": search.name,
                             "error": str(exc),
