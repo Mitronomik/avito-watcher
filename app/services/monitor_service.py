@@ -289,6 +289,7 @@ class MonitorService:
         self.scorer = scorer or ListingScorer()
         self.notifier = notifier or self._build_notifier()
         self.now_func = now_func or _utcnow
+        self._publication_enrichment_cache: dict[str, tuple[str, datetime]] = {}
 
     def _now(self) -> datetime:
         return _as_utc_naive(self.now_func())
@@ -500,23 +501,34 @@ class MonitorService:
         succeeded = 0
         failed = 0
         skipped_limit = 0
+        cache_hits = 0
         if not settings.scrape_enrich_missing_published_at:
             return {
                 "item_page_publication_enrichment_attempted": attempted,
                 "item_page_publication_enrichment_succeeded": succeeded,
                 "item_page_publication_enrichment_failed": failed,
                 "item_page_publication_enrichment_skipped_limit": skipped_limit,
+                "item_page_publication_enrichment_cache_hits": cache_hits,
             }
 
         limit = max(int(settings.scrape_item_page_limit_per_run), 0)
         delay_ms = max(int(settings.scrape_item_page_delay_ms), 0)
         jitter_ms = max(int(settings.scrape_item_page_jitter_ms), 0)
         missing_cards = [card for card in cards if card.published_at is None]
-        if limit >= 0 and len(missing_cards) > limit:
-            skipped_limit = len(missing_cards) - limit
-        targets = missing_cards[:limit]
+        targets: list[ListingCard] = []
+        for card in missing_cards:
+            cached = self._publication_enrichment_cache.get(card.external_id)
+            if cached is None:
+                targets.append(card)
+                continue
+            card.published_label, card.published_at = cached
+            cache_hits += 1
 
-        for idx, card in enumerate(targets):
+        if limit >= 0 and len(targets) > limit:
+            skipped_limit = len(targets) - limit
+        fetch_targets = targets[:limit]
+
+        for idx, card in enumerate(fetch_targets):
             if idx > 0:
                 sleep_ms = delay_ms + (random.randint(0, jitter_ms) if jitter_ms > 0 else 0)
                 if sleep_ms > 0:
@@ -536,6 +548,7 @@ class MonitorService:
                 continue
             card.published_label = label
             card.published_at = published_at
+            self._publication_enrichment_cache[card.external_id] = (label, published_at)
             succeeded += 1
 
         return {
@@ -543,6 +556,7 @@ class MonitorService:
             "item_page_publication_enrichment_succeeded": succeeded,
             "item_page_publication_enrichment_failed": failed,
             "item_page_publication_enrichment_skipped_limit": skipped_limit,
+            "item_page_publication_enrichment_cache_hits": cache_hits,
         }
 
     async def _process_cards(
