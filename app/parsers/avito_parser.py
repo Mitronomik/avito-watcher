@@ -319,10 +319,14 @@ class AvitoParser:
             self._cycle_counters.engine_used = start_engine.value
             return result["html"]
 
+        allowed_engines = self._allowed_engines()
+        fallback = next((engine for engine in allowed_engines if engine != start_engine), None)
         _log.warning(
-            "avito_parser: %s blocked (error_type=%s), switching engine",
+            "avito_parser.engine_failure engine=%s error_type=%s allowed_engines=%s fallback_available=%s",
             start_engine.value,
             result.get("error_type"),
+            ",".join(engine.value for engine in allowed_engines),
+            bool(fallback),
         )
         if result.get("error_type") == "possible_captcha_or_block":
             self._cycle_counters.block_detected_count += 1
@@ -335,8 +339,6 @@ class AvitoParser:
             self._cycle_counters.proxy_failure_count += 1
             proxy_url = self._proxy_manager.get_proxy()
 
-        allowed_engines = self._allowed_engines()
-        fallback = next((engine for engine in allowed_engines if engine != start_engine), None)
         if fallback is None:
             raise ParserError(
                 ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK,

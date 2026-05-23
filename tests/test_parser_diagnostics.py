@@ -510,6 +510,35 @@ def test_allowed_engines_camoufox_disables_nodriver_fallback(monkeypatch):
     assert parser.cycle_stats()["fallback_used"] is True
 
 
+def test_camoufox_only_failure_log_does_not_claim_switching(monkeypatch, caplog):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_allowed_engines", "camoufox")
+    parser = AvitoParser(preferred_engine="camoufox")
+    try_engine = AsyncMock(return_value={"ok": False, "error_type": "timeout", "error": "t"})
+    caplog.set_level("WARNING")
+    with patch.object(parser, "_try_engine", new=try_engine):
+        with pytest.raises(ParserError):
+            asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+    assert "switching engine" not in caplog.text
+    assert "fallback_available=False" in caplog.text
+    assert "allowed_engines=camoufox" in caplog.text
+
+
+def test_both_engines_failure_log_mentions_fallback_available(monkeypatch, caplog):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_allowed_engines", "both")
+    parser = AvitoParser(preferred_engine="camoufox")
+    try_engine = AsyncMock(
+        side_effect=[
+            {"ok": False, "error_type": "timeout", "error": "t"},
+            {"ok": True, "html": "<html>ok</html>"},
+        ]
+    )
+    caplog.set_level("WARNING")
+    with patch.object(parser, "_try_engine", new=try_engine):
+        asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+    assert "fallback_available=True" in caplog.text
+    assert "allowed_engines=nodriver,camoufox" in caplog.text or "allowed_engines=camoufox,nodriver" in caplog.text
+
+
 def test_allowed_engines_nodriver_disables_camoufox_fallback(monkeypatch):
     monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_allowed_engines", "nodriver")
     parser = AvitoParser(preferred_engine="nodriver")
