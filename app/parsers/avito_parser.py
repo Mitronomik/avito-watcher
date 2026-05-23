@@ -332,8 +332,6 @@ class AvitoParser:
             self._cycle_counters.block_detected_count += 1
         else:
             self._cycle_counters.engine_error_count += 1
-        self._cycle_counters.engine_fallback_count += 1
-        self._cycle_counters.fallback_used = True
         if proxy_url and self._proxy_manager:
             self._proxy_manager.report_failure(proxy_url)
             self._cycle_counters.proxy_failure_count += 1
@@ -346,6 +344,8 @@ class AvitoParser:
             )
 
         # Fallback attempt
+        self._cycle_counters.engine_fallback_count += 1
+        self._cycle_counters.fallback_used = True
         setup_error2 = await self.ensure_engine_session(fallback, proxy_url)
         result2 = setup_error2 or await self._try_engine(url, proxy_url, fallback)
         self._record_engine_result(fallback, proxy_url, result2)

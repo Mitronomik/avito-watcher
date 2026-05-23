@@ -507,7 +507,8 @@ def test_allowed_engines_camoufox_disables_nodriver_fallback(monkeypatch):
             asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
     assert len(try_engine.await_args_list) == 1
     assert try_engine.await_args_list[0].args[2] == _Engine.CAMOUFOX
-    assert parser.cycle_stats()["fallback_used"] is True
+    assert parser.cycle_stats()["fallback_used"] is False
+    assert parser.cycle_stats()["engine_fallback_count"] == 0
 
 
 def test_camoufox_only_failure_log_does_not_claim_switching(monkeypatch, caplog):
@@ -537,6 +538,8 @@ def test_both_engines_failure_log_mentions_fallback_available(monkeypatch, caplo
         asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
     assert "fallback_available=True" in caplog.text
     assert "allowed_engines=nodriver,camoufox" in caplog.text or "allowed_engines=camoufox,nodriver" in caplog.text
+    assert parser.cycle_stats()["fallback_used"] is True
+    assert parser.cycle_stats()["engine_fallback_count"] == 1
 
 
 def test_allowed_engines_nodriver_disables_camoufox_fallback(monkeypatch):
@@ -548,7 +551,8 @@ def test_allowed_engines_nodriver_disables_camoufox_fallback(monkeypatch):
             asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
     assert len(try_engine.await_args_list) == 1
     assert try_engine.await_args_list[0].args[2] == _Engine.NODRIVER
-    assert parser.cycle_stats()["fallback_used"] is True
+    assert parser.cycle_stats()["fallback_used"] is False
+    assert parser.cycle_stats()["engine_fallback_count"] == 0
 
 
 def test_preferred_engine_outside_allowed_set_falls_back_to_first_allowed(monkeypatch):
