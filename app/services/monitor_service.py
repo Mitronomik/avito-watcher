@@ -86,6 +86,9 @@ def runtime_diagnostics() -> dict:
         "scrape_item_page_delay_ms": settings.scrape_item_page_delay_ms,
         "scrape_item_page_jitter_ms": settings.scrape_item_page_jitter_ms,
         "scrape_item_page_limit_per_run": settings.scrape_item_page_limit_per_run,
+        "scrape_debug_dump_html": settings.scrape_debug_dump_html,
+        "scrape_debug_dump_dir": settings.scrape_debug_dump_dir,
+        "scrape_debug_dump_max_bytes": settings.scrape_debug_dump_max_bytes,
     }
 
 

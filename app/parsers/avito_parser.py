@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from pathlib import Path
 import random
 import re
 from dataclasses import dataclass
@@ -470,6 +471,7 @@ class AvitoParser:
 
         raw_cards = soup.select(CARD_SELECTOR)
         if not raw_cards:
+            self._maybe_dump_layout_changed_html(search_url=search_url, page_html=page_html, title=title, body_text=body_text)
             raise ParserError(
                 ParserErrorType.LAYOUT_CHANGED,
                 "No Avito search result cards found in fetched HTML",
@@ -515,6 +517,75 @@ class AvitoParser:
             )
 
         return result
+
+    def _maybe_dump_layout_changed_html(self, search_url: str, page_html: str, title: str, body_text: str) -> None:
+        if not settings.scrape_debug_dump_html:
+            return
+
+        html_hash = hashlib.sha256(page_html.encode("utf-8")).hexdigest()
+        url_hash = hashlib.sha256(search_url.encode("utf-8")).hexdigest()
+        page = self._infer_page_from_url(search_url)
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        base_name = f"{timestamp}_{ParserErrorType.LAYOUT_CHANGED.value}_p{page}_{url_hash[:12]}"
+        dump_dir = Path(settings.scrape_debug_dump_dir)
+        dump_html_path = dump_dir / f"{base_name}.html"
+        dump_meta_path = dump_dir / f"{base_name}.json"
+        clipped_html = page_html[: max(0, settings.scrape_debug_dump_max_bytes)]
+
+        metadata = {
+            "error_type": ParserErrorType.LAYOUT_CHANGED.value,
+            "url_preview": search_url[:300],
+            "page": page,
+            "html_length": len(page_html),
+            "html_sha256": html_hash,
+            "title": title,
+            "has_data_marker_item": '[data-marker="item"]' in page_html,
+            "has_item_title": "item-title" in page_html,
+            "has_item_view": "item-view" in page_html,
+            "has_hydration_or_initial_data": any(
+                marker in page_html
+                for marker in (
+                    "__initialData__",
+                    "__INITIAL_STATE__",
+                    "initialData",
+                    "initialState",
+                    "hydration",
+                    "window.__",
+                )
+            ),
+            "looks_like_block_or_captcha": self._looks_like_captcha_or_block(title, body_text),
+            "empty_results_detected": self._looks_like_empty_results(body_text),
+            "dump_html_path": str(dump_html_path),
+            "dump_meta_path": str(dump_meta_path),
+        }
+        try:
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            dump_html_path.write_text(clipped_html, encoding="utf-8")
+            dump_meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+            logger.warning(
+                "avito_parser.debug_dump saved error_type=%s html_path=%s meta_path=%s",
+                ParserErrorType.LAYOUT_CHANGED.value,
+                dump_html_path,
+                dump_meta_path,
+            )
+        except Exception as exc:
+            logger.warning(
+                "avito_parser.debug_dump failed error_type=%s error=%s",
+                ParserErrorType.LAYOUT_CHANGED.value,
+                exc,
+            )
+
+    @staticmethod
+    def _infer_page_from_url(search_url: str) -> int:
+        parsed = urlparse(search_url)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+            if key == "p":
+                try:
+                    page = int(value)
+                    return page if page > 0 else 1
+                except (TypeError, ValueError):
+                    return 1
+        return 1
 
     @staticmethod
     def _build_page_url(search_url: str, page: int) -> str:

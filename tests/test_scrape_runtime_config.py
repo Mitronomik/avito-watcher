@@ -1,4 +1,5 @@
 from app.core.config import Settings
+from app.services.monitor_service import runtime_diagnostics
 import pytest
 
 
@@ -51,3 +52,22 @@ def test_pagination_settings_defaults():
     assert settings.scrape_stop_on_duplicate_page is True
     assert settings.scrape_page_delay_ms == 0
     assert settings.scrape_page_jitter_ms == 0
+
+
+def test_scrape_debug_dump_settings_defaults():
+    settings = Settings(database_url="sqlite:///tmp.db", _env_file=None)
+    assert settings.scrape_debug_dump_html is False
+    assert settings.scrape_debug_dump_dir == "./data/debug_html"
+    assert settings.scrape_debug_dump_max_bytes == 2_000_000
+
+
+def test_runtime_diagnostics_includes_scrape_debug_dump_settings(monkeypatch):
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_debug_dump_html", True)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_debug_dump_dir", "./tmp/debug")
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_debug_dump_max_bytes", 12345)
+
+    runtime = runtime_diagnostics()
+
+    assert runtime["scrape_debug_dump_html"] is True
+    assert runtime["scrape_debug_dump_dir"] == "./tmp/debug"
+    assert runtime["scrape_debug_dump_max_bytes"] == 12345

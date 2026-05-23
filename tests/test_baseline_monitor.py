@@ -669,6 +669,9 @@ def test_runtime_diagnostics_parses_alert_channels_with_spaces(monkeypatch):
     monkeypatch.setattr("app.services.monitor_service.settings.scrape_stop_on_duplicate_page", False)
     monkeypatch.setattr("app.services.monitor_service.settings.scrape_page_delay_ms", 500)
     monkeypatch.setattr("app.services.monitor_service.settings.scrape_page_jitter_ms", 200)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_debug_dump_html", True)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_debug_dump_dir", "./data/debug_html_custom")
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_debug_dump_max_bytes", 123456)
 
     runtime = runtime_diagnostics()
 
@@ -682,6 +685,9 @@ def test_runtime_diagnostics_parses_alert_channels_with_spaces(monkeypatch):
     assert runtime["scrape_stop_on_duplicate_page"] is False
     assert runtime["scrape_page_delay_ms"] == 500
     assert runtime["scrape_page_jitter_ms"] == 200
+    assert runtime["scrape_debug_dump_html"] is True
+    assert runtime["scrape_debug_dump_dir"] == "./data/debug_html_custom"
+    assert runtime["scrape_debug_dump_max_bytes"] == 123456
 
 
 def test_min_area_filter_uses_area_parsed_from_card_text(db_session):
@@ -1820,4 +1826,3 @@ def test_existing_missing_published_at_is_not_enriched_and_does_not_consume_limi
     assert result["item_page_publication_enrichment_attempted"] == 1
     assert result["item_page_publication_enrichment_skipped_limit"] == 0
     assert calls == ["https://www.avito.ru/item_2"]
-
