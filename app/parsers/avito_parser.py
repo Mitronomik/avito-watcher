@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import logging
 import random
 import re
@@ -706,6 +707,33 @@ class AvitoParser:
             return cls._to_naive_utc(local_dt)
 
         return None
+
+    @classmethod
+    def _extract_item_page_publication_label(cls, page_html: str) -> str:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(page_html, "lxml")
+        marker = soup.select_one('[data-marker="item-view/item-date"]')
+        if marker is not None:
+            normalized = cls._normalize_text_line(marker.get_text(separator=" ", strip=True))
+            if normalized:
+                return normalized
+
+        match = re.search(r'"sortFormatedDate"\s*:\s*"((?:\\.|[^"\\])*)"', page_html)
+        if match:
+            try:
+                decoded = json.loads(f'"{match.group(1)}"')
+            except json.JSONDecodeError:
+                decoded = ""
+            label = cls._extract_published_label(str(decoded))
+            if label:
+                return label
+
+        return cls._extract_published_label(soup.get_text(separator=" ", strip=True))
+
+    async def fetch_item_publication_label(self, item_url: str) -> str:
+        page_html = await self._fetch_page_html(item_url)
+        return self._extract_item_page_publication_label(page_html)
 
     @staticmethod
     def _extract_external_id(href: str | None, idx: int) -> str:

@@ -982,3 +982,18 @@ def test_fetch_page_html_cycle_mode_evicts_cached_session_on_timeout():
     result = asyncio.run(parser._try_engine("https://www.avito.ru/moskva/kvartiry", None, _Engine.NODRIVER))
     assert result["error_type"] == "timeout"
     assert (_Engine.NODRIVER, None) not in parser._engine_sessions
+
+
+def test_extract_item_page_publication_label_from_marker():
+    html = '<span data-marker="item-view/item-date"> · 17 мая в 12:01</span>'
+    assert AvitoParser._extract_item_page_publication_label(html) == "17 мая в 12:01"
+
+
+def test_extract_item_page_publication_label_from_sort_formated_date():
+    html = '<script>window.__initial={"sortFormatedDate":"17 мая в 12:01"}</script>'
+    assert AvitoParser._extract_item_page_publication_label(html) == "17 мая в 12:01"
+
+
+def test_extract_item_page_publication_label_fallback_text():
+    html = '<div>Размещено сегодня в 12:34</div>'
+    assert AvitoParser._extract_item_page_publication_label(html) == "сегодня в 12:34"

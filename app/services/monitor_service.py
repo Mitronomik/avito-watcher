@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 import time
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -81,6 +82,10 @@ def runtime_diagnostics() -> dict:
         "scrape_stop_on_duplicate_page": settings.scrape_stop_on_duplicate_page,
         "scrape_page_delay_ms": settings.scrape_page_delay_ms,
         "scrape_page_jitter_ms": settings.scrape_page_jitter_ms,
+        "scrape_enrich_missing_published_at": settings.scrape_enrich_missing_published_at,
+        "scrape_item_page_delay_ms": settings.scrape_item_page_delay_ms,
+        "scrape_item_page_jitter_ms": settings.scrape_item_page_jitter_ms,
+        "scrape_item_page_limit_per_run": settings.scrape_item_page_limit_per_run,
     }
 
 
@@ -490,6 +495,56 @@ class MonitorService:
             raise ValueError(f"Search job {search_job_id} not found")
         return await self.process_search(db, search)
 
+    async def _enrich_missing_published_at(self, cards: list[ListingCard]) -> dict[str, int]:
+        attempted = 0
+        succeeded = 0
+        failed = 0
+        skipped_limit = 0
+        if not settings.scrape_enrich_missing_published_at:
+            return {
+                "item_page_publication_enrichment_attempted": attempted,
+                "item_page_publication_enrichment_succeeded": succeeded,
+                "item_page_publication_enrichment_failed": failed,
+                "item_page_publication_enrichment_skipped_limit": skipped_limit,
+            }
+
+        limit = max(int(settings.scrape_item_page_limit_per_run), 0)
+        delay_ms = max(int(settings.scrape_item_page_delay_ms), 0)
+        jitter_ms = max(int(settings.scrape_item_page_jitter_ms), 0)
+        missing_cards = [card for card in cards if card.published_at is None]
+        if limit >= 0 and len(missing_cards) > limit:
+            skipped_limit = len(missing_cards) - limit
+        targets = missing_cards[:limit]
+
+        for idx, card in enumerate(targets):
+            if idx > 0:
+                sleep_ms = delay_ms + (random.randint(0, jitter_ms) if jitter_ms > 0 else 0)
+                if sleep_ms > 0:
+                    await asyncio.sleep(sleep_ms / 1000.0)
+            attempted += 1
+            try:
+                label = await self.parser.fetch_item_publication_label(card.url)
+            except Exception:
+                failed += 1
+                continue
+            if not label:
+                failed += 1
+                continue
+            published_at = AvitoParser._parse_published_at(label, self._now())
+            if published_at is None:
+                failed += 1
+                continue
+            card.published_label = label
+            card.published_at = published_at
+            succeeded += 1
+
+        return {
+            "item_page_publication_enrichment_attempted": attempted,
+            "item_page_publication_enrichment_succeeded": succeeded,
+            "item_page_publication_enrichment_failed": failed,
+            "item_page_publication_enrichment_skipped_limit": skipped_limit,
+        }
+
     async def _process_cards(
         self,
         db: Session,
@@ -499,6 +554,16 @@ class MonitorService:
         search_name: str,
     ) -> dict:
         listing_repo = ListingRepository(db)
+        existing_by_external_id = {
+            card.external_id: listing_repo.get_by_external_id(card.external_id)
+            for card in cards
+        }
+        enrichment_candidates = [
+            card
+            for card in cards
+            if card.published_at is None and existing_by_external_id.get(card.external_id) is None
+        ]
+        enrichment_stats = await self._enrich_missing_published_at(enrichment_candidates)
         alert_repo = AlertRepository(db)
 
         created = 0
@@ -513,7 +578,7 @@ class MonitorService:
 
         for card in cards:
             now = self._now()
-            existing = listing_repo.get_by_external_id(card.external_id)
+            existing = existing_by_external_id.get(card.external_id)
 
             if existing:
                 old_price = existing.price
@@ -687,6 +752,7 @@ class MonitorService:
 
         filtered = filtered_by_rules + filtered_by_publication_date
         return {
+            **enrichment_stats,
             "created": created,
             "alerted": alerted,
             "price_changed": price_changed,
