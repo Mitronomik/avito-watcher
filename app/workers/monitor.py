@@ -49,9 +49,14 @@ def _build_parser() -> AvitoParser:
     proxy_urls = [u.strip() for u in raw.split(",") if u.strip()]
     if proxy_urls:
         proxy_urls = validate_proxy_urls(proxy_urls)
-        manager = ProxyManager(proxy_urls, quarantine_seconds=7200)
+        manager = ProxyManager(
+            proxy_urls,
+            quarantine_seconds=settings.proxy_quarantine_seconds,
+        )
         logger.info(
-            "proxy_manager initialized proxies=%d", manager.total
+            "proxy_manager initialized proxies=%d quarantine_seconds=%d",
+            manager.total,
+            settings.proxy_quarantine_seconds,
         )
     else:
         manager = None

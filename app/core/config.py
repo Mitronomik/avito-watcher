@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     scrape_preferred_engine: Literal["auto", "nodriver", "camoufox"] = "auto"
     scrape_allowed_engines: Literal["both", "nodriver", "camoufox"] = "both"
     proxy_urls: str = ""
+    proxy_quarantine_seconds: int = 7200
     alert_channels: str = "jsonl,telegram"
     email_enabled: bool = False
     smtp_host: str = ""

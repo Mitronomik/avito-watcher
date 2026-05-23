@@ -58,6 +58,17 @@ def test_quarantine_duration_grows_with_failures():
     assert second_until > first_until
 
 
+def test_report_failure_uses_configured_quarantine_seconds():
+    pm = make_pool("http://a:b@1.1.1.1:8000", quarantine_seconds=5)
+    url = "http://a:b@1.1.1.1:8000"
+    before = time.monotonic()
+
+    pm.report_failure(url)
+    remaining = pm._proxies[0].quarantine_until - before
+
+    assert remaining == pytest.approx(5, rel=0.2, abs=0.5)
+
+
 def test_stats_tracks_hits_and_failures():
     pm = make_pool("http://a:b@1.1.1.1:8000", "http://a:b@2.2.2.2:8000")
 
@@ -73,6 +84,9 @@ def test_stats_tracks_hits_and_failures():
     assert s["quarantine_events"] == 1
     assert s["quarantined"] == 1
     assert s["available"] == 1
+    assert s["quarantine_seconds"] == 7200
+    assert s["next_available_in_sec"] >= 1
+    assert s["max_remaining_quarantine_sec"] >= s["next_available_in_sec"]
 
 
 def test_available_count_respects_quarantine_expiry():
