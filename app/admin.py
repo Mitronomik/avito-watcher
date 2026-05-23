@@ -403,14 +403,17 @@ def listings(request: Request, db: Session = Depends(get_db), limit: int = Query
     if normalized_published == 'missing':
         stmt = stmt.where(or_(Listing.published_label.is_(None), Listing.published_label == ''))
     elif normalized_published == 'present':
-        stmt = stmt.where(Listing.published_label != '')
+        stmt = stmt.where(
+            Listing.published_label.is_not(None),
+            Listing.published_label != '',
+        )
 
     items = db.scalars(stmt.order_by(Listing.last_seen_at.desc(), Listing.id.desc()).limit(effective_limit)).all()
     rows = []
     for item in items:
         open_link = f"<a href='{_html_attr(item.url)}' target='_blank' rel='noopener noreferrer'>open</a>" if item.url else ''
         rows.append(
-            f"<tr><td>{item.id}</td><td>{html.escape(item.external_id or '')}</td><td>{html.escape(item.title or '')}</td>"
+            f"<tr><td>{html.escape(str(item.id or ''))}</td><td>{html.escape(item.external_id or '')}</td><td>{html.escape(item.title or '')}</td>"
             f"<td>{html.escape(str(item.price or ''))}</td><td>{html.escape(str(item.area_m2 or ''))}</td><td>{html.escape(item.address or '')}</td>"
             f"<td>{html.escape(item.published_label or '')}</td><td>{html.escape(str(item.first_seen_at or ''))}</td><td>{html.escape(str(item.last_seen_at or ''))}</td><td>{open_link}</td></tr>"
         )
