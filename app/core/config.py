@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     scrape_item_page_delay_ms: int = 0
     scrape_item_page_jitter_ms: int = 0
     scrape_item_page_limit_per_run: int = 10
+    scrape_debug_dump_html: bool = False
+    scrape_debug_dump_dir: str = "./data/debug_html"
+    scrape_debug_dump_max_bytes: int = 2_000_000
     scrape_preferred_engine: Literal["auto", "nodriver", "camoufox"] = "auto"
     scrape_allowed_engines: Literal["both", "nodriver", "camoufox"] = "both"
     proxy_urls: str = ""
