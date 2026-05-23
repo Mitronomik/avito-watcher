@@ -25,6 +25,16 @@ from tests.test_baseline_monitor import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolate_parser_debug_dump_settings(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_debug_dump_html", False)
+    monkeypatch.setattr(
+        "app.parsers.avito_parser.settings.scrape_debug_dump_dir",
+        str(tmp_path / "debug_html"),
+    )
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_debug_dump_max_bytes", 2_000_000)
+
+
 def make_test_parser(**kwargs):
     parser = AvitoParser(preferred_engine=kwargs.pop("preferred_engine", "auto"), **kwargs)
     parser._allowed_engines_mode = "both"
@@ -172,6 +182,25 @@ def test_layout_changed_debug_dump_write_failure_still_raises_layout_changed(tmp
             asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry"))
 
     assert exc_info.value.error_type == ParserErrorType.LAYOUT_CHANGED
+
+
+def test_layout_changed_local_env_debug_dump_enabled_does_not_write_to_default_data_dir(
+    tmp_path, monkeypatch
+):
+    parser = AvitoParser()
+    html = "<html><head><title>Avito</title></head><body>no cards</body></html>"
+    debug_dir = tmp_path / "data" / "debug_html"
+    debug_dir.mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SCRAPE_DEBUG_DUMP_HTML", "true")
+    monkeypatch.setenv("SCRAPE_DEBUG_DUMP_DIR", "./data/debug_html")
+
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        with pytest.raises(ParserError) as exc_info:
+            asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry?p=7"))
+
+    assert exc_info.value.error_type == ParserErrorType.LAYOUT_CHANGED
+    assert list(debug_dir.iterdir()) == []
 
 
 def test_fetch_page_html_raises_possible_captcha_or_block_when_all_engines_fail():
