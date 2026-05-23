@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 from app.core.config import settings
 from app.db.base import Base
 from app.main import create_app
+from app.models.listing import Listing
 from app.models.search_job import SearchJob
 from app.parsers.errors import ParserError, ParserErrorType
 
@@ -48,6 +49,27 @@ def create_job(Session, name="test_job"):
         s.commit()
         s.refresh(job)
         return job.id
+
+
+
+
+def create_listing(Session, **kwargs):
+    with Session() as s:
+        listing = Listing(
+            external_id=kwargs.get('external_id', 'ext-default'),
+            url=kwargs.get('url', 'https://www.avito.ru/default'),
+            title=kwargs.get('title', ''),
+            price=kwargs.get('price'),
+            area_m2=kwargs.get('area_m2'),
+            address=kwargs.get('address', ''),
+            published_label=kwargs.get('published_label', ''),
+            first_seen_at=kwargs.get('first_seen_at', datetime(2026, 1, 1, 0, 0, 0)),
+            last_seen_at=kwargs.get('last_seen_at', datetime(2026, 1, 1, 0, 0, 0)),
+        )
+        s.add(listing)
+        s.commit()
+        s.refresh(listing)
+        return listing.id
 
 
 def test_list_and_new(monkeypatch):
@@ -750,3 +772,72 @@ def test_name_field_helper_text_visible(monkeypatch):
     client, _ = make_client(monkeypatch)
     page = client.get("/admin/searches/new").text
     assert "Latin letters, digits, _ and -, 3-121 chars." in page
+
+
+def test_listings_empty_state(monkeypatch):
+    client, _ = make_client(monkeypatch)
+    page = client.get('/admin/listings').text
+    assert 'No listings found yet.' in page
+
+
+def test_listings_renders_newest_first(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    create_listing(Session, external_id='old', title='Old', last_seen_at=datetime(2026, 1, 1, 0, 0, 0))
+    create_listing(Session, external_id='new', title='New', last_seen_at=datetime(2026, 1, 2, 0, 0, 0))
+    page = client.get('/admin/listings').text
+    assert page.index('new') < page.index('old')
+
+
+def test_listings_limit_applied_and_capped(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    for idx in range(510):
+        create_listing(Session, external_id=f'ext-{idx}', title=f'Title {idx}', last_seen_at=datetime(2026, 1, 1, 0, 0, idx % 60))
+    page_limit_2 = client.get('/admin/listings?limit=2').text
+    assert page_limit_2.count('<tr><td>') == 2
+    page_capped = client.get('/admin/listings?limit=9999').text
+    assert page_capped.count('<tr><td>') == 500
+    assert "value='500'" in page_capped
+
+
+def test_listings_q_filter_title_address_external_id(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    create_listing(Session, external_id='ext-target', title='Alpha title', address='Moscow')
+    create_listing(Session, external_id='ext-other', title='Beta', address='Spb target street')
+    assert 'Alpha title' in client.get('/admin/listings?q=alpha').text
+    assert 'Spb target street' in client.get('/admin/listings?q=target').text
+    assert 'ext-target' in client.get('/admin/listings?q=ext-target').text
+
+
+def test_listings_published_missing_and_present(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    create_listing(Session, external_id='missing', title='Missing pub', published_label='')
+    create_listing(Session, external_id='present', title='Present pub', published_label='today')
+    missing_page = client.get('/admin/listings?published=missing').text
+    present_page = client.get('/admin/listings?published=present').text
+    assert 'Missing pub' in missing_page and 'Present pub' not in missing_page
+    assert 'Present pub' in present_page and 'Missing pub' not in present_page
+
+
+def test_listings_external_link_attrs(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    create_listing(Session, external_id='link', title='Link row', url='https://www.avito.ru/link')
+    page = client.get('/admin/listings').text
+    assert "target='_blank'" in page
+    assert "rel='noopener noreferrer'" in page
+
+
+def test_listings_api_key_preserved_in_forms_and_nav(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    create_listing(Session, external_id='key', title='Key row')
+    monkeypatch.setattr(settings, 'api_key', 'secret')
+    page = client.get('/admin/listings?api_key=secret').text
+    assert "action='/admin/listings?api_key=secret'" in page
+    assert "name='api_key' value='secret'" in page
+    assert '/admin/searches?api_key=secret' in page
+    assert '/admin/alerts?api_key=secret' in page
+
+
+def test_searches_contains_link_to_listings(monkeypatch):
+    client, _ = make_client(monkeypatch)
+    page = client.get('/admin/searches').text
+    assert '/admin/listings' in page
