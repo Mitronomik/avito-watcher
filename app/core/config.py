@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     scrape_stop_on_duplicate_page: bool = True
     scrape_page_delay_ms: int = 0
     scrape_page_jitter_ms: int = 0
+    scrape_enrich_missing_published_at: bool = False
+    scrape_item_page_delay_ms: int = 0
+    scrape_item_page_jitter_ms: int = 0
+    scrape_item_page_limit_per_run: int = 10
     scrape_preferred_engine: Literal["auto", "nodriver", "camoufox"] = "auto"
     scrape_allowed_engines: Literal["both", "nodriver", "camoufox"] = "both"
     proxy_urls: str = ""

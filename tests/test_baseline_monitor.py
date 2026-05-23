@@ -1671,3 +1671,65 @@ def test_scoring_enabled_keeps_existing_scorer_path(db_session, monkeypatch):
     assert scorer.cards == ["2"]
     assert notifier.payloads[0]["summary"] == "score for 2"
     assert notifier.payloads[0]["score"] == 100
+
+
+def test_runtime_diagnostics_includes_item_page_enrichment_settings(monkeypatch):
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_enrich_missing_published_at", True)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_item_page_delay_ms", 100)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_item_page_jitter_ms", 50)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_item_page_limit_per_run", 7)
+
+    runtime = runtime_diagnostics()
+
+    assert runtime["scrape_enrich_missing_published_at"] is True
+    assert runtime["scrape_item_page_delay_ms"] == 100
+    assert runtime["scrape_item_page_jitter_ms"] == 50
+    assert runtime["scrape_item_page_limit_per_run"] == 7
+
+
+def test_enrichment_disabled_preserves_behavior_and_zero_counters(db_session):
+    search = make_search(db_session, filters_json={"require_published_at": True})
+    service = MonitorService(parser=FakeParser([[card("1")], [card("1"), card("2")]]), scorer=FakeScorer(), notifier=FakeNotifier())
+    run(service, db_session, search)
+    second = run(service, db_session, search)
+    assert second["item_page_publication_enrichment_attempted"] == 0
+    assert second["item_page_publication_enrichment_succeeded"] == 0
+    assert second["item_page_publication_enrichment_failed"] == 0
+    assert second["filtered_by_publication_date"] == 1
+
+
+def test_enrichment_enabled_updates_missing_published_at_and_respects_limit(monkeypatch, db_session):
+    class Parser(FakeParser):
+        async def fetch_item_publication_label(self, item_url: str):
+            if item_url.endswith("item_2"):
+                return "17 мая в 11:00"
+            return ""
+
+    now = datetime(2026, 5, 17, 12, 0, 0)
+    search = make_search(db_session, filters_json={"require_published_at": True, "max_age_hours": 1})
+    parser = Parser([[card("1", published_at=now - timedelta(minutes=10))], [card("1", published_at=now - timedelta(minutes=10)), card("2"), card("3")]])
+    service = MonitorService(parser=parser, scorer=FakeScorer(), notifier=FakeNotifier(), now_func=lambda: now)
+    run(service, db_session, search)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_enrich_missing_published_at", True)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_item_page_limit_per_run", 1)
+    result = run(service, db_session, search)
+    assert result["item_page_publication_enrichment_attempted"] == 1
+    assert result["item_page_publication_enrichment_succeeded"] == 1
+    assert result["item_page_publication_enrichment_skipped_limit"] == 1
+    assert result["filtered_by_publication_date"] == 2
+
+
+def test_failed_enrichment_keeps_missing_and_rejects_require_published_at(monkeypatch, db_session):
+    class Parser(FakeParser):
+        async def fetch_item_publication_label(self, _item_url: str):
+            raise RuntimeError("fail")
+
+    search = make_search(db_session, filters_json={"require_published_at": True})
+    parser = Parser([[card("1")], [card("1"), card("2")]])
+    service = MonitorService(parser=parser, scorer=FakeScorer(), notifier=FakeNotifier())
+    run(service, db_session, search)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_enrich_missing_published_at", True)
+    result = run(service, db_session, search)
+    assert result["item_page_publication_enrichment_failed"] == 2
+    assert result["filtered_by_publication_date"] == 1
+    assert result["alerted"] == 0
