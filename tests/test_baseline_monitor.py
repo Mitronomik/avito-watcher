@@ -764,6 +764,7 @@ def test_filtered_samples_includes_rules_reason(db_session):
             "published_label": "",
             "url": "https://www.avito.ru/item_2",
             "reason": "rules",
+            "rule_failures": ["min_price"],
         }
     ]
 
@@ -786,6 +787,143 @@ def test_filtered_samples_includes_publication_date_reason(db_session):
     assert result["filtered_by_publication_date"] == 1
     assert result["filtered_samples"][0]["external_id"] == "2"
     assert result["filtered_samples"][0]["reason"] == "publication_date"
+    assert result["filtered_samples"][0]["publication_date_failures"] == [
+        "older_than_max_age_hours"
+    ]
+
+
+def test_filtered_samples_includes_rules_failure_details(db_session):
+    search = make_search(
+        db_session,
+        filters_json={"min_area": 30.0, "max_price": 200.0, "exclude_keywords": "urgent"},
+    )
+    service = MonitorService(
+        parser=FakeParser(
+            [
+                [card("1", area_m2=35.0, price=100.0, title="Listing 1")],
+                [card("1", area_m2=35.0, price=100.0, title="Listing 1"), card("2", area_m2=20.0, price=300.0, title="Urgent sale")],
+            ]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_rules"] == 1
+    assert result["filtered_by_publication_date"] == 0
+    assert result["filtered_samples"][0]["reason"] == "rules"
+    assert result["filtered_samples"][0]["rule_failures"] == [
+        "max_price",
+        "min_area",
+        "exclude_keywords",
+    ]
+
+
+def test_filtered_samples_publication_failure_details(db_session):
+    now = datetime(2026, 5, 17, 12, 0, 0)
+    search = make_search(
+        db_session,
+        filters_json={
+            "require_published_at": True,
+            "max_age_hours": 2,
+            "published_after": "2026-05-17T11:00:00Z",
+            "published_on_date": "2026-05-17",
+        },
+    )
+    service = MonitorService(
+        parser=FakeParser(
+            [
+                    [card("1", published_at=now - timedelta(minutes=10))],
+                    [card("1", published_at=now - timedelta(minutes=10)), card("2", published_at=now - timedelta(hours=16))],
+                ]
+            ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+        now_func=lambda: now,
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_publication_date"] == 1
+    assert result["filtered_samples"][0]["reason"] == "publication_date"
+    assert result["filtered_samples"][0]["publication_date_failures"] == [
+        "older_than_max_age_hours",
+        "before_or_equal_published_after",
+        "published_on_date_mismatch",
+    ]
+
+
+def test_invalid_published_on_date_alone_does_not_reject(db_session):
+    now = datetime(2026, 5, 17, 12, 0, 0)
+    search = make_search(db_session, filters_json={"published_on_date": "bad-date"})
+    service = MonitorService(
+        parser=FakeParser(
+            [
+                [card("1", published_at=now - timedelta(minutes=10))],
+                [card("1", published_at=now - timedelta(minutes=10)), card("2", published_at=now - timedelta(minutes=5))],
+            ]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+        now_func=lambda: now,
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_publication_date"] == 0
+    assert result["filtered_samples"] == []
+    assert result["alerted"] == 1
+
+
+def test_invalid_published_on_date_warning_added_only_with_blocking_failure(db_session):
+    now = datetime(2026, 5, 17, 12, 0, 0)
+    search = make_search(
+        db_session,
+        filters_json={"published_on_date": "bad-date", "max_age_hours": 1},
+    )
+    service = MonitorService(
+        parser=FakeParser(
+            [
+                [card("1", published_at=now - timedelta(minutes=10))],
+                [card("1", published_at=now - timedelta(minutes=10)), card("2", published_at=now - timedelta(hours=3))],
+            ]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+        now_func=lambda: now,
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_publication_date"] == 1
+    assert result["filtered_samples"][0]["publication_date_failures"] == [
+        "older_than_max_age_hours"
+    ]
+    assert result["filtered_samples"][0]["publication_date_warnings"] == [
+        "invalid_published_on_date"
+    ]
+
+
+def test_filtered_samples_missing_published_at_failure_detail(db_session):
+    search = make_search(db_session, filters_json={"require_published_at": True})
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["filtered_samples"][0]["reason"] == "publication_date"
+    assert result["filtered_samples"][0]["publication_date_failures"] == [
+        "missing_published_at"
+    ]
 
 
 def test_filtered_samples_capped_at_ten(db_session):
