@@ -152,6 +152,7 @@ def _filtered_sample(
     reason: str,
     rule_failures: list[str] | None = None,
     publication_date_failures: list[str] | None = None,
+    publication_date_warnings: list[str] | None = None,
 ) -> dict:
     sample = {
         "external_id": card.external_id,
@@ -167,6 +168,8 @@ def _filtered_sample(
         sample["rule_failures"] = rule_failures
     if publication_date_failures:
         sample["publication_date_failures"] = publication_date_failures
+    if publication_date_warnings:
+        sample["publication_date_warnings"] = publication_date_warnings
     return sample
 
 def _utcnow() -> datetime:
@@ -203,6 +206,7 @@ def explain_publication_filter_failures(
     card: ListingCard,
     filters: dict | None,
     now: datetime | None = None,
+    include_non_blocking: bool = False,
 ) -> list[str]:
     filters = filters or {}
     failures: list[str] = []
@@ -233,7 +237,8 @@ def explain_publication_filter_failures(
             ).date()
         except ValueError:
             expected_date = None
-            failures.append("invalid_published_on_date")
+            if include_non_blocking:
+                failures.append("invalid_published_on_date")
         if expected_date is not None:
             # Publication dates are stored as naive UTC; convert to Moscow local date for date-only filters.
             local_date = published_at.replace(tzinfo=UTC).astimezone(MOSCOW_TZ).date()
@@ -555,10 +560,16 @@ class MonitorService:
                     )
                 continue
 
-            publication_date_failures = explain_publication_filter_failures(
-                card, filters, now
-            )
+            publication_date_failures = explain_publication_filter_failures(card, filters, now)
             if publication_date_failures:
+                publication_date_all_diagnostics = explain_publication_filter_failures(
+                    card, filters, now, include_non_blocking=True
+                )
+                publication_date_warnings = [
+                    item
+                    for item in publication_date_all_diagnostics
+                    if item not in publication_date_failures
+                ]
                 filtered_by_publication_date += 1
                 if len(filtered_samples) < 10:
                     filtered_samples.append(
@@ -566,6 +577,7 @@ class MonitorService:
                             card,
                             reason="publication_date",
                             publication_date_failures=publication_date_failures,
+                            publication_date_warnings=publication_date_warnings,
                         )
                     )
                 continue

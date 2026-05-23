@@ -856,6 +856,59 @@ def test_filtered_samples_publication_failure_details(db_session):
     ]
 
 
+def test_invalid_published_on_date_alone_does_not_reject(db_session):
+    now = datetime(2026, 5, 17, 12, 0, 0)
+    search = make_search(db_session, filters_json={"published_on_date": "bad-date"})
+    service = MonitorService(
+        parser=FakeParser(
+            [
+                [card("1", published_at=now - timedelta(minutes=10))],
+                [card("1", published_at=now - timedelta(minutes=10)), card("2", published_at=now - timedelta(minutes=5))],
+            ]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+        now_func=lambda: now,
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_publication_date"] == 0
+    assert result["filtered_samples"] == []
+    assert result["alerted"] == 1
+
+
+def test_invalid_published_on_date_warning_added_only_with_blocking_failure(db_session):
+    now = datetime(2026, 5, 17, 12, 0, 0)
+    search = make_search(
+        db_session,
+        filters_json={"published_on_date": "bad-date", "max_age_hours": 1},
+    )
+    service = MonitorService(
+        parser=FakeParser(
+            [
+                [card("1", published_at=now - timedelta(minutes=10))],
+                [card("1", published_at=now - timedelta(minutes=10)), card("2", published_at=now - timedelta(hours=3))],
+            ]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+        now_func=lambda: now,
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_publication_date"] == 1
+    assert result["filtered_samples"][0]["publication_date_failures"] == [
+        "older_than_max_age_hours"
+    ]
+    assert result["filtered_samples"][0]["publication_date_warnings"] == [
+        "invalid_published_on_date"
+    ]
+
+
 def test_filtered_samples_missing_published_at_failure_detail(db_session):
     search = make_search(db_session, filters_json={"require_published_at": True})
     service = MonitorService(
