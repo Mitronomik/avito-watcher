@@ -94,6 +94,10 @@ class ProxyManager:
     def stats(self) -> dict:
         """Return current pool health snapshot for logging/metrics."""
         with self._lock:
+            now = time.monotonic()
+            remaining = [max(0, int(p.quarantine_until - now)) for p in self._proxies if not p.is_available]
+            max_remaining = max(remaining) if remaining else 0
+            next_available = min(remaining) if remaining else 0
             return {
                 "total": self.total,
                 "available": self.available_count,
@@ -101,4 +105,7 @@ class ProxyManager:
                 "hits": self._hits,
                 "failures": self._failures,
                 "quarantine_events": self._quarantine_events,
+                "quarantine_seconds": self._quarantine_seconds,
+                "next_available_in_sec": next_available,
+                "max_remaining_quarantine_sec": max_remaining,
             }
