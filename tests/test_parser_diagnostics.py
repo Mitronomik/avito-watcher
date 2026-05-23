@@ -25,6 +25,12 @@ from tests.test_baseline_monitor import (
 )
 
 
+def make_test_parser(**kwargs):
+    parser = AvitoParser(preferred_engine=kwargs.pop("preferred_engine", "auto"), **kwargs)
+    parser._allowed_engines_mode = "both"
+    return parser
+
+
 def test_fetch_search_cards_rejects_url_without_http_scheme():
     with pytest.raises(ParserError) as exc_info:
         asyncio.run(AvitoParser().fetch_search_cards("www.avito.ru/moskva/kvartiry"))
@@ -229,7 +235,7 @@ def test_extract_external_id_with_query_string():
 
 
 def test_fetch_page_html_nodriver_blocked_camoufox_succeeds_engine_flip():
-    parser = AvitoParser()
+    parser = make_test_parser(preferred_engine="auto")
     html = "<html><body>ok</body></html>"
     try_engine = AsyncMock(
         side_effect=[
@@ -268,7 +274,7 @@ def test_fetch_page_html_both_engines_blocked_raises():
 
 
 def test_fetch_page_html_cycle_mode_nodriver_session_open_failure_falls_back(monkeypatch):
-    parser = AvitoParser()
+    parser = make_test_parser(preferred_engine="auto")
     parser._cycle_active = True
 
     async def fail_open(_proxy):
@@ -293,7 +299,7 @@ def test_fetch_page_html_cycle_mode_nodriver_session_open_failure_falls_back(mon
 
 
 def test_fetch_page_html_cycle_mode_evicts_broken_cached_session_and_falls_back(caplog):
-    parser = AvitoParser()
+    parser = make_test_parser(preferred_engine="auto")
     parser._cycle_active = True
 
     class BrokenSession:
@@ -529,7 +535,7 @@ def test_proxy_failure_counter_tracks_reported_failures_without_quarantine_count
 
 
 def test_fallback_and_eviction_counters_increment():
-    parser = AvitoParser()
+    parser = make_test_parser(preferred_engine="auto")
     parser._cycle_active = True
 
     class BrokenSession:
@@ -875,7 +881,7 @@ def test_end_cycle_logs_summary(caplog):
 
 
 def test_fetch_page_html_falls_back_when_nodriver_returns_timeout(monkeypatch):
-    parser = AvitoParser()
+    parser = make_test_parser(preferred_engine="auto")
     parser._prefer_engine = _Engine.NODRIVER
 
     responses = iter([
@@ -898,7 +904,7 @@ def test_fetch_page_html_falls_back_when_nodriver_returns_timeout(monkeypatch):
 
 
 def test_second_fetch_same_proxy_skips_nodriver_after_timeout(monkeypatch):
-    parser = AvitoParser()
+    parser = make_test_parser(preferred_engine="auto")
     parser._prefer_engine = _Engine.NODRIVER
     proxy_url = "http://user:pass@1.2.3.4:8080"
     calls: list[_Engine] = []
@@ -935,7 +941,7 @@ def test_second_fetch_same_proxy_skips_nodriver_after_timeout(monkeypatch):
 
 
 def test_recent_nodriver_failure_not_inherited_by_other_proxy(monkeypatch):
-    parser = AvitoParser()
+    parser = make_test_parser(preferred_engine="auto")
     parser._prefer_engine = _Engine.NODRIVER
     calls: list[tuple[str | None, _Engine]] = []
     proxy_sequence = iter(
@@ -978,7 +984,7 @@ def test_recent_nodriver_failure_not_inherited_by_other_proxy(monkeypatch):
 
 
 def test_no_proxy_does_not_inherit_proxy_nodriver_failure(monkeypatch):
-    parser = AvitoParser()
+    parser = make_test_parser(preferred_engine="auto")
     parser._prefer_engine = _Engine.NODRIVER
     calls: list[tuple[str | None, _Engine]] = []
     proxy_sequence = iter(["http://user:pass@1.2.3.4:8080", "http://user:pass@1.2.3.4:8080"])
@@ -1016,7 +1022,7 @@ def test_no_proxy_does_not_inherit_proxy_nodriver_failure(monkeypatch):
 
 
 def test_successful_nodriver_does_not_mark_recent_failure(monkeypatch):
-    parser = AvitoParser()
+    parser = make_test_parser(preferred_engine="auto")
     parser._prefer_engine = _Engine.NODRIVER
     calls: list[_Engine] = []
 
