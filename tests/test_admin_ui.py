@@ -810,12 +810,20 @@ def test_listings_q_filter_title_address_external_id(monkeypatch):
 
 def test_listings_published_missing_and_present(monkeypatch):
     client, Session = make_client(monkeypatch)
-    create_listing(Session, external_id='missing', title='Missing pub', published_label='')
+    create_listing(Session, external_id='missing-empty', title='Missing pub empty', published_label='')
+    create_listing(Session, external_id='missing-null', title='Missing pub null', published_label=None)
     create_listing(Session, external_id='present', title='Present pub', published_label='today')
+
     missing_page = client.get('/admin/listings?published=missing').text
     present_page = client.get('/admin/listings?published=present').text
-    assert 'Missing pub' in missing_page and 'Present pub' not in missing_page
-    assert 'Present pub' in present_page and 'Missing pub' not in present_page
+
+    assert 'Missing pub empty' in missing_page
+    assert 'Missing pub null' in missing_page
+    assert 'Present pub' not in missing_page
+
+    assert 'Present pub' in present_page
+    assert 'Missing pub empty' not in present_page
+    assert 'Missing pub null' not in present_page
 
 
 def test_listings_external_link_attrs(monkeypatch):
