@@ -553,8 +553,17 @@ class MonitorService:
         filters: dict | None,
         search_name: str,
     ) -> dict:
-        enrichment_stats = await self._enrich_missing_published_at(cards)
         listing_repo = ListingRepository(db)
+        existing_by_external_id = {
+            card.external_id: listing_repo.get_by_external_id(card.external_id)
+            for card in cards
+        }
+        enrichment_candidates = [
+            card
+            for card in cards
+            if card.published_at is None and existing_by_external_id.get(card.external_id) is None
+        ]
+        enrichment_stats = await self._enrich_missing_published_at(enrichment_candidates)
         alert_repo = AlertRepository(db)
 
         created = 0
@@ -569,7 +578,7 @@ class MonitorService:
 
         for card in cards:
             now = self._now()
-            existing = listing_repo.get_by_external_id(card.external_id)
+            existing = existing_by_external_id.get(card.external_id)
 
             if existing:
                 old_price = existing.price

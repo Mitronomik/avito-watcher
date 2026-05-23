@@ -1730,6 +1730,30 @@ def test_failed_enrichment_keeps_missing_and_rejects_require_published_at(monkey
     run(service, db_session, search)
     monkeypatch.setattr("app.services.monitor_service.settings.scrape_enrich_missing_published_at", True)
     result = run(service, db_session, search)
-    assert result["item_page_publication_enrichment_failed"] == 2
+    assert result["item_page_publication_enrichment_failed"] == 1
     assert result["filtered_by_publication_date"] == 1
     assert result["alerted"] == 0
+
+
+def test_existing_missing_published_at_is_not_enriched_and_does_not_consume_limit(monkeypatch, db_session):
+    calls: list[str] = []
+
+    class Parser(FakeParser):
+        async def fetch_item_publication_label(self, item_url: str):
+            calls.append(item_url)
+            return "17 мая в 11:00"
+
+    search = make_search(db_session, filters_json={"require_published_at": True})
+    parser = Parser([[card("1")], [card("1"), card("2")]])
+    service = MonitorService(parser=parser, scorer=FakeScorer(), notifier=FakeNotifier(), now_func=lambda: datetime(2026, 5, 17, 12, 0, 0))
+
+    run(service, db_session, search)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_enrich_missing_published_at", True)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_item_page_limit_per_run", 1)
+
+    result = run(service, db_session, search)
+
+    assert result["item_page_publication_enrichment_attempted"] == 1
+    assert result["item_page_publication_enrichment_skipped_limit"] == 0
+    assert calls == ["https://www.avito.ru/item_2"]
+
