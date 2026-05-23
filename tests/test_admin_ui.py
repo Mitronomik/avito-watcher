@@ -63,6 +63,28 @@ def test_list_and_new(monkeypatch):
     assert "name='city'" in page
     assert "name='seller'" in page
     assert "name='floor'" in page
+    assert "name='missing_published_at_policy'" in page
+    assert "name='source_sort'" in page
+
+
+def test_create_saves_missing_published_at_policy_and_source_sort(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    resp = client.post(
+        "/admin/searches",
+        data={
+            "name": "policy_job",
+            "source_url": "https://www.avito.ru/a",
+            "poll_interval_sec": "180",
+            "missing_published_at_policy": "allow_when_date_sorted",
+            "source_sort": "date",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    with Session() as s:
+        job = s.query(SearchJob).filter_by(name="policy_job").one()
+        assert job.filters_json["missing_published_at_policy"] == "allow_when_date_sorted"
+        assert job.filters_json["source_sort"] == "date"
 
 
 def test_api_key_query_preserved_in_links_and_forms(monkeypatch):
@@ -170,6 +192,75 @@ def test_edit_form_selects_existing_metadata_values(monkeypatch):
     assert "<option value='murino' selected>murino</option>" in page
     assert "<option value='agency' selected>agency</option>" in page
     assert "<option value='not_first' selected>not_first</option>" in page
+
+
+def test_edit_form_selects_existing_published_at_policy_values(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    with Session() as s:
+        job = SearchJob(
+            name="policy_meta_job",
+            source_url="https://www.avito.ru/spb/kvartiry",
+            poll_interval_sec=180,
+            filters_json={"missing_published_at_policy": "allow_when_date_sorted", "source_sort": "date"},
+        )
+        s.add(job)
+        s.commit()
+        s.refresh(job)
+        job_id = job.id
+    page = client.get(f"/admin/searches/{job_id}/edit").text
+    assert "<option value='allow_when_date_sorted' selected>allow_when_date_sorted</option>" in page
+    assert "<option value='date' selected>date</option>" in page
+
+
+def test_edit_can_clear_published_at_policy_fields(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    with Session() as s:
+        job = SearchJob(
+            name="policy_clear_job",
+            source_url="https://www.avito.ru/spb/kvartiry",
+            poll_interval_sec=180,
+            filters_json={"human_title": "Keep me", "missing_published_at_policy": "allow", "source_sort": "date"},
+        )
+        s.add(job)
+        s.commit()
+        s.refresh(job)
+        job_id = job.id
+    resp = client.post(
+        f"/admin/searches/{job_id}",
+        data={
+            "name": "policy_clear_job",
+            "source_url": "https://www.avito.ru/spb/kvartiry",
+            "poll_interval_sec": "180",
+            "human_title": "Keep me",
+            "missing_published_at_policy": "",
+            "source_sort": "",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    with Session() as s:
+        job = s.get(SearchJob, job_id)
+        assert job.filters_json["human_title"] == "Keep me"
+        assert "missing_published_at_policy" not in job.filters_json
+        assert "source_sort" not in job.filters_json
+
+
+def test_invalid_missing_published_at_policy_validation_error(monkeypatch):
+    client, _ = make_client(monkeypatch)
+    page = client.post(
+        "/admin/searches",
+        data={"name": "invalid_policy", "source_url": "https://www.avito.ru/a", "poll_interval_sec": "1", "missing_published_at_policy": "bad"},
+    ).text
+    assert "missing_published_at_policy must be one of: reject, allow, allow_when_date_sorted" in page
+
+
+def test_invalid_source_sort_validation_error(monkeypatch):
+    client, _ = make_client(monkeypatch)
+    page = client.post(
+        "/admin/searches",
+        data={"name": "invalid_source_sort", "source_url": "https://www.avito.ru/a", "poll_interval_sec": "1", "source_sort": "price"},
+    ).text
+    assert "source_sort must be empty or date" in page
 
 
 @pytest.mark.parametrize(

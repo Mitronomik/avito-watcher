@@ -203,6 +203,8 @@ def _job_form(job=None, error: str = "", return_url: str = "") -> str:
     city_value = str(fv("city", ""))
     seller_value = str(fv("seller", ""))
     floor_value = str(fv("floor", ""))
+    missing_published_at_policy_value = str(fv("missing_published_at_policy", ""))
+    source_sort_value = str(fv("source_sort", ""))
     return f"""{'<div class="error">'+html.escape(error)+'</div>' if error else ''}
 <input type='hidden' name='return_url' value='{html.escape(return_url)}'>
 <div class='section'><h3>Basic</h3>
@@ -216,6 +218,8 @@ def _job_form(job=None, error: str = "", return_url: str = "") -> str:
 <div class='row'><label>Freshness preset<select name='freshness_preset'><option value='custom' {_selected('custom', freshness_preset_value)}>custom</option><option value='12' {_selected("12", freshness_preset_value)}>12 hours</option><option value='24' {_selected("24", freshness_preset_value)}>24 hours</option><option value='48' {_selected("48", freshness_preset_value)}>48 hours</option><option value='72' {_selected("72", freshness_preset_value)}>72 hours</option></select></label></div>
 <div class='row'><label>Freshness, hours<input name='max_age_hours' value='{html.escape(str(fv("max_age_hours", "")))}'></label></div>
 <div class='row checkbox'><label><input type='checkbox' name='require_published_at' {checked_req_pub}> Require publication date</label></div>
+<div class='row'><label>Missing published_at policy<select name='missing_published_at_policy'><option value='' {_selected('', missing_published_at_policy_value)}>empty / default (reject)</option><option value='reject' {_selected('reject', missing_published_at_policy_value)}>reject</option><option value='allow' {_selected('allow', missing_published_at_policy_value)}>allow</option><option value='allow_when_date_sorted' {_selected('allow_when_date_sorted', missing_published_at_policy_value)}>allow_when_date_sorted</option></select></label></div>
+<div class='row'><label>Source sort<select name='source_sort'><option value='' {_selected('', source_sort_value)}>empty / not specified</option><option value='date' {_selected('date', source_sort_value)}>date</option></select></label></div>
 <div class='row'><label>Price from<input name='min_price' value='{html.escape(str(fv("min_price", "")))}'></label></div>
 <div class='row'><label>Price to<input name='max_price' value='{html.escape(str(fv("max_price", "")))}'></label></div>
 <div class='row'><label>Area from<input name='min_area' value='{html.escape(str(fv("min_area", "")))}'></label></div>
@@ -257,6 +261,16 @@ def _extract_filters(form: dict[str, str], require_published_at: bool) -> dict:
     for n in ("profile", "category", "city", "seller", "floor"):
         if form[n].strip():
             out[n] = form[n].strip()
+    missing_published_at_policy = form.get("missing_published_at_policy", "").strip()
+    if missing_published_at_policy:
+        if missing_published_at_policy not in {"reject", "allow", "allow_when_date_sorted"}:
+            raise ValueError("missing_published_at_policy must be one of: reject, allow, allow_when_date_sorted")
+        out["missing_published_at_policy"] = missing_published_at_policy
+    source_sort = form.get("source_sort", "").strip()
+    if source_sort:
+        if source_sort != "date":
+            raise ValueError("source_sort must be empty or date")
+        out["source_sort"] = source_sort
     return out
 
 
@@ -380,7 +394,7 @@ async def create_search(request: Request, db: Session = Depends(get_db)):
     form.setdefault('name', '')
     form.setdefault('source_url', '')
     form.setdefault('poll_interval_sec', '180')
-    for k in ('min_price', 'max_price', 'min_area', 'max_area', 'max_age_hours', 'freshness_preset', 'include_keywords', 'exclude_keywords', 'location_keywords', 'profile', 'category', 'city', 'seller', 'floor'):
+    for k in ('min_price', 'max_price', 'min_area', 'max_area', 'max_age_hours', 'freshness_preset', 'include_keywords', 'exclude_keywords', 'location_keywords', 'profile', 'category', 'city', 'seller', 'floor', 'missing_published_at_policy', 'source_sort'):
         form.setdefault(k, '')
     try:
         name = form['name'].strip()
@@ -429,7 +443,7 @@ async def update_search(search_id: int, request: Request, db: Session = Depends(
     form.setdefault('name', '')
     form.setdefault('source_url', '')
     form.setdefault('poll_interval_sec', '180')
-    for k in ('min_price', 'max_price', 'min_area', 'max_area', 'max_age_hours', 'freshness_preset', 'include_keywords', 'exclude_keywords', 'location_keywords', 'profile', 'category', 'city', 'seller', 'floor'):
+    for k in ('min_price', 'max_price', 'min_area', 'max_area', 'max_age_hours', 'freshness_preset', 'include_keywords', 'exclude_keywords', 'location_keywords', 'profile', 'category', 'city', 'seller', 'floor', 'missing_published_at_policy', 'source_sort'):
         form.setdefault(k, '')
     try:
         name = form['name'].strip()
