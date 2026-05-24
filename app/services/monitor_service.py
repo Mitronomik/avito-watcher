@@ -411,7 +411,7 @@ class MonitorService:
         card: ListingCard,
         message: str,
         payload: dict,
-    ) -> bool:
+    ) -> dict[str, list[str]]:
         notifier_channels = getattr(self.notifier, "channels", [self.notifier])
         channel_names = [ch.channel_name for ch in notifier_channels]
         pending_channels = []
@@ -421,7 +421,7 @@ class MonitorService:
                 pending_channels.append(channel_name)
 
         if not pending_channels:
-            return False
+            return {"attempted": [], "successful": []}
 
         channels = getattr(self.notifier, "channels", [self.notifier])
         if all(hasattr(channel, "send_listing_alert") for channel in channels):
@@ -440,7 +440,7 @@ class MonitorService:
                 except Exception:
                     logger.exception("Alert channel failed", extra={"channel": channel_name})
                     continue
-                if delivered is False:
+                if delivered is not True:
                     continue
                 successful.append(channel_name)
         else:
@@ -453,7 +453,7 @@ class MonitorService:
                 channel=channel_name,
             )
 
-        return bool(successful)
+        return {"attempted": pending_channels, "successful": successful}
 
     async def process_search(self, db: Session, search: SearchJob) -> dict:
         search_repo = SearchRepository(db)
@@ -610,6 +610,11 @@ class MonitorService:
         filtered_samples: list[dict] = []
         publication_missing_allowed_count = 0
         publication_missing_rejected_count = 0
+        configured_channels = [
+            ch.channel_name for ch in getattr(self.notifier, "channels", [self.notifier])
+        ]
+        delivery_attempted_by_channel = {channel: 0 for channel in configured_channels}
+        delivery_success_by_channel = {channel: 0 for channel in configured_channels}
 
         for card in cards:
             now = self._now()
@@ -650,8 +655,16 @@ class MonitorService:
                     continue
 
                 message, payload = retry_context
-                sent = await self._deliver_pending_alerts(alert_repo, card, message, payload)
-                if sent:
+                delivery = await self._deliver_pending_alerts(alert_repo, card, message, payload)
+                for channel in delivery["attempted"]:
+                    delivery_attempted_by_channel[channel] = (
+                        delivery_attempted_by_channel.get(channel, 0) + 1
+                    )
+                for channel in delivery["successful"]:
+                    delivery_success_by_channel[channel] = (
+                        delivery_success_by_channel.get(channel, 0) + 1
+                    )
+                if delivery["successful"]:
                     alerted += 1
 
                 continue
@@ -781,11 +794,27 @@ class MonitorService:
                 tags=llm.get("tags", []),
             )
 
-            sent = await self._deliver_pending_alerts(alert_repo, card, message, payload)
-            if sent:
+            delivery = await self._deliver_pending_alerts(alert_repo, card, message, payload)
+            for channel in delivery["attempted"]:
+                delivery_attempted_by_channel[channel] = (
+                    delivery_attempted_by_channel.get(channel, 0) + 1
+                )
+            for channel in delivery["successful"]:
+                delivery_success_by_channel[channel] = (
+                    delivery_success_by_channel.get(channel, 0) + 1
+                )
+            if delivery["successful"]:
                 alerted += 1
 
         filtered = filtered_by_rules + filtered_by_publication_date
+        delivery_unsuccessful_by_channel = {
+            channel: max(
+                0,
+                delivery_attempted_by_channel.get(channel, 0)
+                - delivery_success_by_channel.get(channel, 0),
+            )
+            for channel in configured_channels
+        }
         return {
             **enrichment_stats,
             "created": created,
@@ -799,6 +828,9 @@ class MonitorService:
             "filtered_samples": filtered_samples,
             "publication_missing_allowed_count": publication_missing_allowed_count,
             "publication_missing_rejected_count": publication_missing_rejected_count,
+            "delivery_attempted_by_channel": delivery_attempted_by_channel,
+            "delivery_success_by_channel": delivery_success_by_channel,
+            "delivery_unsuccessful_by_channel": delivery_unsuccessful_by_channel,
         }
 
     def run_once(self, search_job_id: int) -> dict:
