@@ -865,6 +865,137 @@ def test_timeout_with_retry_still_fails_if_second_attempt_fails(monkeypatch):
     assert stats["timeout_failure_count"] == 2
 
 
+def test_timeout_retry_success_does_not_report_proxy_failure_or_quarantine(monkeypatch):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_allowed_engines", "camoufox")
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_timeout_retry_once", True)
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_timeout_retry_delay_ms", 0)
+    parser = AvitoParser(preferred_engine="camoufox")
+    try_engine = AsyncMock(
+        side_effect=[
+            {"ok": False, "error_type": "timeout", "error": "t"},
+            {"ok": True, "html": "<html>ok</html>"},
+        ]
+    )
+
+    class ProxyStub:
+        def __init__(self):
+            self.report_failure_calls = 0
+            self.report_success_calls = 0
+
+        def get_proxy(self):
+            return "http://proxy-1"
+
+        def report_failure(self, _proxy):
+            self.report_failure_calls += 1
+
+        def report_success(self, _proxy):
+            self.report_success_calls += 1
+
+        def stats(self):
+            return {"quarantine_events": 0}
+
+    proxy = ProxyStub()
+    parser._proxy_manager = proxy
+    with patch.object(parser, "_try_engine", new=try_engine):
+        html = asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+    assert html == "<html>ok</html>"
+    assert len(try_engine.await_args_list) == 2
+    assert proxy.report_failure_calls == 0
+    assert proxy.report_success_calls == 1
+    stats = parser.cycle_stats()
+    assert stats["proxy_quarantine_on_failure_count"] == 0
+    assert stats["proxy_failure_count"] == 0
+
+
+def test_timeout_retry_final_failure_reports_proxy_failure_once_and_quarantine_once(monkeypatch):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_allowed_engines", "camoufox")
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_timeout_retry_once", True)
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_timeout_retry_delay_ms", 0)
+    parser = AvitoParser(preferred_engine="camoufox")
+    try_engine = AsyncMock(
+        side_effect=[
+            {"ok": False, "error_type": "timeout", "error": "t1"},
+            {"ok": False, "error_type": "timeout", "error": "t2"},
+        ]
+    )
+
+    class ProxyStub:
+        def __init__(self):
+            self.report_failure_calls = 0
+            self.events = 0
+
+        def get_proxy(self):
+            return "http://proxy-1"
+
+        def report_failure(self, _proxy):
+            self.report_failure_calls += 1
+            self.events += 1
+
+        def report_success(self, _proxy):
+            return None
+
+        def stats(self):
+            return {"quarantine_events": self.events}
+
+    proxy = ProxyStub()
+    parser._proxy_manager = proxy
+    with patch.object(parser, "_try_engine", new=try_engine):
+        with pytest.raises(ParserError):
+            asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+    assert proxy.report_failure_calls == 1
+    stats = parser.cycle_stats()
+    assert stats["proxy_failure_count"] == 1
+    assert stats["proxy_quarantine_on_failure_count"] == 1
+
+
+def test_timeout_without_retry_reports_proxy_failure_once(monkeypatch):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_allowed_engines", "camoufox")
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_timeout_retry_once", False)
+    parser = AvitoParser(preferred_engine="camoufox")
+    try_engine = AsyncMock(return_value={"ok": False, "error_type": "timeout", "error": "t"})
+
+    class ProxyStub:
+        def __init__(self):
+            self.report_failure_calls = 0
+
+        def get_proxy(self):
+            return "http://proxy-1"
+
+        def report_failure(self, _proxy):
+            self.report_failure_calls += 1
+
+        def report_success(self, _proxy):
+            return None
+
+        def stats(self):
+            return {"quarantine_events": 0}
+
+    proxy = ProxyStub()
+    parser._proxy_manager = proxy
+    with patch.object(parser, "_try_engine", new=try_engine):
+        with pytest.raises(ParserError):
+            asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+    assert proxy.report_failure_calls == 1
+
+
+def test_timeout_retry_attempted_log_true_when_second_failure_not_timeout(monkeypatch, caplog):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_allowed_engines", "camoufox")
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_timeout_retry_once", True)
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_timeout_retry_delay_ms", 0)
+    parser = AvitoParser(preferred_engine="camoufox")
+    try_engine = AsyncMock(
+        side_effect=[
+            {"ok": False, "error_type": "timeout", "error": "t"},
+            {"ok": False, "error_type": "exception", "error": "boom"},
+        ]
+    )
+    caplog.set_level("WARNING")
+    with patch.object(parser, "_try_engine", new=try_engine):
+        with pytest.raises(ParserError):
+            asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+    assert "timeout_retry_attempted=True" in caplog.text
+
+
 def test_preferred_engine_outside_allowed_set_falls_back_to_first_allowed(monkeypatch):
     monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_allowed_engines", "nodriver")
     parser = AvitoParser(preferred_engine="camoufox")

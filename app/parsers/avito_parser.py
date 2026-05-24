@@ -341,6 +341,7 @@ class AvitoParser:
 
         retry_on_timeout = bool(settings.scrape_timeout_retry_once)
         retry_delay_ms = max(int(settings.scrape_timeout_retry_delay_ms), 0)
+        timeout_retry_attempted = False
 
         # First attempt
         start_engine = self._choose_start_engine(proxy_url)
@@ -350,6 +351,7 @@ class AvitoParser:
         if result.get("error_type") == "timeout":
             self._cycle_counters.timeout_failure_count += 1
             if retry_on_timeout:
+                timeout_retry_attempted = True
                 self._cycle_counters.timeout_retry_attempt_count += 1
                 if retry_delay_ms > 0:
                     await asyncio.sleep(retry_delay_ms / 1000.0)
@@ -375,7 +377,7 @@ class AvitoParser:
             result.get("error_type"),
             ",".join(engine.value for engine in allowed_engines),
             bool(fallback),
-            bool(retry_on_timeout and result.get("error_type") == "timeout"),
+            timeout_retry_attempted,
         )
         if result.get("error_type") == "possible_captcha_or_block":
             self._cycle_counters.block_detected_count += 1
