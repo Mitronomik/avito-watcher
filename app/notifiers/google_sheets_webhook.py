@@ -64,7 +64,27 @@ class GoogleSheetsWebhookNotifier:
             try:
                 data = response.json()
             except ValueError:
-                return
+                logger.warning(
+                    "Google Sheets webhook returned non-JSON response status=%s content_type=%s",
+                    response.status_code,
+                    response.headers.get("content-type", ""),
+                )
+                return False
+
+            if isinstance(data, dict) and data.get("ok") is True:
+                return True
 
             if isinstance(data, dict) and data.get("ok") is False:
-                raise RuntimeError("Google Sheets webhook responded with ok=false")
+                logger.warning(
+                    "Google Sheets webhook responded with ok=false error=%s",
+                    data.get("error"),
+                )
+                return False
+
+            safe_keys = sorted(data.keys()) if isinstance(data, dict) else [type(data).__name__]
+            logger.warning(
+                "Google Sheets webhook returned unexpected JSON response status=%s keys=%s",
+                response.status_code,
+                safe_keys,
+            )
+            return False

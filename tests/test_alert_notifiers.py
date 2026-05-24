@@ -95,6 +95,24 @@ def test_composite_continues_when_one_channel_fails():
     assert sent == ["jsonl"]
 
 
+def test_composite_skips_channels_returning_false():
+    class FalseChannel:
+        channel_name = "google_sheets"
+
+        async def send_listing_alert(self, message: str, payload: dict):
+            return False
+
+    class Ok:
+        channel_name = "jsonl"
+
+        async def send_listing_alert(self, message: str, payload: dict):
+            return True
+
+    notifier = CompositeNotifier([FalseChannel(), Ok()])
+    sent = asyncio.run(notifier.send_listing_alert("msg", {"token": "secret"}))
+    assert sent == ["jsonl"]
+
+
 def test_google_sheets_webhook_noop_when_disabled():
     notifier = GoogleSheetsWebhookNotifier(enabled=False, webhook_url="https://example.com")
     asyncio.run(notifier.send_listing_alert("hello", {}))
@@ -125,13 +143,14 @@ def test_google_sheets_webhook_posts_expected_json(monkeypatch):
         timeout_sec=5,
     )
     payload = {"search_name": "s", "external_id": "1", "title": "T", "price": 10, "area_m2": 20, "rooms": "2", "address": "A", "published_label": "today", "published_at": "2025-01-01T00:00:00", "url": "u", "summary": "sum", "score": 90, "tags": ["hot"]}
-    asyncio.run(notifier.send_listing_alert("msg", payload))
+    sent = asyncio.run(notifier.send_listing_alert("msg", payload))
 
     assert captured["url"] == "https://example.com/webhook"
     assert captured["body"]["secret"] == "top"
     assert captured["body"]["external_id"] == "1"
     assert captured["body"]["message"] == "msg"
     assert "sent_at" in captured["body"]
+    assert sent is True
 
 
 def test_google_sheets_webhook_raises_on_non_2xx(monkeypatch):
@@ -153,9 +172,9 @@ def test_google_sheets_webhook_raises_on_non_2xx(monkeypatch):
         asyncio.run(notifier.send_listing_alert("msg", {}))
 
 
-def test_google_sheets_webhook_raises_on_ok_false(monkeypatch):
+def test_google_sheets_webhook_ok_false_returns_false_and_logs_warning(monkeypatch, caplog):
     async def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"ok": False})
+        return httpx.Response(200, json={"ok": False, "error": "Unauthorized"})
 
     transport = httpx.MockTransport(handler)
 
@@ -167,9 +186,59 @@ def test_google_sheets_webhook_raises_on_ok_false(monkeypatch):
     import app.notifiers.google_sheets_webhook as module
 
     monkeypatch.setattr(module.httpx, "AsyncClient", FakeClient)
-    notifier = GoogleSheetsWebhookNotifier(enabled=True, webhook_url="https://example.com")
-    with pytest.raises(RuntimeError, match="ok=false"):
-        asyncio.run(notifier.send_listing_alert("msg", {}))
+    notifier = GoogleSheetsWebhookNotifier(
+        enabled=True,
+        webhook_url="https://example.com",
+        secret="webhook-secret",
+    )
+    with caplog.at_level("WARNING"):
+        sent = asyncio.run(notifier.send_listing_alert("msg", {"password": "hidden"}))
+
+    assert sent is False
+    assert "ok=false" in caplog.text
+    assert "Unauthorized" in caplog.text
+    assert "webhook-secret" not in caplog.text
+    assert "hidden" not in caplog.text
+
+
+def test_google_sheets_webhook_non_json_returns_false_and_logs_compact_warning(monkeypatch, caplog):
+    html_body = "<html><body>Drive Error secret=abc123 password=hidden</body></html>"
+    payload = {"password": "smtp-password", "api_key": "payload-secret-value"}
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=html_body,
+            headers={"content-type": "text/html; charset=utf-8"},
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    class FakeClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    import app.notifiers.google_sheets_webhook as module
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", FakeClient)
+    notifier = GoogleSheetsWebhookNotifier(
+        enabled=True,
+        webhook_url="https://example.com",
+        secret="webhook-secret",
+    )
+    with caplog.at_level("WARNING"):
+        sent = asyncio.run(notifier.send_listing_alert("msg", payload))
+
+    assert sent is False
+    assert "non-JSON" in caplog.text
+    assert "status=200" in caplog.text
+    assert "text/html" in caplog.text
+    assert "<html" not in caplog.text
+    assert "Drive Error" not in caplog.text
+    assert "webhook-secret" not in caplog.text
+    assert "smtp-password" not in caplog.text
+    assert "payload-secret-value" not in caplog.text
 
 
 def test_composite_does_not_mark_google_sheets_success_when_disabled():
