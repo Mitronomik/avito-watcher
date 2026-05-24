@@ -95,6 +95,24 @@ def test_composite_continues_when_one_channel_fails():
     assert sent == ["jsonl"]
 
 
+def test_composite_skips_channels_returning_false():
+    class FalseChannel:
+        channel_name = "google_sheets"
+
+        async def send_listing_alert(self, message: str, payload: dict):
+            return False
+
+    class Ok:
+        channel_name = "jsonl"
+
+        async def send_listing_alert(self, message: str, payload: dict):
+            return True
+
+    notifier = CompositeNotifier([FalseChannel(), Ok()])
+    sent = asyncio.run(notifier.send_listing_alert("msg", {"token": "secret"}))
+    assert sent == ["jsonl"]
+
+
 def test_google_sheets_webhook_noop_when_disabled():
     notifier = GoogleSheetsWebhookNotifier(enabled=False, webhook_url="https://example.com")
     asyncio.run(notifier.send_listing_alert("hello", {}))
@@ -185,6 +203,7 @@ def test_google_sheets_webhook_ok_false_returns_false_and_logs_warning(monkeypat
 
 def test_google_sheets_webhook_non_json_returns_false_and_logs_compact_warning(monkeypatch, caplog):
     html_body = "<html><body>Drive Error secret=abc123 password=hidden</body></html>"
+    payload = {"password": "smtp-password", "api_key": "payload-secret-value"}
 
     async def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -209,14 +228,17 @@ def test_google_sheets_webhook_non_json_returns_false_and_logs_compact_warning(m
         secret="webhook-secret",
     )
     with caplog.at_level("WARNING"):
-        sent = asyncio.run(notifier.send_listing_alert("msg", {"password": "hidden"}))
+        sent = asyncio.run(notifier.send_listing_alert("msg", payload))
 
     assert sent is False
     assert "non-JSON" in caplog.text
+    assert "status=200" in caplog.text
     assert "text/html" in caplog.text
-    assert html_body not in caplog.text
+    assert "<html" not in caplog.text
+    assert "Drive Error" not in caplog.text
     assert "webhook-secret" not in caplog.text
-    assert "hidden" not in caplog.text
+    assert "smtp-password" not in caplog.text
+    assert "payload-secret-value" not in caplog.text
 
 
 def test_composite_does_not_mark_google_sheets_success_when_disabled():
