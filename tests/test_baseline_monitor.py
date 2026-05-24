@@ -1414,6 +1414,9 @@ def test_delivery_summary_counts_all_configured_channels_success(db_session):
         "google_sheets": 0,
         "email": 0,
     }
+    assert result["delivery_skipped_by_channel"] == {"jsonl": 0, "google_sheets": 0, "email": 0}
+    assert result["delivery_failed_by_channel"] == {"jsonl": 0, "google_sheets": 0, "email": 0}
+    assert result["delivery_unknown_by_channel"] == {"jsonl": 0, "google_sheets": 0, "email": 0}
 
 
 def test_delivery_summary_counts_false_channel_as_unsuccessful(db_session):
@@ -1440,6 +1443,9 @@ def test_delivery_summary_counts_false_channel_as_unsuccessful(db_session):
     result = run(service, db_session, search)
 
     assert result["delivery_success_by_channel"]["google_sheets"] == 0
+    assert result["delivery_skipped_by_channel"]["google_sheets"] == 1
+    assert result["delivery_failed_by_channel"]["google_sheets"] == 0
+    assert result["delivery_unknown_by_channel"]["google_sheets"] == 0
     assert result["delivery_unsuccessful_by_channel"]["google_sheets"] == 1
     assert result["alerted"] == 1
 
@@ -1472,6 +1478,9 @@ def test_delivery_summary_counts_exception_channel_as_unsuccessful(db_session):
     result = run(service, db_session, search)
 
     assert result["delivery_success_by_channel"] == {"jsonl": 1, "google_sheets": 0}
+    assert result["delivery_skipped_by_channel"] == {"jsonl": 0, "google_sheets": 0}
+    assert result["delivery_failed_by_channel"] == {"jsonl": 0, "google_sheets": 1}
+    assert result["delivery_unknown_by_channel"] == {"jsonl": 0, "google_sheets": 0}
     assert result["delivery_unsuccessful_by_channel"] == {"jsonl": 0, "google_sheets": 1}
     assert result["alerted"] == 1
 
@@ -1490,7 +1499,41 @@ def test_delivery_summary_zero_when_no_alerts_sent(db_session):
     assert result["alerted"] == 0
     assert result["delivery_attempted_by_channel"] == {"telegram": 0}
     assert result["delivery_success_by_channel"] == {"telegram": 0}
+    assert result["delivery_skipped_by_channel"] == {"telegram": 0}
+    assert result["delivery_failed_by_channel"] == {"telegram": 0}
+    assert result["delivery_unknown_by_channel"] == {"telegram": 0}
     assert result["delivery_unsuccessful_by_channel"] == {"telegram": 0}
+
+
+def test_delivery_summary_counts_none_channel_as_unknown(db_session):
+    class Channel:
+        def __init__(self, name: str, result):
+            self.channel_name = name
+            self._result = result
+
+        async def send_listing_alert(self, message: str, payload: dict | None = None):
+            return self._result
+
+    class MultiNotifier:
+        def __init__(self):
+            self.channels = [Channel("jsonl", True), Channel("google_sheets", None)]
+
+    search = make_search(db_session)
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=MultiNotifier(),
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["delivery_success_by_channel"] == {"jsonl": 1, "google_sheets": 0}
+    assert result["delivery_skipped_by_channel"] == {"jsonl": 0, "google_sheets": 0}
+    assert result["delivery_failed_by_channel"] == {"jsonl": 0, "google_sheets": 0}
+    assert result["delivery_unknown_by_channel"] == {"jsonl": 0, "google_sheets": 1}
+    assert result["delivery_unsuccessful_by_channel"] == {"jsonl": 0, "google_sheets": 1}
+    assert result["alerted"] == 1
 
 
 def test_existing_listing_retries_google_sheets_after_previous_failure(db_session):
