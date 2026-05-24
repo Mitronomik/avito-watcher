@@ -350,6 +350,14 @@ def test_serp_fallback_parses_preloaded_state_catalog_items():
     assert cards[0].rooms == "1-к."
     assert cards[0].address.startswith("Санкт-Петербург")
     assert cards[0].published_at is None
+    stats = parser.cycle_stats()
+    assert stats["serp_state_fallback_attempted"] is True
+    assert stats["serp_state_fallback_succeeded"] is True
+    assert stats["serp_state_fallback_card_count"] == 1
+    assert stats["serp_link_fallback_attempted"] is False
+    assert stats["serp_link_fallback_succeeded"] is False
+    assert stats["serp_link_fallback_card_count"] == 0
+    assert stats["layout_changed_hint"] == "preloaded_state_with_listing_items"
 
 
 def test_serp_fallback_parses_millisecond_timestamp_to_sane_utc_datetime():
@@ -406,6 +414,163 @@ def test_layout_changed_when_no_state_and_no_links():
         with pytest.raises(ParserError) as exc_info:
             asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry"))
     assert exc_info.value.error_type == ParserErrorType.LAYOUT_CHANGED
+
+
+def test_cycle_stats_defaults_include_zero_serp_fallback_counters():
+    parser = AvitoParser()
+    stats = parser.cycle_stats()
+    assert stats["serp_state_fallback_attempted"] is False
+    assert stats["serp_state_fallback_succeeded"] is False
+    assert stats["serp_state_fallback_card_count"] == 0
+    assert stats["serp_link_fallback_attempted"] is False
+    assert stats["serp_link_fallback_succeeded"] is False
+    assert stats["serp_link_fallback_card_count"] == 0
+    assert stats["layout_changed_hint"] is None
+
+
+def test_serp_link_fallback_increments_own_counters():
+    parser = AvitoParser()
+    html = "<html><head><title>Авито</title></head><body>fallback</body></html>"
+    fallback_cards = [
+        ListingCard(
+            external_id="8085355489",
+            url="https://www.avito.ru/sankt-peterburg/kvartiry/aaa_8085355489",
+            title="",
+            price=None,
+            address="",
+            area_m2=None,
+            rooms="",
+            published_label="",
+            published_at=None,
+            raw={"source": "serp_listing_links", "position": 0},
+        )
+    ]
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(AvitoParser, "_extract_cards_from_catalog_items", classmethod(lambda cls, _html: []))
+    monkeypatch.setattr(AvitoParser, "_extract_cards_from_listing_links", classmethod(lambda cls, _html: fallback_cards))
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        cards = asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+    monkeypatch.undo()
+    assert len(cards) == 1
+    stats = parser.cycle_stats()
+    assert stats["serp_state_fallback_attempted"] is True
+    assert stats["serp_state_fallback_succeeded"] is False
+    assert stats["serp_state_fallback_card_count"] == 0
+    assert stats["serp_link_fallback_attempted"] is True
+    assert stats["serp_link_fallback_succeeded"] is True
+    assert stats["serp_link_fallback_card_count"] == 1
+
+
+def test_primary_dom_path_keeps_serp_fallback_counters_zero():
+    parser = AvitoParser()
+    html = (
+        "<html><head><title>Авито</title></head><body>"
+        "<div data-marker='item'><a href='/sankt-peterburg/kvartiry/test_8085355489'><h3>1-к. квартира, 40 м²</h3></a></div>"
+        "</body></html>"
+    )
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        cards = asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+    assert len(cards) == 1
+    stats = parser.cycle_stats()
+    assert stats["serp_state_fallback_attempted"] is False
+    assert stats["serp_state_fallback_succeeded"] is False
+    assert stats["serp_state_fallback_card_count"] == 0
+    assert stats["serp_link_fallback_attempted"] is False
+    assert stats["serp_link_fallback_succeeded"] is False
+    assert stats["serp_link_fallback_card_count"] == 0
+
+
+def test_serp_fallback_stats_are_sticky_when_followed_by_primary_dom_page():
+    parser = AvitoParser()
+    parser._apply_serp_fallback_diagnostics_to_cycle(
+        {
+            "serp_state_fallback_attempted": True,
+            "serp_state_fallback_succeeded": True,
+            "serp_state_fallback_card_count": 2,
+            "serp_link_fallback_attempted": False,
+            "serp_link_fallback_succeeded": False,
+            "serp_link_fallback_card_count": 0,
+            "layout_changed_hint": "preloaded_state_with_listing_items",
+        }
+    )
+    parser._apply_serp_fallback_diagnostics_to_cycle(
+        {
+            "serp_state_fallback_attempted": False,
+            "serp_state_fallback_succeeded": False,
+            "serp_state_fallback_card_count": 0,
+            "serp_link_fallback_attempted": False,
+            "serp_link_fallback_succeeded": False,
+            "serp_link_fallback_card_count": 0,
+            "layout_changed_hint": "plain_layout_changed",
+        }
+    )
+    stats = parser.cycle_stats()
+    assert stats["serp_state_fallback_attempted"] is True
+    assert stats["serp_state_fallback_succeeded"] is True
+    assert stats["serp_state_fallback_card_count"] == 2
+    assert stats["serp_link_fallback_attempted"] is False
+    assert stats["serp_link_fallback_succeeded"] is False
+    assert stats["serp_link_fallback_card_count"] == 0
+    assert stats["layout_changed_hint"] == "preloaded_state_with_listing_items"
+
+
+def test_serp_fallback_card_counts_accumulate_across_pages():
+    parser = AvitoParser()
+    parser._apply_serp_fallback_diagnostics_to_cycle(
+        {
+            "serp_state_fallback_attempted": True,
+            "serp_state_fallback_succeeded": True,
+            "serp_state_fallback_card_count": 1,
+            "serp_link_fallback_attempted": True,
+            "serp_link_fallback_succeeded": True,
+            "serp_link_fallback_card_count": 2,
+            "layout_changed_hint": "preloaded_state_with_listing_items",
+        }
+    )
+    parser._apply_serp_fallback_diagnostics_to_cycle(
+        {
+            "serp_state_fallback_attempted": True,
+            "serp_state_fallback_succeeded": True,
+            "serp_state_fallback_card_count": 3,
+            "serp_link_fallback_attempted": True,
+            "serp_link_fallback_succeeded": True,
+            "serp_link_fallback_card_count": 4,
+            "layout_changed_hint": "listing_links_without_card_markers",
+        }
+    )
+    stats = parser.cycle_stats()
+    assert stats["serp_state_fallback_card_count"] == 4
+    assert stats["serp_link_fallback_card_count"] == 6
+    assert stats["serp_state_fallback_attempted"] is True
+    assert stats["serp_state_fallback_succeeded"] is True
+    assert stats["serp_link_fallback_attempted"] is True
+    assert stats["serp_link_fallback_succeeded"] is True
+    assert stats["layout_changed_hint"] == "preloaded_state_with_listing_items"
+
+
+def test_fetch_parse_path_keeps_first_meaningful_layout_changed_hint_across_pages():
+    parser = AvitoParser()
+    page1 = _state_html("""[
+      {"type":"item","id":8085355489,"urlPath":"/sankt-peterburg/kvartiry/1-k._kvartira_40_m_14_et._8085355489","title":"1-к. квартира, 40 м²"}
+    ]""")
+    page2 = (
+        "<html><head><title>Авито</title></head><body>"
+        "<div data-marker='item'><a href='/sankt-peterburg/kvartiry/test_8085355490'><h3>1-к. квартира, 41 м²</h3></a></div>"
+        "</body></html>"
+    )
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(side_effect=[page1, page2])):
+        asyncio.run(parser.begin_cycle())
+        try:
+            cards1 = asyncio.run(parser._fetch_and_parse_page_cards("https://www.avito.ru/sankt-peterburg/kvartiry", 30))
+            cards2 = asyncio.run(parser._fetch_and_parse_page_cards("https://www.avito.ru/sankt-peterburg/kvartiry?p=2", 30))
+        finally:
+            asyncio.run(parser.end_cycle())
+    assert len(cards1) == 1
+    assert len(cards2) == 1
+    stats = parser.cycle_stats()
+    assert stats["layout_changed_hint"] == "preloaded_state_with_listing_items"
+    assert stats["serp_state_fallback_attempted"] is True
+    assert stats["serp_state_fallback_card_count"] == 1
 
 
 def test_fetch_page_html_cycle_mode_evicts_broken_cached_session_and_falls_back(caplog):
