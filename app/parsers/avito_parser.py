@@ -129,6 +129,13 @@ class _CycleCounters:
     selected_first_engine: str | None = None
     engine_selection_changed_by_health_memory: bool = False
     fallback_used: bool = False
+    serp_state_fallback_attempted: bool = False
+    serp_state_fallback_succeeded: bool = False
+    serp_state_fallback_card_count: int = 0
+    serp_link_fallback_attempted: bool = False
+    serp_link_fallback_succeeded: bool = False
+    serp_link_fallback_card_count: int = 0
+    layout_changed_hint: str | None = None
 
     def as_dict(self) -> dict[str, int | str | None]:
         return {
@@ -147,6 +154,13 @@ class _CycleCounters:
             "selected_first_engine": self.selected_first_engine,
             "engine_selection_changed_by_health_memory": self.engine_selection_changed_by_health_memory,
             "fallback_used": self.fallback_used,
+            "serp_state_fallback_attempted": self.serp_state_fallback_attempted,
+            "serp_state_fallback_succeeded": self.serp_state_fallback_succeeded,
+            "serp_state_fallback_card_count": self.serp_state_fallback_card_count,
+            "serp_link_fallback_attempted": self.serp_link_fallback_attempted,
+            "serp_link_fallback_succeeded": self.serp_link_fallback_succeeded,
+            "serp_link_fallback_card_count": self.serp_link_fallback_card_count,
+            "layout_changed_hint": self.layout_changed_hint,
         }
 
 
@@ -465,10 +479,12 @@ class AvitoParser:
         raw_cards = soup.select(CARD_SELECTOR)
         fallback_cards: list[ListingCard] = []
         fallback_diag = self._build_fallback_diagnostics(soup=soup, page_html=page_html)
+        self._cycle_counters.layout_changed_hint = fallback_diag.get("layout_changed_hint")
         if not raw_cards:
             fallback_cards = self._parse_cards_from_serp_fallback(
                 soup=soup, page_html=page_html, diagnostics=fallback_diag
             )
+        self._apply_serp_fallback_diagnostics_to_cycle(fallback_diag)
 
         if self._looks_like_captcha_or_block(title, body_text) and not (
             fallback_diag["has_catalog_items_state"] or fallback_diag["has_listing_links_without_card_markers"]
@@ -539,6 +555,17 @@ class AvitoParser:
             )
 
         return result
+
+    def _apply_serp_fallback_diagnostics_to_cycle(self, diagnostics: dict) -> None:
+        self._cycle_counters.serp_state_fallback_attempted = bool(diagnostics.get("serp_state_fallback_attempted", False))
+        self._cycle_counters.serp_state_fallback_succeeded = bool(diagnostics.get("serp_state_fallback_succeeded", False))
+        self._cycle_counters.serp_state_fallback_card_count = int(diagnostics.get("serp_state_fallback_card_count", 0))
+        self._cycle_counters.serp_link_fallback_attempted = bool(diagnostics.get("serp_link_fallback_attempted", False))
+        self._cycle_counters.serp_link_fallback_succeeded = bool(diagnostics.get("serp_link_fallback_succeeded", False))
+        self._cycle_counters.serp_link_fallback_card_count = int(diagnostics.get("serp_link_fallback_card_count", 0))
+        layout_changed_hint = diagnostics.get("layout_changed_hint")
+        if layout_changed_hint:
+            self._cycle_counters.layout_changed_hint = str(layout_changed_hint)
 
     def _maybe_dump_layout_changed_html(
         self, search_url: str, page_html: str, title: str, body_text: str, diagnostics: dict | None = None
