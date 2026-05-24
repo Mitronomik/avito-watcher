@@ -478,12 +478,13 @@ class AvitoParser:
 
         raw_cards = soup.select(CARD_SELECTOR)
         fallback_cards: list[ListingCard] = []
-        fallback_diag = self._build_fallback_diagnostics(soup=soup, page_html=page_html)
+        fallback_diag: dict = {}
         if not raw_cards:
+            fallback_diag = self._build_fallback_diagnostics(soup=soup, page_html=page_html)
             fallback_cards = self._parse_cards_from_serp_fallback(
                 soup=soup, page_html=page_html, diagnostics=fallback_diag
             )
-        self._apply_serp_fallback_diagnostics_to_cycle(fallback_diag)
+            self._apply_serp_fallback_diagnostics_to_cycle(fallback_diag)
 
         if self._looks_like_captcha_or_block(title, body_text) and not (
             fallback_diag["has_catalog_items_state"] or fallback_diag["has_listing_links_without_card_markers"]
