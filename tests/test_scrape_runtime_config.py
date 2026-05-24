@@ -38,6 +38,12 @@ def test_proxy_quarantine_seconds_default():
     assert settings.proxy_quarantine_seconds == 7200
 
 
+
+
+def test_scoring_enabled_default_true():
+    settings = Settings(database_url="sqlite:///tmp.db", _env_file=None)
+    assert settings.scoring_enabled is True
+
 def test_scrape_preferred_engine_invalid_value_fails_clearly(monkeypatch):
     monkeypatch.setenv("SCRAPE_PREFERRED_ENGINE", "bad")
     with pytest.raises(Exception) as exc_info:
