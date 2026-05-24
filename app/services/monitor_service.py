@@ -18,6 +18,7 @@ from app.notifiers.google_sheets_webhook import GoogleSheetsWebhookNotifier
 from app.notifiers.jsonl_outbox import JsonlOutboxNotifier
 from app.notifiers.telegram import TelegramNotifier
 from app.parsers.avito_parser import AvitoParser
+from app.parsers.errors import ParserError, ParserErrorType
 from app.parsers.schemas import ListingCard
 from app.repositories.alert_repository import AlertRepository
 from app.repositories.listing_repository import ListingRepository
@@ -51,6 +52,11 @@ PARSER_DIAGNOSTIC_KEYS = (
     "serp_link_fallback_card_count",
     "layout_changed_hint",
 )
+
+TRANSIENT_PARSER_ERROR_TYPES = {
+    ParserErrorType.PROXY_UNAVAILABLE,
+    ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK,
+}
 
 
 def _as_float(value: object) -> float | None:
@@ -97,6 +103,20 @@ def runtime_diagnostics() -> dict:
         "scrape_debug_dump_dir": settings.scrape_debug_dump_dir,
         "scrape_debug_dump_max_bytes": settings.scrape_debug_dump_max_bytes,
     }
+
+
+def _classify_transient_parser_error(exc: Exception) -> str | None:
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if not isinstance(exc, ParserError):
+        return None
+    if exc.error_type == ParserErrorType.PROXY_UNAVAILABLE:
+        return "proxy_unavailable"
+    if exc.error_type != ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK:
+        return None
+    if "timeout" in str(exc).lower():
+        return "possible_captcha_or_block_timeout"
+    return None
 
 
 def passes_rule_filters(card: ListingCard, filters: dict | None) -> bool:
@@ -823,6 +843,9 @@ class MonitorService:
         end_cycle = getattr(self.parser, "end_cycle", None)
         cycle_started = False
         searches_processed = 0
+        transient_parser_failures = 0
+        proxy_quarantine_waits = 0
+        last_transient_error_type: str | None = None
         if begin_cycle is not None:
             await begin_cycle()
             cycle_started = True
@@ -836,6 +859,12 @@ class MonitorService:
                     try:
                         result = await self.process_search(db, search)
                     except Exception as exc:
+                        transient_error_type = _classify_transient_parser_error(exc)
+                        if transient_error_type is not None:
+                            transient_parser_failures += 1
+                            last_transient_error_type = transient_error_type
+                            if transient_error_type == "proxy_unavailable":
+                                proxy_quarantine_waits += 1
                         error_type = getattr(exc, "error_type", None)
                         logger.exception(
                             "search check failed",
@@ -855,9 +884,15 @@ class MonitorService:
                             "error": str(exc),
                             "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
                             "parser_stats": self._parser_stats_snapshot(),
+                            "transient_parser_failures": transient_parser_failures,
+                            "proxy_quarantine_waits": proxy_quarantine_waits,
+                            "last_transient_error_type": last_transient_error_type,
                         }
                     else:
                         result["search"] = search.name
+                        result["transient_parser_failures"] = transient_parser_failures
+                        result["proxy_quarantine_waits"] = proxy_quarantine_waits
+                        result["last_transient_error_type"] = last_transient_error_type
                     results.append(result)
                     searches_processed += 1
                 return results
@@ -869,7 +904,7 @@ class MonitorService:
             if callable(cycle_stats_fn):
                 parser_cycle_stats = cycle_stats_fn()
             logger.info(
-                "monitor_service.cycle_summary searches_processed=%s preferred_engine=%s selected_first_engine=%s fallback_used=%s engine_skip_recent_failure_count=%s sessions_opened=%s sessions_reused=%s fallbacks=%s blocks=%s engine_errors=%s proxy_failures=%s evictions=%s close_failures=%s",
+                "monitor_service.cycle_summary searches_processed=%s preferred_engine=%s selected_first_engine=%s fallback_used=%s engine_skip_recent_failure_count=%s sessions_opened=%s sessions_reused=%s fallbacks=%s blocks=%s engine_errors=%s proxy_failures=%s evictions=%s close_failures=%s transient_parser_failures=%s proxy_quarantine_waits=%s last_transient_error_type=%s",
                 searches_processed,
                 parser_cycle_stats.get("preferred_engine"),
                 parser_cycle_stats.get("selected_first_engine"),
@@ -883,4 +918,7 @@ class MonitorService:
                 parser_cycle_stats.get("proxy_failure_count", 0),
                 parser_cycle_stats.get("session_evict_count", 0),
                 parser_cycle_stats.get("session_close_failure_count", 0),
+                transient_parser_failures,
+                proxy_quarantine_waits,
+                last_transient_error_type,
             )

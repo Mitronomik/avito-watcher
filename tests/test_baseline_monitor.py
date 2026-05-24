@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from app.models.alert_sent import AlertSent
 from app.models.listing import Listing
 from app.models.listing_snapshot import ListingSnapshot
+from app.parsers.errors import ParserError, ParserErrorType
 from app.parsers.schemas import ListingCard
 from app.repositories.search_repository import SearchRepository
 from app.services.monitor_service import MonitorService, runtime_diagnostics
@@ -570,6 +571,91 @@ def test_run_all_searches_failure_log_includes_structured_search_context(
     assert source_url_preview == source_url[:220]
     assert len(source_url_preview) == 220
     assert getattr(record, "last_error", None) == "parser failed"
+
+
+def test_transient_parser_failure_then_success_clears_last_error_without_duplicate_alerts(
+    monkeypatch, db_session
+):
+    search = make_search(db_session)
+    search.baseline_initialized = True
+    db_session.commit()
+    patch_session_local(monkeypatch, db_session)
+    parser = FakeParser(
+        [
+            ParserError(
+                ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK,
+                "timeout while waiting for selector",
+            ),
+            [card("1")],
+            [card("1")],
+        ]
+    )
+    notifier = FakeNotifier()
+    service = MonitorService(parser=parser, scorer=FakeScorer(), notifier=notifier)
+
+    first_result = service.run_all_searches()
+    db_session.refresh(search)
+    assert first_result[0]["last_transient_error_type"] == "possible_captcha_or_block_timeout"
+    assert search.fail_count == 1
+    assert search.last_error.startswith("possible_captcha_or_block:")
+
+    search.next_run_at = None
+    db_session.commit()
+    second_result = service.run_all_searches()
+    db_session.refresh(search)
+    assert second_result[0]["created"] == 1
+    assert second_result[0]["alerted"] == 1
+    assert second_result[0]["last_transient_error_type"] is None
+    assert search.fail_count == 0
+    assert search.last_error == ""
+
+    search.next_run_at = None
+    db_session.commit()
+    third_result = service.run_all_searches()
+    db_session.refresh(search)
+    assert third_result[0]["created"] == 0
+    assert third_result[0]["alerted"] == 0
+    assert scalar_count(db_session, AlertSent) == 1
+
+
+def test_proxy_unavailable_is_observable_and_worker_continues(monkeypatch, db_session):
+    first = make_search(db_session, name="first", source_url="https://www.avito.ru/first")
+    second = make_search(db_session, name="second", source_url="https://www.avito.ru/second")
+    patch_session_local(monkeypatch, db_session)
+    parser = FakeParser(
+        [
+            ParserError(
+                ParserErrorType.PROXY_UNAVAILABLE,
+                "No available proxies: all configured proxies are quarantined",
+            ),
+            [card("2")],
+        ]
+    )
+    result = MonitorService(parser=parser, scorer=FakeScorer(), notifier=FakeNotifier()).run_all_searches()
+
+    db_session.refresh(first)
+    db_session.refresh(second)
+    assert result[0]["error"].startswith("proxy_unavailable:")
+    assert result[0]["transient_parser_failures"] == 1
+    assert result[0]["proxy_quarantine_waits"] == 1
+    assert result[0]["last_transient_error_type"] == "proxy_unavailable"
+    assert result[1]["baseline_run"] is True
+    assert result[1]["transient_parser_failures"] == 1
+    assert result[1]["proxy_quarantine_waits"] == 1
+    assert first.fail_count == 1
+    assert second.fail_count == 0
+
+
+def test_layout_changed_remains_non_transient_error(monkeypatch, db_session):
+    make_search(db_session)
+    patch_session_local(monkeypatch, db_session)
+    parser = FakeParser([ParserError(ParserErrorType.LAYOUT_CHANGED, "markup changed")])
+    result = MonitorService(parser=parser, scorer=FakeScorer(), notifier=FakeNotifier()).run_all_searches()
+
+    assert result[0]["error"] == "layout_changed: markup changed"
+    assert result[0]["transient_parser_failures"] == 0
+    assert result[0]["proxy_quarantine_waits"] == 0
+    assert result[0]["last_transient_error_type"] is None
 
 
 def test_run_all_searches_skips_inactive_search(monkeypatch, db_session):
