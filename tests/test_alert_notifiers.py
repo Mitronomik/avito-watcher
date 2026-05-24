@@ -32,7 +32,8 @@ class FakeSMTP:
 
 def test_email_notifier_noop_when_not_configured():
     notifier = EmailNotifier(enabled=False)
-    asyncio.run(notifier.send_listing_alert("hello", {}))
+    sent = asyncio.run(notifier.send_listing_alert("hello", {}))
+    assert sent is False
 
 
 def test_email_notifier_sends_with_fake_smtp(monkeypatch):
@@ -51,8 +52,84 @@ def test_email_notifier_sends_with_fake_smtp(monkeypatch):
         recipient="to@test",
     )
     payload = {"search_name": "test", "price": 100, "area_m2": 20, "title": "Office"}
-    asyncio.run(notifier.send_listing_alert("body", payload))
+    sent = asyncio.run(notifier.send_listing_alert("body", payload))
     assert len(FakeSMTP.sent_messages) == 1
+    assert sent is True
+
+
+def test_email_notifier_returns_false_when_misconfigured():
+    notifier = EmailNotifier(
+        enabled=True,
+        host="smtp.test",
+        port=465,
+        sender="from@test",
+        recipient=None,
+    )
+    sent = asyncio.run(notifier.send_listing_alert("hello", {}))
+    assert sent is False
+
+
+def test_email_notifier_returns_false_when_username_without_password(caplog):
+    notifier = EmailNotifier(
+        enabled=True,
+        host="smtp.test",
+        port=465,
+        username="smtp-user",
+        password=None,
+        sender="from@test",
+        recipient="to@test",
+    )
+    with caplog.at_level("WARNING"):
+        sent = asyncio.run(notifier.send_listing_alert("hello", {}))
+    assert sent is False
+    assert "password" in caplog.text.lower()
+    assert "smtp-user" not in caplog.text
+
+
+def test_email_notifier_smtp_failure_does_not_return_true(monkeypatch):
+    import app.notifiers.email as email_module
+
+    class FailingSMTP(FakeSMTP):
+        def send_message(self, msg):
+            raise RuntimeError("smtp send failed")
+
+    monkeypatch.setattr(email_module.smtplib, "SMTP_SSL", FailingSMTP)
+    notifier = EmailNotifier(
+        enabled=True,
+        host="smtp.test",
+        port=465,
+        username="u",
+        password="super-secret-password",
+        sender="from@test",
+        recipient="to@test",
+    )
+    payload = {"search_name": "test", "price": 100, "area_m2": 20, "title": "Office"}
+    with pytest.raises(RuntimeError):
+        asyncio.run(notifier.send_listing_alert("body", payload))
+
+
+def test_email_notifier_does_not_log_secrets_on_smtp_failure(monkeypatch, caplog):
+    import app.notifiers.email as email_module
+
+    class FailingSMTP(FakeSMTP):
+        def send_message(self, msg):
+            raise RuntimeError("smtp send failed")
+
+    monkeypatch.setattr(email_module.smtplib, "SMTP_SSL", FailingSMTP)
+    notifier = EmailNotifier(
+        enabled=True,
+        host="smtp.test",
+        port=465,
+        username="smtp-user",
+        password="smtp-password",
+        sender="from@test",
+        recipient="to@test",
+    )
+    with caplog.at_level("ERROR"):
+        with pytest.raises(RuntimeError):
+            asyncio.run(notifier.send_listing_alert("body", {"token": "payload-secret"}))
+    assert "smtp-password" not in caplog.text
+    assert "payload-secret" not in caplog.text
 
 
 def test_jsonl_outbox_writes_valid_json_line(tmp_path: Path):
