@@ -428,6 +428,10 @@ def test_cycle_stats_defaults_include_zero_serp_fallback_counters():
     assert stats["serp_link_fallback_succeeded"] is False
     assert stats["serp_link_fallback_card_count"] == 0
     assert stats["layout_changed_hint"] is None
+    assert stats["timeout_failure_count"] == 0
+    assert stats["timeout_retry_attempt_count"] == 0
+    assert stats["timeout_retry_success_count"] == 0
+    assert stats["proxy_quarantine_on_failure_count"] == 0
 
 
 def test_serp_link_fallback_increments_own_counters():
@@ -816,6 +820,49 @@ def test_allowed_engines_nodriver_disables_camoufox_fallback(monkeypatch):
     assert try_engine.await_args_list[0].args[2] == _Engine.NODRIVER
     assert parser.cycle_stats()["fallback_used"] is False
     assert parser.cycle_stats()["engine_fallback_count"] == 0
+
+
+def test_timeout_without_retry_preserves_existing_single_attempt(monkeypatch):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_allowed_engines", "camoufox")
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_timeout_retry_once", False)
+    parser = AvitoParser(preferred_engine="camoufox")
+    try_engine = AsyncMock(return_value={"ok": False, "error_type": "timeout", "error": "t"})
+    with patch.object(parser, "_try_engine", new=try_engine):
+        with pytest.raises(ParserError):
+            asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+    assert len(try_engine.await_args_list) == 1
+    assert parser.cycle_stats()["timeout_retry_attempt_count"] == 0
+
+
+def test_timeout_with_retry_succeeds_on_second_attempt(monkeypatch):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_allowed_engines", "camoufox")
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_timeout_retry_once", True)
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_timeout_retry_delay_ms", 0)
+    parser = AvitoParser(preferred_engine="camoufox")
+    try_engine = AsyncMock(side_effect=[{"ok": False, "error_type": "timeout", "error": "t"}, {"ok": True, "html": "<html>ok</html>"}])
+    with patch.object(parser, "_try_engine", new=try_engine):
+        html = asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+    assert html == "<html>ok</html>"
+    stats = parser.cycle_stats()
+    assert len(try_engine.await_args_list) == 2
+    assert stats["timeout_retry_attempt_count"] == 1
+    assert stats["timeout_retry_success_count"] == 1
+    assert stats["fallback_used"] is False
+
+
+def test_timeout_with_retry_still_fails_if_second_attempt_fails(monkeypatch):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_allowed_engines", "camoufox")
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_timeout_retry_once", True)
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_timeout_retry_delay_ms", 0)
+    parser = AvitoParser(preferred_engine="camoufox")
+    try_engine = AsyncMock(side_effect=[{"ok": False, "error_type": "timeout", "error": "t1"}, {"ok": False, "error_type": "timeout", "error": "t2"}])
+    with patch.object(parser, "_try_engine", new=try_engine):
+        with pytest.raises(ParserError):
+            asyncio.run(parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry"))
+    stats = parser.cycle_stats()
+    assert stats["timeout_retry_attempt_count"] == 1
+    assert stats["timeout_retry_success_count"] == 0
+    assert stats["timeout_failure_count"] == 2
 
 
 def test_preferred_engine_outside_allowed_set_falls_back_to_first_allowed(monkeypatch):

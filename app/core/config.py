@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     scrape_debug_dump_max_bytes: int = 2_000_000
     scrape_preferred_engine: Literal["auto", "nodriver", "camoufox"] = "auto"
     scrape_allowed_engines: Literal["both", "nodriver", "camoufox"] = "both"
+    scrape_timeout_retry_once: bool = False
+    scrape_timeout_retry_delay_ms: int = 300
     proxy_urls: str = ""
     proxy_quarantine_seconds: int = 7200
     alert_channels: str = "jsonl,telegram"
