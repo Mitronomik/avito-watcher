@@ -9,6 +9,7 @@ from app.notifiers.composite import CompositeNotifier
 from app.notifiers.email import EmailNotifier
 from app.notifiers.google_sheets_webhook import GoogleSheetsWebhookNotifier
 from app.notifiers.jsonl_outbox import JsonlOutboxNotifier
+from app.notifiers.telegram import TelegramNotifier
 
 
 class FakeSMTP:
@@ -32,7 +33,8 @@ class FakeSMTP:
 
 def test_email_notifier_noop_when_not_configured():
     notifier = EmailNotifier(enabled=False)
-    asyncio.run(notifier.send_listing_alert("hello", {}))
+    sent = asyncio.run(notifier.send_listing_alert("hello", {}))
+    assert sent is False
 
 
 def test_email_notifier_sends_with_fake_smtp(monkeypatch):
@@ -51,19 +53,96 @@ def test_email_notifier_sends_with_fake_smtp(monkeypatch):
         recipient="to@test",
     )
     payload = {"search_name": "test", "price": 100, "area_m2": 20, "title": "Office"}
-    asyncio.run(notifier.send_listing_alert("body", payload))
+    sent = asyncio.run(notifier.send_listing_alert("body", payload))
     assert len(FakeSMTP.sent_messages) == 1
+    assert sent is True
+
+
+def test_email_notifier_returns_false_when_misconfigured():
+    notifier = EmailNotifier(
+        enabled=True,
+        host="smtp.test",
+        port=465,
+        sender="from@test",
+        recipient=None,
+    )
+    sent = asyncio.run(notifier.send_listing_alert("hello", {}))
+    assert sent is False
+
+
+def test_email_notifier_returns_false_when_username_without_password(caplog):
+    notifier = EmailNotifier(
+        enabled=True,
+        host="smtp.test",
+        port=465,
+        username="smtp-user",
+        password=None,
+        sender="from@test",
+        recipient="to@test",
+    )
+    with caplog.at_level("WARNING"):
+        sent = asyncio.run(notifier.send_listing_alert("hello", {}))
+    assert sent is False
+    assert "password" in caplog.text.lower()
+    assert "smtp-user" not in caplog.text
+
+
+def test_email_notifier_smtp_failure_does_not_return_true(monkeypatch):
+    import app.notifiers.email as email_module
+
+    class FailingSMTP(FakeSMTP):
+        def send_message(self, msg):
+            raise RuntimeError("smtp send failed")
+
+    monkeypatch.setattr(email_module.smtplib, "SMTP_SSL", FailingSMTP)
+    notifier = EmailNotifier(
+        enabled=True,
+        host="smtp.test",
+        port=465,
+        username="u",
+        password="super-secret-password",
+        sender="from@test",
+        recipient="to@test",
+    )
+    payload = {"search_name": "test", "price": 100, "area_m2": 20, "title": "Office"}
+    with pytest.raises(RuntimeError):
+        asyncio.run(notifier.send_listing_alert("body", payload))
+
+
+def test_email_notifier_does_not_log_secrets_on_smtp_failure(monkeypatch, caplog):
+    import app.notifiers.email as email_module
+
+    class FailingSMTP(FakeSMTP):
+        def send_message(self, msg):
+            raise RuntimeError("smtp send failed")
+
+    monkeypatch.setattr(email_module.smtplib, "SMTP_SSL", FailingSMTP)
+    notifier = EmailNotifier(
+        enabled=True,
+        host="smtp.test",
+        port=465,
+        username="smtp-user",
+        password="smtp-password",
+        sender="from@test",
+        recipient="to@test",
+    )
+    with caplog.at_level("ERROR"):
+        with pytest.raises(RuntimeError):
+            asyncio.run(notifier.send_listing_alert("body", {"token": "payload-secret"}))
+    assert "smtp-password" not in caplog.text
+    assert "payload-secret" not in caplog.text
 
 
 def test_jsonl_outbox_writes_valid_json_line(tmp_path: Path):
     out = tmp_path / "alerts" / "alerts.jsonl"
     notifier = JsonlOutboxNotifier(enabled=True, path=str(out))
     payload = {"external_id": "42", "title": "T", "price": 1, "area_m2": 2}
-    asyncio.run(notifier.send_listing_alert("msg", payload))
+    sent = asyncio.run(notifier.send_listing_alert("msg", payload))
 
     line = out.read_text(encoding="utf-8").strip()
     data = json.loads(line)
     assert data["external_id"] == "42"
+    assert sent is True
 
 
 
@@ -72,17 +151,42 @@ def test_jsonl_outbox_maps_summary_to_llm_summary(tmp_path: Path):
     out = tmp_path / "alerts" / "alerts.jsonl"
     notifier = JsonlOutboxNotifier(enabled=True, path=str(out))
     payload = {"external_id": "42", "summary": "LLM short summary"}
-    asyncio.run(notifier.send_listing_alert("msg", payload))
+    sent = asyncio.run(notifier.send_listing_alert("msg", payload))
 
     line = out.read_text(encoding="utf-8").strip()
     data = json.loads(line)
     assert data["llm_summary"] == "LLM short summary"
+    assert sent is True
+
+
+def test_jsonl_outbox_disabled_returns_false(tmp_path: Path):
+    out = tmp_path / "alerts" / "alerts.jsonl"
+    notifier = JsonlOutboxNotifier(enabled=False, path=str(out))
+    sent = asyncio.run(notifier.send_listing_alert("msg", {"external_id": "42"}))
+    assert sent is False
+    assert not out.exists()
+
+
+def test_telegram_notifier_not_configured_returns_false():
+    notifier = TelegramNotifier(bot=None, chat_id=None)
+    sent = asyncio.run(notifier.send_listing_alert("msg"))
+    assert sent is False
+
+
+def test_telegram_notifier_success_returns_true():
+    class FakeBot:
+        async def send_message(self, **_kwargs):
+            return None
+
+    notifier = TelegramNotifier(bot=FakeBot(), chat_id="12345")
+    sent = asyncio.run(notifier.send_listing_alert("msg"))
+    assert sent is True
 def test_composite_continues_when_one_channel_fails():
     class Ok:
         channel_name = "jsonl"
 
         async def send_listing_alert(self, message: str, payload: dict):
-            return None
+            return True
 
     class Bad:
         channel_name = "email"
@@ -110,6 +214,48 @@ def test_composite_skips_channels_returning_false():
 
     notifier = CompositeNotifier([FalseChannel(), Ok()])
     sent = asyncio.run(notifier.send_listing_alert("msg", {"token": "secret"}))
+    assert sent == ["jsonl"]
+
+
+def test_composite_skips_channels_returning_none():
+    class NoneChannel:
+        channel_name = "email"
+
+        async def send_listing_alert(self, message: str, payload: dict):
+            return None
+
+    class Ok:
+        channel_name = "jsonl"
+
+        async def send_listing_alert(self, message: str, payload: dict):
+            return True
+
+    notifier = CompositeNotifier([NoneChannel(), Ok()])
+    sent = asyncio.run(notifier.send_listing_alert("msg", {}))
+    assert sent == ["jsonl"]
+
+
+def test_composite_counts_only_true():
+    class TrueChannel:
+        channel_name = "jsonl"
+
+        async def send_listing_alert(self, message: str, payload: dict):
+            return True
+
+    class FalseChannel:
+        channel_name = "google_sheets"
+
+        async def send_listing_alert(self, message: str, payload: dict):
+            return False
+
+    class NoneChannel:
+        channel_name = "telegram"
+
+        async def send_listing_alert(self, message: str, payload: dict):
+            return None
+
+    notifier = CompositeNotifier([FalseChannel(), NoneChannel(), TrueChannel()])
+    sent = asyncio.run(notifier.send_listing_alert("msg", {}))
     assert sent == ["jsonl"]
 
 
@@ -245,3 +391,10 @@ def test_composite_does_not_mark_google_sheets_success_when_disabled():
     notifier = CompositeNotifier([GoogleSheetsWebhookNotifier(enabled=False, webhook_url="https://example.com")])
     sent = asyncio.run(notifier.send_listing_alert("msg", {}))
     assert sent == []
+
+
+def test_composite_counts_jsonl_success(tmp_path: Path):
+    out = tmp_path / "alerts" / "alerts.jsonl"
+    notifier = CompositeNotifier([JsonlOutboxNotifier(enabled=True, path=str(out))])
+    sent = asyncio.run(notifier.send_listing_alert("msg", {"external_id": "42"}))
+    assert sent == ["jsonl"]

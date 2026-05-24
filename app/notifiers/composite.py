@@ -17,7 +17,12 @@ class CompositeNotifier:
             except Exception:
                 logger.exception("Alert channel failed", extra={"channel": channel.channel_name})
                 continue
-            if delivered is False:
+            if delivered is not True:
+                if delivered not in (False, None):
+                    logger.debug(
+                        "Alert channel returned unexpected delivery result type",
+                        extra={"channel": channel.channel_name, "result_type": type(delivered).__name__},
+                    )
                 continue
             successful.append(channel.channel_name)
         return successful

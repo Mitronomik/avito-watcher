@@ -15,10 +15,10 @@ class JsonlOutboxNotifier:
         self.enabled = settings.jsonl_outbox_enabled if enabled is None else enabled
         self.path = settings.jsonl_outbox_path if path is None else path
 
-    async def send_listing_alert(self, message: str, payload: dict) -> None:
+    async def send_listing_alert(self, message: str, payload: dict) -> bool:
         if not self.enabled:
             logger.info("JSONL outbox disabled; skipping listing alert")
-            return
+            return False
 
         record = {
             "timestamp": datetime.now(UTC).isoformat(),
@@ -39,5 +39,7 @@ class JsonlOutboxNotifier:
             outbox_path.parent.mkdir(parents=True, exist_ok=True)
             with outbox_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            return True
         except Exception:
             logger.exception("Failed to append alert to JSONL outbox", extra={"path": str(outbox_path)})
+            raise

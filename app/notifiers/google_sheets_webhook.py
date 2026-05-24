@@ -33,7 +33,7 @@ class GoogleSheetsWebhookNotifier:
             else timeout_sec
         )
 
-    async def send_listing_alert(self, message: str, payload: dict) -> bool | None:
+    async def send_listing_alert(self, message: str, payload: dict) -> bool:
         if not self.enabled or not self.webhook_url:
             logger.info("Google Sheets webhook is not configured; skipping listing alert")
             return False

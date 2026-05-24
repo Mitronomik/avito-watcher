@@ -32,15 +32,24 @@ class EmailNotifier:
         self.recipient = settings.email_to if recipient is None else recipient
 
     def _is_configured(self) -> bool:
-        return all([self.enabled, self.host, self.port, self.sender, self.recipient])
+        return all([self.host, self.port, self.sender, self.recipient])
 
-    async def send_listing_alert(self, message: str, payload: dict) -> None:
+    async def send_listing_alert(self, message: str, payload: dict) -> bool:
+        if not self.enabled:
+            logger.info("Email notifier is disabled; skipping listing alert")
+            return False
+
         if not self._is_configured():
-            logger.info("Email notifier is not configured; skipping listing alert")
-            return
+            logger.warning("Email notifier is misconfigured; skipping listing alert")
+            return False
+
+        if self.username and not self.password:
+            logger.warning("Email notifier is misconfigured: SMTP password is required when username is set")
+            return False
 
         subject = self._build_subject(payload)
         await asyncio.to_thread(self._send_sync, subject, message)
+        return True
 
     def _send_sync(self, subject: str, message: str) -> None:
         msg = EmailMessage()
