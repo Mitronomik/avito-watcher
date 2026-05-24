@@ -414,6 +414,8 @@ def test_layout_changed_when_no_state_and_no_links():
         with pytest.raises(ParserError) as exc_info:
             asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry"))
     assert exc_info.value.error_type == ParserErrorType.LAYOUT_CHANGED
+    stats = parser.cycle_stats()
+    assert stats["layout_changed_hint"] == "plain_layout_changed"
 
 
 def test_cycle_stats_defaults_include_zero_serp_fallback_counters():
@@ -478,6 +480,21 @@ def test_primary_dom_path_keeps_serp_fallback_counters_zero():
     assert stats["serp_link_fallback_attempted"] is False
     assert stats["serp_link_fallback_succeeded"] is False
     assert stats["serp_link_fallback_card_count"] == 0
+    assert stats["layout_changed_hint"] is None
+
+
+def test_primary_dom_with_block_markers_does_not_raise_keyerror():
+    parser = AvitoParser()
+    html = (
+        "<html><head><title>Проверка безопасности</title></head><body>"
+        "Подтвердите, что вы не робот"
+        "<div data-marker='item'><a href='/sankt-peterburg/kvartiry/test_8085355489'><h3>1-к. квартира, 40 м²</h3></a></div>"
+        "</body></html>"
+    )
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        with pytest.raises(ParserError) as exc_info:
+            asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+    assert exc_info.value.error_type == ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK
 
 
 def test_serp_fallback_stats_are_sticky_when_followed_by_primary_dom_page():
