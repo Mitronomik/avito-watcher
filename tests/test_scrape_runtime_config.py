@@ -38,6 +38,10 @@ def test_proxy_quarantine_seconds_default():
     assert settings.proxy_quarantine_seconds == 7200
 
 
+def test_timeout_retry_settings_defaults():
+    settings = Settings(database_url="sqlite:///tmp.db", _env_file=None)
+    assert settings.scrape_timeout_retry_once is False
+    assert settings.scrape_timeout_retry_delay_ms == 300
 
 
 def test_scoring_enabled_default_true():
@@ -77,3 +81,11 @@ def test_runtime_diagnostics_includes_scrape_debug_dump_settings(monkeypatch):
     assert runtime["scrape_debug_dump_html"] is True
     assert runtime["scrape_debug_dump_dir"] == "./tmp/debug"
     assert runtime["scrape_debug_dump_max_bytes"] == 12345
+
+
+def test_runtime_diagnostics_includes_timeout_retry_settings(monkeypatch):
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_timeout_retry_once", True)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_timeout_retry_delay_ms", 222)
+    runtime = runtime_diagnostics()
+    assert runtime["scrape_timeout_retry_once"] is True
+    assert runtime["scrape_timeout_retry_delay_ms"] == 222

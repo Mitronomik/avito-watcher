@@ -122,8 +122,12 @@ class _CycleCounters:
     session_close_failure_count: int = 0
     block_detected_count: int = 0
     engine_error_count: int = 0
+    timeout_failure_count: int = 0
+    timeout_retry_attempt_count: int = 0
+    timeout_retry_success_count: int = 0
     proxy_success_count: int = 0
     proxy_failure_count: int = 0
+    proxy_quarantine_on_failure_count: int = 0
     engine_skip_recent_failure_count: int = 0
     preferred_engine: str | None = None
     selected_first_engine: str | None = None
@@ -147,8 +151,12 @@ class _CycleCounters:
             "session_close_failure_count": self.session_close_failure_count,
             "block_detected_count": self.block_detected_count,
             "engine_error_count": self.engine_error_count,
+            "timeout_failure_count": self.timeout_failure_count,
+            "timeout_retry_attempt_count": self.timeout_retry_attempt_count,
+            "timeout_retry_success_count": self.timeout_retry_success_count,
             "proxy_success_count": self.proxy_success_count,
             "proxy_failure_count": self.proxy_failure_count,
+            "proxy_quarantine_on_failure_count": self.proxy_quarantine_on_failure_count,
             "engine_skip_recent_failure_count": self.engine_skip_recent_failure_count,
             "preferred_engine": self.preferred_engine,
             "selected_first_engine": self.selected_first_engine,
@@ -244,6 +252,13 @@ class AvitoParser:
         if result.get("error_type") in {"timeout", "possible_captcha_or_block"}:
             self._engine_recent_failures[key] = self._engine_recent_failures.get(key, 0) + 1
 
+    def _proxy_quarantine_events(self) -> int | None:
+        if not self._proxy_manager or not hasattr(self._proxy_manager, "stats"):
+            return None
+        stats = self._proxy_manager.stats()
+        events = stats.get("quarantine_events") if isinstance(stats, dict) else None
+        return events if isinstance(events, int) else None
+
     async def _evict_engine_session(self, engine: _Engine, proxy_url: str | None) -> None:
         key = (engine, proxy_url)
         session = self._engine_sessions.pop(key, None)
@@ -324,11 +339,29 @@ class AvitoParser:
                     "No available proxies: all configured proxies are quarantined",
                 )
 
+        retry_on_timeout = bool(settings.scrape_timeout_retry_once)
+        retry_delay_ms = max(int(settings.scrape_timeout_retry_delay_ms), 0)
+        timeout_retry_attempted = False
+
         # First attempt
         start_engine = self._choose_start_engine(proxy_url)
         setup_error = await self.ensure_engine_session(start_engine, proxy_url)
         result = setup_error or await self._try_engine(url, proxy_url, start_engine)
         self._record_engine_result(start_engine, proxy_url, result)
+        if result.get("error_type") == "timeout":
+            self._cycle_counters.timeout_failure_count += 1
+            if retry_on_timeout:
+                timeout_retry_attempted = True
+                self._cycle_counters.timeout_retry_attempt_count += 1
+                if retry_delay_ms > 0:
+                    await asyncio.sleep(retry_delay_ms / 1000.0)
+                retry_result = await self._try_engine(url, proxy_url, start_engine)
+                self._record_engine_result(start_engine, proxy_url, retry_result)
+                if retry_result.get("error_type") == "timeout":
+                    self._cycle_counters.timeout_failure_count += 1
+                if retry_result.get("ok"):
+                    self._cycle_counters.timeout_retry_success_count += 1
+                result = retry_result
         if result["ok"]:
             if proxy_url and self._proxy_manager:
                 self._proxy_manager.report_success(proxy_url)
@@ -339,25 +372,30 @@ class AvitoParser:
         allowed_engines = self._allowed_engines()
         fallback = next((engine for engine in allowed_engines if engine != start_engine), None)
         _log.warning(
-            "avito_parser.engine_failure engine=%s error_type=%s allowed_engines=%s fallback_available=%s",
+            "avito_parser.engine_failure engine=%s error_type=%s allowed_engines=%s fallback_available=%s timeout_retry_attempted=%s",
             start_engine.value,
             result.get("error_type"),
             ",".join(engine.value for engine in allowed_engines),
             bool(fallback),
+            timeout_retry_attempted,
         )
         if result.get("error_type") == "possible_captcha_or_block":
             self._cycle_counters.block_detected_count += 1
         else:
             self._cycle_counters.engine_error_count += 1
         if proxy_url and self._proxy_manager:
+            before_events = self._proxy_quarantine_events()
             self._proxy_manager.report_failure(proxy_url)
             self._cycle_counters.proxy_failure_count += 1
+            after_events = self._proxy_quarantine_events()
+            if before_events is not None and after_events is not None and after_events > before_events:
+                self._cycle_counters.proxy_quarantine_on_failure_count += 1
             proxy_url = self._proxy_manager.get_proxy()
 
         if fallback is None:
             raise ParserError(
                 ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK,
-                f"Stealth engine blocked ({start_engine.value})",
+                f"Stealth engine failed ({start_engine.value}); error_type={result.get('error_type')}",
             )
 
         # Fallback attempt
@@ -366,6 +404,8 @@ class AvitoParser:
         setup_error2 = await self.ensure_engine_session(fallback, proxy_url)
         result2 = setup_error2 or await self._try_engine(url, proxy_url, fallback)
         self._record_engine_result(fallback, proxy_url, result2)
+        if result2.get("error_type") == "timeout":
+            self._cycle_counters.timeout_failure_count += 1
         if result2["ok"]:
             if proxy_url and self._proxy_manager:
                 self._proxy_manager.report_success(proxy_url)
@@ -375,12 +415,16 @@ class AvitoParser:
             return result2["html"]
 
         if proxy_url and self._proxy_manager:
+            before_events = self._proxy_quarantine_events()
             self._proxy_manager.report_failure(proxy_url)
             self._cycle_counters.proxy_failure_count += 1
+            after_events = self._proxy_quarantine_events()
+            if before_events is not None and after_events is not None and after_events > before_events:
+                self._cycle_counters.proxy_quarantine_on_failure_count += 1
 
         raise ParserError(
             ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK,
-            "All stealth engines blocked (nodriver + camoufox)",
+            f"All stealth engines failed (nodriver + camoufox); last_error_type={result2.get('error_type')}",
         )
 
     async def fetch_search_cards(self, search_url: str) -> list[ListingCard]:
