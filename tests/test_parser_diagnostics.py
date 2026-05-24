@@ -327,6 +327,87 @@ def test_fetch_page_html_cycle_mode_nodriver_session_open_failure_falls_back(mon
     assert parser._prefer_engine == _Engine.CAMOUFOX
 
 
+def _state_html(items_payload: str, extra: str = "") -> str:
+    state_json = json.dumps({"data": {"catalog": {"items": json.loads(items_payload)}}}, ensure_ascii=False)
+    encoded = "".join(f"%{b:02X}" for b in state_json.encode("utf-8"))
+    return (
+        "<html><head><title>Авито</title></head><body>"
+        f"<script>window.__preloadedState__=\"{encoded}\";</script>{extra}</body></html>"
+    )
+
+
+def test_serp_fallback_parses_preloaded_state_catalog_items():
+    parser = AvitoParser()
+    html = _state_html("""[
+      {"type":"item","id":8085355489,"urlPath":"/sankt-peterburg/kvartiry/1-k._kvartira_40_m_14_et._8085355489?context=x","title":"1-к. квартира, 40 м², 1/4 эт.","priceDetailed":{"value":6950000},"payload":{"geoForItems":{"formattedAddress":"Санкт-Петербург","geoReferences":[{"content":"м. Петроградская"}]}}}
+    ]""")
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        cards = asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+    assert len(cards) == 1
+    assert cards[0].external_id == "8085355489"
+    assert cards[0].price == 6950000
+    assert cards[0].area_m2 == 40
+    assert cards[0].rooms == "1-к."
+    assert cards[0].address.startswith("Санкт-Петербург")
+    assert cards[0].published_at is None
+
+
+def test_serp_fallback_parses_millisecond_timestamp_to_sane_utc_datetime():
+    parser = AvitoParser()
+    html = _state_html("""[
+      {"type":"item","id":8085355489,"urlPath":"/sankt-peterburg/kvartiry/test_8085355489","title":"1-к. квартира, 40 м²","sortTimeStamp":1779449836000}
+    ]""")
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        cards = asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+    assert cards[0].published_at is not None
+    assert cards[0].published_at.year == 2026
+
+
+def test_serp_fallback_parses_second_timestamp():
+    parser = AvitoParser()
+    html = _state_html("""[
+      {"type":"item","id":8085355489,"urlPath":"/sankt-peterburg/kvartiry/test_8085355489","title":"1-к. квартира, 40 м²","sortTimeStamp":1779449836}
+    ]""")
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        cards = asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+    assert cards[0].published_at == datetime(2026, 5, 22, 11, 37, 16)
+
+
+def test_serp_fallback_ignores_malformed_or_missing_timestamp():
+    parser = AvitoParser()
+    html = _state_html("""[
+      {"type":"item","id":8085355489,"urlPath":"/sankt-peterburg/kvartiry/test_8085355489","title":"1-к. квартира, 40 м²","sortTimeStamp":"bad"},
+      {"type":"item","id":8085355490,"urlPath":"/sankt-peterburg/kvartiry/test_8085355490","title":"1-к. квартира, 40 м²"}
+    ]""")
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        cards = asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+    assert len(cards) == 2
+    assert cards[0].published_at is None
+    assert cards[1].published_at is None
+
+
+def test_serp_fallback_dedupes_and_skips_malformed_catalog_items():
+    parser = AvitoParser()
+    html = _state_html("""[
+      {"type":"item","id":8085355489,"urlPath":"/sankt-peterburg/kvartiry/test_8085355489","title":"1-к. квартира, 40 м²"},
+      {"type":"item","id":8085355489,"urlPath":"/sankt-peterburg/kvartiry/test_8085355489","title":"dup"},
+      {"type":"item","id":null,"urlPath":"/sankt-peterburg/kvartiry/bad_1111111111"},
+      {"type":"item","id":9999999999,"title":"no path"}
+    ]""")
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        cards = asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+    assert [c.external_id for c in cards] == ["8085355489"]
+
+
+def test_layout_changed_when_no_state_and_no_links():
+    parser = AvitoParser()
+    html = "<html><head><title>Avito</title></head><body><script>var captcha='robot';</script><main>no cards</main></body></html>"
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        with pytest.raises(ParserError) as exc_info:
+            asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry"))
+    assert exc_info.value.error_type == ParserErrorType.LAYOUT_CHANGED
+
+
 def test_fetch_page_html_cycle_mode_evicts_broken_cached_session_and_falls_back(caplog):
     parser = make_test_parser(preferred_engine="auto")
     parser._cycle_active = True

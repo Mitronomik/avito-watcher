@@ -11,6 +11,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Protocol
 from zoneinfo import ZoneInfo
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import unquote
 
 from app.parsers.block_signals import looks_like_block_or_captcha
 from app.core.config import settings
@@ -65,6 +66,8 @@ ADDRESS_HINTS = (
 )
 AREA_RE = re.compile(r"(?<!\d)(\d+(?:[,.]\d+)?)\s*(?:м²|кв\.?\s*м)(?!\w)", re.IGNORECASE)
 ROOMS_RE = re.compile(r"(?<!\d)([1-4])\s*-\s*к\.", re.IGNORECASE)
+AVITO_LISTING_URL_PATH_RE = re.compile(r"^/[a-z0-9_-]+/kvartiry/[^/\s]+_(\d{10})(?:\?.*)?$", re.IGNORECASE)
+MAX_FUTURE_PUBLISHED_AT_DAYS = 7
 PUBLICATION_MARKER_SELECTORS = (
     '[data-marker*="item-date"]',
     '[data-marker*="date"]',
@@ -459,7 +462,17 @@ class AvitoParser:
         title_tag = soup.find("title")
         title = title_tag.get_text(strip=True) if title_tag else ""
 
-        if self._looks_like_captcha_or_block(title, body_text):
+        raw_cards = soup.select(CARD_SELECTOR)
+        fallback_cards: list[ListingCard] = []
+        fallback_diag = self._build_fallback_diagnostics(soup=soup, page_html=page_html)
+        if not raw_cards:
+            fallback_cards = self._parse_cards_from_serp_fallback(
+                soup=soup, page_html=page_html, diagnostics=fallback_diag
+            )
+
+        if self._looks_like_captcha_or_block(title, body_text) and not (
+            fallback_diag["has_catalog_items_state"] or fallback_diag["has_listing_links_without_card_markers"]
+        ):
             raise ParserError(
                 ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK,
                 "Search page content looks like captcha, robot check, or access block",
@@ -471,9 +484,16 @@ class AvitoParser:
                 "Avito search page loaded but reports empty results",
             )
 
-        raw_cards = soup.select(CARD_SELECTOR)
+        if not raw_cards and fallback_cards:
+            return fallback_cards[: min(per_page_limit, CARD_LIMIT)]
         if not raw_cards:
-            self._maybe_dump_layout_changed_html(search_url=search_url, page_html=page_html, title=title, body_text=body_text)
+            self._maybe_dump_layout_changed_html(
+                search_url=search_url,
+                page_html=page_html,
+                title=title,
+                body_text=body_text,
+                diagnostics=fallback_diag,
+            )
             raise ParserError(
                 ParserErrorType.LAYOUT_CHANGED,
                 "No Avito search result cards found in fetched HTML",
@@ -520,7 +540,9 @@ class AvitoParser:
 
         return result
 
-    def _maybe_dump_layout_changed_html(self, search_url: str, page_html: str, title: str, body_text: str) -> None:
+    def _maybe_dump_layout_changed_html(
+        self, search_url: str, page_html: str, title: str, body_text: str, diagnostics: dict | None = None
+    ) -> None:
         if not settings.scrape_debug_dump_html:
             return
 
@@ -534,6 +556,7 @@ class AvitoParser:
         dump_meta_path = dump_dir / f"{base_name}.json"
         clipped_html = page_html[: max(0, settings.scrape_debug_dump_max_bytes)]
 
+        diagnostics = diagnostics or {}
         metadata = {
             "error_type": ParserErrorType.LAYOUT_CHANGED.value,
             "url_preview": search_url[:300],
@@ -557,6 +580,21 @@ class AvitoParser:
             ),
             "looks_like_block_or_captcha": self._looks_like_captcha_or_block(title, body_text),
             "empty_results_detected": self._looks_like_empty_results(body_text),
+            "layout_changed_hint": diagnostics.get("layout_changed_hint", "plain_layout_changed"),
+            "has_preloaded_state": diagnostics.get("has_preloaded_state", False),
+            "has_catalog_items_state": diagnostics.get("has_catalog_items_state", False),
+            "catalog_items_candidate_count": diagnostics.get("catalog_items_candidate_count", 0),
+            "external_id_candidate_count": diagnostics.get("external_id_candidate_count", 0),
+            "avito_listing_url_candidate_count": diagnostics.get("avito_listing_url_candidate_count", 0),
+            "has_listing_links_without_card_markers": diagnostics.get("has_listing_links_without_card_markers", False),
+            "script_tag_count": diagnostics.get("script_tag_count", 0),
+            "body_text_length": diagnostics.get("body_text_length", len(body_text)),
+            "serp_state_fallback_attempted": diagnostics.get("serp_state_fallback_attempted", False),
+            "serp_state_fallback_succeeded": diagnostics.get("serp_state_fallback_succeeded", False),
+            "serp_state_fallback_card_count": diagnostics.get("serp_state_fallback_card_count", 0),
+            "serp_link_fallback_attempted": diagnostics.get("serp_link_fallback_attempted", False),
+            "serp_link_fallback_succeeded": diagnostics.get("serp_link_fallback_succeeded", False),
+            "serp_link_fallback_card_count": diagnostics.get("serp_link_fallback_card_count", 0),
             "dump_html_path": str(dump_html_path),
             "dump_meta_path": str(dump_meta_path),
         }
@@ -819,3 +857,172 @@ class AvitoParser:
 
         digest = hashlib.sha256(href.encode("utf-8")).hexdigest()[:16]
         return f"fallback-{digest}"
+
+    @staticmethod
+    def _extract_catalog_items_from_preloaded_state(page_html: str) -> list[dict]:
+        match = re.search(r"window\.__preloadedState__\s*=\s*\"((?:\\.|[^\"\\])*)\"", page_html)
+        if not match:
+            return []
+        try:
+            encoded = json.loads(f"\"{match.group(1)}\"")
+            decoded = unquote(encoded)
+            state = json.loads(decoded)
+        except (json.JSONDecodeError, ValueError):
+            return []
+        items = (((state or {}).get("data") or {}).get("catalog") or {}).get("items")
+        return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+    @staticmethod
+    def _normalize_listing_url(url_path: str) -> str:
+        return urljoin("https://www.avito.ru", url_path)
+
+    @classmethod
+    def _extract_catalog_item_address(cls, item: dict) -> str:
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        geo = payload.get("geoForItems") if isinstance(payload.get("geoForItems"), dict) else {}
+        parts = []
+        formatted = geo.get("formattedAddress")
+        if isinstance(formatted, str) and formatted.strip():
+            parts.append(cls._normalize_text_line(formatted))
+        refs = geo.get("geoReferences")
+        if isinstance(refs, list):
+            for ref in refs:
+                if not isinstance(ref, dict):
+                    continue
+                for key in ("content", "after", "afterWithIcon"):
+                    value = ref.get(key)
+                    if isinstance(value, str) and value.strip():
+                        parts.append(cls._normalize_text_line(value))
+        parts = [p for p in parts if p]
+        if parts:
+            return ", ".join(dict.fromkeys(parts))
+        detailed = item.get("addressDetailed") if isinstance(item.get("addressDetailed"), dict) else {}
+        location = detailed.get("locationName")
+        return cls._normalize_text_line(location) if isinstance(location, str) else ""
+
+    @classmethod
+    def _extract_cards_from_catalog_items(cls, page_html: str) -> list[ListingCard]:
+        result: list[ListingCard] = []
+        seen: set[str] = set()
+        for item in cls._extract_catalog_items_from_preloaded_state(page_html):
+            if item.get("type") not in (None, "item"):
+                continue
+            item_id = item.get("id")
+            url_path = item.get("urlPath")
+            if not item_id or not isinstance(url_path, str) or not AVITO_LISTING_URL_PATH_RE.match(url_path):
+                continue
+            ext_id = str(item_id)
+            if ext_id in seen:
+                continue
+            seen.add(ext_id)
+            title = cls._normalize_text_line(str(item.get("title") or ""))
+            price_data = item.get("priceDetailed") if isinstance(item.get("priceDetailed"), dict) else {}
+            price = price_data.get("value")
+            published_ts = item.get("sortTimeStamp") if item.get("sortTimeStamp") is not None else item.get("allowTimeStamp")
+            published_at = cls._parse_catalog_timestamp(published_ts)
+            result.append(ListingCard(
+                external_id=ext_id,
+                url=cls._normalize_listing_url(url_path),
+                title=title,
+                price=float(price) if isinstance(price, (int, float)) else None,
+                address=cls._extract_catalog_item_address(item),
+                area_m2=cls._extract_area_m2(title),
+                rooms=cls._extract_rooms(title),
+                published_label="",
+                published_at=published_at,
+                raw={"source": "serp_preloaded_state"},
+            ))
+        return result
+
+    @classmethod
+    def _parse_catalog_timestamp(cls, value: object) -> datetime | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if value < 0:
+            return None
+        ts = float(value)
+        if ts >= 10_000_000_000:
+            ts = ts / 1000.0
+        elif ts < 1_000_000_000:
+            return None
+        try:
+            parsed = datetime.fromtimestamp(ts, tz=UTC).replace(tzinfo=None)
+        except (OverflowError, OSError, ValueError):
+            return None
+        now_utc = datetime.now(UTC).replace(tzinfo=None)
+        if parsed > now_utc + timedelta(days=MAX_FUTURE_PUBLISHED_AT_DAYS):
+            return None
+        return parsed
+
+    @classmethod
+    def _extract_avito_listing_urls(cls, page_html: str) -> set[str]:
+        return {
+            match.group(0)
+            for match in re.finditer(r"/[a-z0-9_-]+/kvartiry/[^\\s\"'<>]+_\\d{10}(?:\\?[^\\s\"'<>]*)?", page_html, re.IGNORECASE)
+            if AVITO_LISTING_URL_PATH_RE.match(match.group(0))
+        }
+
+    @classmethod
+    def _extract_cards_from_listing_links(cls, page_html: str) -> list[ListingCard]:
+        result: list[ListingCard] = []
+        for idx, path in enumerate(sorted(cls._extract_avito_listing_urls(page_html))):
+            match = AVITO_LISTING_URL_PATH_RE.match(path)
+            if not match:
+                continue
+            result.append(ListingCard(
+                external_id=match.group(1),
+                url=cls._normalize_listing_url(path),
+                title="",
+                price=None,
+                address="",
+                area_m2=None,
+                rooms="",
+                published_label="",
+                published_at=None,
+                raw={"source": "serp_listing_links", "position": idx},
+            ))
+        return result
+
+    @classmethod
+    def _build_fallback_diagnostics(cls, soup, page_html: str) -> dict:
+        avito_urls = cls._extract_avito_listing_urls(page_html)
+        catalog_items = cls._extract_catalog_items_from_preloaded_state(page_html)
+        return {
+            "serp_state_fallback_attempted": False,
+            "serp_state_fallback_succeeded": False,
+            "serp_state_fallback_card_count": 0,
+            "serp_link_fallback_attempted": False,
+            "serp_link_fallback_succeeded": False,
+            "serp_link_fallback_card_count": 0,
+            "has_preloaded_state": "window.__preloadedState__" in page_html,
+            "has_catalog_items_state": bool(catalog_items),
+            "catalog_items_candidate_count": len(catalog_items),
+            "external_id_candidate_count": len({m.group(1) for m in re.finditer(r"_(\d{10})(?:\\?|\"|$)", page_html)}),
+            "avito_listing_url_candidate_count": len(avito_urls),
+            "has_listing_links_without_card_markers": bool(avito_urls),
+            "script_tag_count": len(soup.find_all("script")),
+            "body_text_length": len(soup.get_text(separator=" ", strip=True)),
+            "layout_changed_hint": "plain_layout_changed",
+        }
+
+    @classmethod
+    def _parse_cards_from_serp_fallback(cls, soup, page_html: str, diagnostics: dict) -> list[ListingCard]:
+        diagnostics["serp_state_fallback_attempted"] = True
+        state_cards = cls._extract_cards_from_catalog_items(page_html)
+        diagnostics["serp_state_fallback_card_count"] = len(state_cards)
+        diagnostics["serp_state_fallback_succeeded"] = bool(state_cards)
+        if state_cards:
+            diagnostics["layout_changed_hint"] = "preloaded_state_with_listing_items"
+            return state_cards
+        diagnostics["serp_link_fallback_attempted"] = True
+        link_cards = cls._extract_cards_from_listing_links(page_html)
+        diagnostics["serp_link_fallback_card_count"] = len(link_cards)
+        diagnostics["serp_link_fallback_succeeded"] = bool(link_cards)
+        if link_cards:
+            diagnostics["layout_changed_hint"] = "listing_links_without_card_markers"
+            return link_cards
+        if diagnostics["has_preloaded_state"]:
+            diagnostics["layout_changed_hint"] = "hydration_without_cards"
+        elif cls._looks_like_empty_results(soup.get_text(separator=" ", strip=True)):
+            diagnostics["layout_changed_hint"] = "empty_results"
+        return []
