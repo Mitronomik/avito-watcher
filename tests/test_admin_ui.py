@@ -584,11 +584,13 @@ def test_searches_dashboard_worker_status_block(monkeypatch, tmp_path):
     (debug_dir / "sample.html").write_text("<html>ok</html>", encoding="utf-8")
     monkeypatch.setattr(settings, "scrape_debug_dump_dir", str(debug_dir))
     monkeypatch.setattr(settings, "jsonl_outbox_path", str(tmp_path / "alerts.jsonl"))
+    monkeypatch.setattr(settings, "jsonl_outbox_enabled", True)
     monkeypatch.setattr(settings, "google_sheets_webhook_enabled", True)
     monkeypatch.setattr(settings, "google_sheets_webhook_url", "https://example.com/hook")
     monkeypatch.setattr(settings, "google_sheets_webhook_secret", "gs-secret")
     monkeypatch.setattr(settings, "smtp_host", "smtp.example.com")
     monkeypatch.setattr(settings, "smtp_port", 2525)
+    monkeypatch.setattr(settings, "email_enabled", False)
     monkeypatch.setattr(settings, "smtp_username", "user@example.com")
     monkeypatch.setattr(settings, "smtp_password", "smtp-secret")
     monkeypatch.setattr(settings, "email_from", "from@example.com")
@@ -641,10 +643,10 @@ def test_searches_dashboard_worker_status_block(monkeypatch, tmp_path):
     assert "scrape_headless=False" in page
     assert "scrape_timeout_retry_once=True" in page
     assert "scrape_max_pages=3" in page
-    assert "jsonl enabled=yes" in page
-    assert "google_sheets enabled=yes webhook_url_set=yes secret_set=yes" in page
-    assert "email enabled=no smtp_host=smtp.example.com smtp_port=2525 username_set=yes password_set=yes email_from_set=yes email_to_set=yes" in page
-    assert "telegram token_set=yes chat_id_set=yes" in page
+    assert "jsonl channel_enabled=yes jsonl_enabled=yes" in page
+    assert "google_sheets channel_enabled=no integration_enabled=yes webhook_url_set=yes secret_set=yes" in page
+    assert "email channel_enabled=no email_enabled=no smtp_host=smtp.example.com smtp_port=2525 username_set=yes password_set=yes email_from_set=yes email_to_set=yes" in page
+    assert "telegram channel_enabled=yes token_set=yes chat_id_set=yes" in page
     assert "debug_dump_file_count=1" in page
     assert "smtp-secret" not in page
     assert "tg-secret" not in page
