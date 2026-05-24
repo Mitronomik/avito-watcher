@@ -159,7 +159,7 @@ def test_composite_continues_when_one_channel_fails():
         channel_name = "jsonl"
 
         async def send_listing_alert(self, message: str, payload: dict):
-            return None
+            return True
 
     class Bad:
         channel_name = "email"
@@ -187,6 +187,24 @@ def test_composite_skips_channels_returning_false():
 
     notifier = CompositeNotifier([FalseChannel(), Ok()])
     sent = asyncio.run(notifier.send_listing_alert("msg", {"token": "secret"}))
+    assert sent == ["jsonl"]
+
+
+def test_composite_skips_channels_returning_none():
+    class NoneChannel:
+        channel_name = "email"
+
+        async def send_listing_alert(self, message: str, payload: dict):
+            return None
+
+    class Ok:
+        channel_name = "jsonl"
+
+        async def send_listing_alert(self, message: str, payload: dict):
+            return True
+
+    notifier = CompositeNotifier([NoneChannel(), Ok()])
+    sent = asyncio.run(notifier.send_listing_alert("msg", {}))
     assert sent == ["jsonl"]
 
 
