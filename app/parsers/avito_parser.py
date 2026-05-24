@@ -479,7 +479,6 @@ class AvitoParser:
         raw_cards = soup.select(CARD_SELECTOR)
         fallback_cards: list[ListingCard] = []
         fallback_diag = self._build_fallback_diagnostics(soup=soup, page_html=page_html)
-        self._cycle_counters.layout_changed_hint = fallback_diag.get("layout_changed_hint")
         if not raw_cards:
             fallback_cards = self._parse_cards_from_serp_fallback(
                 soup=soup, page_html=page_html, diagnostics=fallback_diag

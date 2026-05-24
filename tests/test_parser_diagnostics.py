@@ -548,6 +548,31 @@ def test_serp_fallback_card_counts_accumulate_across_pages():
     assert stats["layout_changed_hint"] == "preloaded_state_with_listing_items"
 
 
+def test_fetch_parse_path_keeps_first_meaningful_layout_changed_hint_across_pages():
+    parser = AvitoParser()
+    page1 = _state_html("""[
+      {"type":"item","id":8085355489,"urlPath":"/sankt-peterburg/kvartiry/1-k._kvartira_40_m_14_et._8085355489","title":"1-к. квартира, 40 м²"}
+    ]""")
+    page2 = (
+        "<html><head><title>Авито</title></head><body>"
+        "<div data-marker='item'><a href='/sankt-peterburg/kvartiry/test_8085355490'><h3>1-к. квартира, 41 м²</h3></a></div>"
+        "</body></html>"
+    )
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(side_effect=[page1, page2])):
+        asyncio.run(parser.begin_cycle())
+        try:
+            cards1 = asyncio.run(parser._fetch_and_parse_page_cards("https://www.avito.ru/sankt-peterburg/kvartiry", 30))
+            cards2 = asyncio.run(parser._fetch_and_parse_page_cards("https://www.avito.ru/sankt-peterburg/kvartiry?p=2", 30))
+        finally:
+            asyncio.run(parser.end_cycle())
+    assert len(cards1) == 1
+    assert len(cards2) == 1
+    stats = parser.cycle_stats()
+    assert stats["layout_changed_hint"] == "preloaded_state_with_listing_items"
+    assert stats["serp_state_fallback_attempted"] is True
+    assert stats["serp_state_fallback_card_count"] == 1
+
+
 def test_fetch_page_html_cycle_mode_evicts_broken_cached_session_and_falls_back(caplog):
     parser = make_test_parser(preferred_engine="auto")
     parser._cycle_active = True
