@@ -349,6 +349,41 @@ def test_serp_fallback_parses_preloaded_state_catalog_items():
     assert cards[0].area_m2 == 40
     assert cards[0].rooms == "1-к."
     assert cards[0].address.startswith("Санкт-Петербург")
+    assert cards[0].published_at is None
+
+
+def test_serp_fallback_parses_millisecond_timestamp_to_sane_utc_datetime():
+    parser = AvitoParser()
+    html = _state_html("""[
+      {"type":"item","id":8085355489,"urlPath":"/sankt-peterburg/kvartiry/test_8085355489","title":"1-к. квартира, 40 м²","sortTimeStamp":1779449836000}
+    ]""")
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        cards = asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+    assert cards[0].published_at is not None
+    assert cards[0].published_at.year == 2026
+
+
+def test_serp_fallback_parses_second_timestamp():
+    parser = AvitoParser()
+    html = _state_html("""[
+      {"type":"item","id":8085355489,"urlPath":"/sankt-peterburg/kvartiry/test_8085355489","title":"1-к. квартира, 40 м²","sortTimeStamp":1779449836}
+    ]""")
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        cards = asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+    assert cards[0].published_at == datetime(2026, 5, 22, 11, 37, 16)
+
+
+def test_serp_fallback_ignores_malformed_or_missing_timestamp():
+    parser = AvitoParser()
+    html = _state_html("""[
+      {"type":"item","id":8085355489,"urlPath":"/sankt-peterburg/kvartiry/test_8085355489","title":"1-к. квартира, 40 м²","sortTimeStamp":"bad"},
+      {"type":"item","id":8085355490,"urlPath":"/sankt-peterburg/kvartiry/test_8085355490","title":"1-к. квартира, 40 м²"}
+    ]""")
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        cards = asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+    assert len(cards) == 2
+    assert cards[0].published_at is None
+    assert cards[1].published_at is None
 
 
 def test_serp_fallback_dedupes_and_skips_malformed_catalog_items():

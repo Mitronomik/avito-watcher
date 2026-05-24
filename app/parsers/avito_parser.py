@@ -67,6 +67,7 @@ ADDRESS_HINTS = (
 AREA_RE = re.compile(r"(?<!\d)(\d+(?:[,.]\d+)?)\s*(?:м²|кв\.?\s*м)(?!\w)", re.IGNORECASE)
 ROOMS_RE = re.compile(r"(?<!\d)([1-4])\s*-\s*к\.", re.IGNORECASE)
 AVITO_LISTING_URL_PATH_RE = re.compile(r"^/[a-z0-9_-]+/kvartiry/[^/\s]+_(\d{10})(?:\?.*)?$", re.IGNORECASE)
+MAX_FUTURE_PUBLISHED_AT_DAYS = 7
 PUBLICATION_MARKER_SELECTORS = (
     '[data-marker*="item-date"]',
     '[data-marker*="date"]',
@@ -917,8 +918,8 @@ class AvitoParser:
             title = cls._normalize_text_line(str(item.get("title") or ""))
             price_data = item.get("priceDetailed") if isinstance(item.get("priceDetailed"), dict) else {}
             price = price_data.get("value")
-            published_ts = item.get("sortTimeStamp") or item.get("allowTimeStamp")
-            published_at = datetime.fromtimestamp(published_ts, tz=UTC).replace(tzinfo=None) if isinstance(published_ts, (int, float)) else None
+            published_ts = item.get("sortTimeStamp") if item.get("sortTimeStamp") is not None else item.get("allowTimeStamp")
+            published_at = cls._parse_catalog_timestamp(published_ts)
             result.append(ListingCard(
                 external_id=ext_id,
                 url=cls._normalize_listing_url(url_path),
@@ -932,6 +933,26 @@ class AvitoParser:
                 raw={"source": "serp_preloaded_state"},
             ))
         return result
+
+    @classmethod
+    def _parse_catalog_timestamp(cls, value: object) -> datetime | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if value < 0:
+            return None
+        ts = float(value)
+        if ts >= 10_000_000_000:
+            ts = ts / 1000.0
+        elif ts < 1_000_000_000:
+            return None
+        try:
+            parsed = datetime.fromtimestamp(ts, tz=UTC).replace(tzinfo=None)
+        except (OverflowError, OSError, ValueError):
+            return None
+        now_utc = datetime.now(UTC).replace(tzinfo=None)
+        if parsed > now_utc + timedelta(days=MAX_FUTURE_PUBLISHED_AT_DAYS):
+            return None
+        return parsed
 
     @classmethod
     def _extract_avito_listing_urls(cls, page_html: str) -> set[str]:
