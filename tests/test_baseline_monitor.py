@@ -188,6 +188,13 @@ def test_process_search_includes_elapsed_ms_and_parser_stats(db_session):
                 "selected_first_engine": "nodriver",
                 "fallback_used": False,
                 "engine_skip_recent_failure_count": 0,
+                "serp_state_fallback_attempted": 0,
+                "serp_state_fallback_succeeded": 0,
+                "serp_state_fallback_card_count": 0,
+                "serp_link_fallback_attempted": 0,
+                "serp_link_fallback_succeeded": 0,
+                "serp_link_fallback_card_count": 0,
+                "layout_changed_hint": False,
             }
 
     service = MonitorService(
@@ -203,7 +210,48 @@ def test_process_search_includes_elapsed_ms_and_parser_stats(db_session):
     assert result["parser_stats"]["preferred_engine"] == "nodriver"
     assert result["parser_stats"]["selected_first_engine"] == "nodriver"
     assert result["parser_stats"]["fallback_used"] is False
+    assert result["parser_stats"]["serp_state_fallback_attempted"] == 0
+    assert result["parser_stats"]["serp_state_fallback_succeeded"] == 0
+    assert result["parser_stats"]["serp_state_fallback_card_count"] == 0
+    assert result["parser_stats"]["serp_link_fallback_attempted"] == 0
+    assert result["parser_stats"]["serp_link_fallback_succeeded"] == 0
+    assert result["parser_stats"]["serp_link_fallback_card_count"] == 0
+    assert result["parser_stats"]["layout_changed_hint"] is False
 
+
+
+
+def test_parser_stats_snapshot_preserves_non_zero_serp_fallback_stats(db_session):
+    search = make_search(db_session)
+
+    class ParserWithSerpFallbackStats(FakeParser):
+        def cycle_stats(self):
+            return {
+                "serp_state_fallback_attempted": 2,
+                "serp_state_fallback_succeeded": 1,
+                "serp_state_fallback_card_count": 5,
+                "serp_link_fallback_attempted": 3,
+                "serp_link_fallback_succeeded": 2,
+                "serp_link_fallback_card_count": 4,
+                "layout_changed_hint": True,
+                "engine_used": "nodriver",
+            }
+
+    service = MonitorService(
+        parser=ParserWithSerpFallbackStats([[card("1")]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    result = run(service, db_session, search)
+
+    assert result["parser_stats"]["serp_state_fallback_attempted"] == 2
+    assert result["parser_stats"]["serp_state_fallback_succeeded"] == 1
+    assert result["parser_stats"]["serp_state_fallback_card_count"] == 5
+    assert result["parser_stats"]["serp_link_fallback_attempted"] == 3
+    assert result["parser_stats"]["serp_link_fallback_succeeded"] == 2
+    assert result["parser_stats"]["serp_link_fallback_card_count"] == 4
+    assert result["parser_stats"]["layout_changed_hint"] is True
 
 def test_process_search_without_cycle_stats_returns_empty_parser_stats(db_session):
     search = make_search(db_session)
