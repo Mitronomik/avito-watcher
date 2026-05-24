@@ -21,10 +21,10 @@ class TelegramNotifier:
         if self.bot is None and settings.telegram_bot_token:
             self.bot = Bot(token=settings.telegram_bot_token)
 
-    async def send_listing_alert(self, message: str, payload: dict | None = None) -> None:
+    async def send_listing_alert(self, message: str, payload: dict | None = None) -> bool:
         if not self.bot or not self.chat_id:
             logger.info("Telegram is not configured; skipping listing alert")
-            return
+            return False
 
         last_exc: Exception | None = None
         for attempt in range(1, TELEGRAM_SEND_ATTEMPTS + 1):
@@ -37,7 +37,7 @@ class TelegramNotifier:
                     read_timeout=TELEGRAM_TIMEOUT_SEC,
                     write_timeout=TELEGRAM_TIMEOUT_SEC,
                 )
-                return
+                return True
             except Exception as exc:
                 last_exc = exc
                 logger.warning(
@@ -51,3 +51,4 @@ class TelegramNotifier:
 
         if last_exc is not None:
             raise last_exc
+        return False

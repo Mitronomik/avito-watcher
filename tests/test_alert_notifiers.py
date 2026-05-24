@@ -9,6 +9,7 @@ from app.notifiers.composite import CompositeNotifier
 from app.notifiers.email import EmailNotifier
 from app.notifiers.google_sheets_webhook import GoogleSheetsWebhookNotifier
 from app.notifiers.jsonl_outbox import JsonlOutboxNotifier
+from app.notifiers.telegram import TelegramNotifier
 
 
 class FakeSMTP:
@@ -136,11 +137,12 @@ def test_jsonl_outbox_writes_valid_json_line(tmp_path: Path):
     out = tmp_path / "alerts" / "alerts.jsonl"
     notifier = JsonlOutboxNotifier(enabled=True, path=str(out))
     payload = {"external_id": "42", "title": "T", "price": 1, "area_m2": 2}
-    asyncio.run(notifier.send_listing_alert("msg", payload))
+    sent = asyncio.run(notifier.send_listing_alert("msg", payload))
 
     line = out.read_text(encoding="utf-8").strip()
     data = json.loads(line)
     assert data["external_id"] == "42"
+    assert sent is True
 
 
 
@@ -149,11 +151,36 @@ def test_jsonl_outbox_maps_summary_to_llm_summary(tmp_path: Path):
     out = tmp_path / "alerts" / "alerts.jsonl"
     notifier = JsonlOutboxNotifier(enabled=True, path=str(out))
     payload = {"external_id": "42", "summary": "LLM short summary"}
-    asyncio.run(notifier.send_listing_alert("msg", payload))
+    sent = asyncio.run(notifier.send_listing_alert("msg", payload))
 
     line = out.read_text(encoding="utf-8").strip()
     data = json.loads(line)
     assert data["llm_summary"] == "LLM short summary"
+    assert sent is True
+
+
+def test_jsonl_outbox_disabled_returns_false(tmp_path: Path):
+    out = tmp_path / "alerts" / "alerts.jsonl"
+    notifier = JsonlOutboxNotifier(enabled=False, path=str(out))
+    sent = asyncio.run(notifier.send_listing_alert("msg", {"external_id": "42"}))
+    assert sent is False
+    assert not out.exists()
+
+
+def test_telegram_notifier_not_configured_returns_false():
+    notifier = TelegramNotifier(bot=None, chat_id=None)
+    sent = asyncio.run(notifier.send_listing_alert("msg"))
+    assert sent is False
+
+
+def test_telegram_notifier_success_returns_true():
+    class FakeBot:
+        async def send_message(self, **_kwargs):
+            return None
+
+    notifier = TelegramNotifier(bot=FakeBot(), chat_id="12345")
+    sent = asyncio.run(notifier.send_listing_alert("msg"))
+    assert sent is True
 def test_composite_continues_when_one_channel_fails():
     class Ok:
         channel_name = "jsonl"
@@ -204,6 +231,30 @@ def test_composite_skips_channels_returning_none():
             return True
 
     notifier = CompositeNotifier([NoneChannel(), Ok()])
+    sent = asyncio.run(notifier.send_listing_alert("msg", {}))
+    assert sent == ["jsonl"]
+
+
+def test_composite_counts_only_true():
+    class TrueChannel:
+        channel_name = "jsonl"
+
+        async def send_listing_alert(self, message: str, payload: dict):
+            return True
+
+    class FalseChannel:
+        channel_name = "google_sheets"
+
+        async def send_listing_alert(self, message: str, payload: dict):
+            return False
+
+    class NoneChannel:
+        channel_name = "telegram"
+
+        async def send_listing_alert(self, message: str, payload: dict):
+            return None
+
+    notifier = CompositeNotifier([FalseChannel(), NoneChannel(), TrueChannel()])
     sent = asyncio.run(notifier.send_listing_alert("msg", {}))
     assert sent == ["jsonl"]
 
@@ -340,3 +391,10 @@ def test_composite_does_not_mark_google_sheets_success_when_disabled():
     notifier = CompositeNotifier([GoogleSheetsWebhookNotifier(enabled=False, webhook_url="https://example.com")])
     sent = asyncio.run(notifier.send_listing_alert("msg", {}))
     assert sent == []
+
+
+def test_composite_counts_jsonl_success(tmp_path: Path):
+    out = tmp_path / "alerts" / "alerts.jsonl"
+    notifier = CompositeNotifier([JsonlOutboxNotifier(enabled=True, path=str(out))])
+    sent = asyncio.run(notifier.send_listing_alert("msg", {"external_id": "42"}))
+    assert sent == ["jsonl"]
