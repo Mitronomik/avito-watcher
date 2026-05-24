@@ -43,6 +43,13 @@ PARSER_DIAGNOSTIC_KEYS = (
     "session_reuse_count",
     "session_evict_count",
     "session_close_failure_count",
+    "serp_state_fallback_attempted",
+    "serp_state_fallback_succeeded",
+    "serp_state_fallback_card_count",
+    "serp_link_fallback_attempted",
+    "serp_link_fallback_succeeded",
+    "serp_link_fallback_card_count",
+    "layout_changed_hint",
 )
 
 
