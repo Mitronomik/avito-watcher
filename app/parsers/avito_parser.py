@@ -487,7 +487,8 @@ class AvitoParser:
             self._apply_serp_fallback_diagnostics_to_cycle(fallback_diag)
 
         if self._looks_like_captcha_or_block(title, body_text) and not (
-            fallback_diag["has_catalog_items_state"] or fallback_diag["has_listing_links_without_card_markers"]
+            fallback_diag.get("has_catalog_items_state", False)
+            or fallback_diag.get("has_listing_links_without_card_markers", False)
         ):
             raise ParserError(
                 ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK,
