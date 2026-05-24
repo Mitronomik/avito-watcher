@@ -64,7 +64,7 @@ def test_email_notifier_returns_false_when_misconfigured():
         host="smtp.test",
         port=465,
         sender="from@test",
-        recipient=None,
+        recipient="",
     )
     sent = asyncio.run(notifier.send_listing_alert("hello", {}))
     assert sent is False
@@ -76,7 +76,7 @@ def test_email_notifier_returns_false_when_username_without_password(caplog):
         host="smtp.test",
         port=465,
         username="smtp-user",
-        password=None,
+        password="",
         sender="from@test",
         recipient="to@test",
     )
@@ -168,7 +168,7 @@ def test_jsonl_outbox_disabled_returns_false(tmp_path: Path):
 
 
 def test_telegram_notifier_not_configured_returns_false():
-    notifier = TelegramNotifier(bot=None, chat_id=None)
+    notifier = TelegramNotifier(bot=False, chat_id="")
     sent = asyncio.run(notifier.send_listing_alert("msg"))
     assert sent is False
 
