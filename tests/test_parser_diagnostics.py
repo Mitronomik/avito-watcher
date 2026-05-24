@@ -480,6 +480,74 @@ def test_primary_dom_path_keeps_serp_fallback_counters_zero():
     assert stats["serp_link_fallback_card_count"] == 0
 
 
+def test_serp_fallback_stats_are_sticky_when_followed_by_primary_dom_page():
+    parser = AvitoParser()
+    parser._apply_serp_fallback_diagnostics_to_cycle(
+        {
+            "serp_state_fallback_attempted": True,
+            "serp_state_fallback_succeeded": True,
+            "serp_state_fallback_card_count": 2,
+            "serp_link_fallback_attempted": False,
+            "serp_link_fallback_succeeded": False,
+            "serp_link_fallback_card_count": 0,
+            "layout_changed_hint": "preloaded_state_with_listing_items",
+        }
+    )
+    parser._apply_serp_fallback_diagnostics_to_cycle(
+        {
+            "serp_state_fallback_attempted": False,
+            "serp_state_fallback_succeeded": False,
+            "serp_state_fallback_card_count": 0,
+            "serp_link_fallback_attempted": False,
+            "serp_link_fallback_succeeded": False,
+            "serp_link_fallback_card_count": 0,
+            "layout_changed_hint": "plain_layout_changed",
+        }
+    )
+    stats = parser.cycle_stats()
+    assert stats["serp_state_fallback_attempted"] is True
+    assert stats["serp_state_fallback_succeeded"] is True
+    assert stats["serp_state_fallback_card_count"] == 2
+    assert stats["serp_link_fallback_attempted"] is False
+    assert stats["serp_link_fallback_succeeded"] is False
+    assert stats["serp_link_fallback_card_count"] == 0
+    assert stats["layout_changed_hint"] == "preloaded_state_with_listing_items"
+
+
+def test_serp_fallback_card_counts_accumulate_across_pages():
+    parser = AvitoParser()
+    parser._apply_serp_fallback_diagnostics_to_cycle(
+        {
+            "serp_state_fallback_attempted": True,
+            "serp_state_fallback_succeeded": True,
+            "serp_state_fallback_card_count": 1,
+            "serp_link_fallback_attempted": True,
+            "serp_link_fallback_succeeded": True,
+            "serp_link_fallback_card_count": 2,
+            "layout_changed_hint": "preloaded_state_with_listing_items",
+        }
+    )
+    parser._apply_serp_fallback_diagnostics_to_cycle(
+        {
+            "serp_state_fallback_attempted": True,
+            "serp_state_fallback_succeeded": True,
+            "serp_state_fallback_card_count": 3,
+            "serp_link_fallback_attempted": True,
+            "serp_link_fallback_succeeded": True,
+            "serp_link_fallback_card_count": 4,
+            "layout_changed_hint": "listing_links_without_card_markers",
+        }
+    )
+    stats = parser.cycle_stats()
+    assert stats["serp_state_fallback_card_count"] == 4
+    assert stats["serp_link_fallback_card_count"] == 6
+    assert stats["serp_state_fallback_attempted"] is True
+    assert stats["serp_state_fallback_succeeded"] is True
+    assert stats["serp_link_fallback_attempted"] is True
+    assert stats["serp_link_fallback_succeeded"] is True
+    assert stats["layout_changed_hint"] == "preloaded_state_with_listing_items"
+
+
 def test_fetch_page_html_cycle_mode_evicts_broken_cached_session_and_falls_back(caplog):
     parser = make_test_parser(preferred_engine="auto")
     parser._cycle_active = True

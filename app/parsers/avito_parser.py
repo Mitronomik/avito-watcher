@@ -557,14 +557,33 @@ class AvitoParser:
         return result
 
     def _apply_serp_fallback_diagnostics_to_cycle(self, diagnostics: dict) -> None:
-        self._cycle_counters.serp_state_fallback_attempted = bool(diagnostics.get("serp_state_fallback_attempted", False))
-        self._cycle_counters.serp_state_fallback_succeeded = bool(diagnostics.get("serp_state_fallback_succeeded", False))
-        self._cycle_counters.serp_state_fallback_card_count = int(diagnostics.get("serp_state_fallback_card_count", 0))
-        self._cycle_counters.serp_link_fallback_attempted = bool(diagnostics.get("serp_link_fallback_attempted", False))
-        self._cycle_counters.serp_link_fallback_succeeded = bool(diagnostics.get("serp_link_fallback_succeeded", False))
-        self._cycle_counters.serp_link_fallback_card_count = int(diagnostics.get("serp_link_fallback_card_count", 0))
+        # Aggregate over the whole parser cycle (all paginated pages):
+        # - booleans are sticky OR;
+        # - counters accumulate;
+        # - layout hint keeps the first non-empty value as the earliest root-cause signal.
+        self._cycle_counters.serp_state_fallback_attempted = (
+            self._cycle_counters.serp_state_fallback_attempted
+            or bool(diagnostics.get("serp_state_fallback_attempted", False))
+        )
+        self._cycle_counters.serp_state_fallback_succeeded = (
+            self._cycle_counters.serp_state_fallback_succeeded
+            or bool(diagnostics.get("serp_state_fallback_succeeded", False))
+        )
+        self._cycle_counters.serp_state_fallback_card_count += int(diagnostics.get("serp_state_fallback_card_count", 0))
+        self._cycle_counters.serp_link_fallback_attempted = (
+            self._cycle_counters.serp_link_fallback_attempted
+            or bool(diagnostics.get("serp_link_fallback_attempted", False))
+        )
+        self._cycle_counters.serp_link_fallback_succeeded = (
+            self._cycle_counters.serp_link_fallback_succeeded
+            or bool(diagnostics.get("serp_link_fallback_succeeded", False))
+        )
+        self._cycle_counters.serp_link_fallback_card_count += int(diagnostics.get("serp_link_fallback_card_count", 0))
         layout_changed_hint = diagnostics.get("layout_changed_hint")
-        if layout_changed_hint:
+        if layout_changed_hint and (
+            self._cycle_counters.layout_changed_hint is None
+            or self._cycle_counters.layout_changed_hint == "plain_layout_changed"
+        ):
             self._cycle_counters.layout_changed_hint = str(layout_changed_hint)
 
     def _maybe_dump_layout_changed_html(
