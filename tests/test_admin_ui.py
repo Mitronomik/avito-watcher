@@ -451,8 +451,19 @@ def test_run_once_success_page_includes_runtime_json(monkeypatch):
                 "created": 0,
                 "alerted": 0,
                 "filtered": 0,
+                "total_seen": 0,
+                "pages_seen": 1,
+                "pages_attempted": 1,
+                "pagination_stopped_reason": "no_more_pages",
+                "page_errors": [],
                 "scored": 0,
-                "parser_stats": {},
+                "parser_stats": {"engine_used": "camoufox", "layout_changed_hint": "no", "timeout_failure_count": 0, "proxy_quarantine_on_failure_count": 0},
+                "delivery_attempted_by_channel": {"jsonl": 0, "telegram": 1},
+                "delivery_success_by_channel": {"jsonl": 0, "telegram": 1},
+                "delivery_skipped_by_channel": {"jsonl": 0, "telegram": 0},
+                "delivery_failed_by_channel": {"jsonl": 0, "telegram": 0},
+                "delivery_unknown_by_channel": {"jsonl": 0, "telegram": 0},
+                "delivery_unsuccessful_by_channel": {"jsonl": 0, "telegram": 0},
                 "elapsed_ms": 1,
                 "runtime": {"alert_channels": ["jsonl"]},
             }
@@ -461,6 +472,36 @@ def test_run_once_success_page_includes_runtime_json(monkeypatch):
     text = client.post(f"/admin/searches/{job_id}/run-once").text
     assert "runtime" in text
     assert "alert_channels" in text
+    assert "Delivery counters" in text
+    assert "layout_changed_hint" in text
+    assert "timeout_failure_count" in text
+    assert "proxy_quarantine_on_failure_count" in text
+    assert "neutral" in text
+
+
+def test_run_once_delivery_warning_badge_when_failed(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    job_id = create_job(Session)
+
+    class WarnService:
+        def __init__(self, parser=None):
+            self.parser = parser
+
+        def run_once(self, _search_id):
+            return {
+                "ok": True,
+                "parser_stats": {},
+                "delivery_attempted_by_channel": {"email": 2},
+                "delivery_success_by_channel": {"email": 1},
+                "delivery_skipped_by_channel": {"email": 0},
+                "delivery_failed_by_channel": {"email": 1},
+                "delivery_unknown_by_channel": {"email": 0},
+                "delivery_unsuccessful_by_channel": {"email": 1},
+            }
+
+    monkeypatch.setattr("app.admin.MonitorService", WarnService)
+    text = client.post(f"/admin/searches/{job_id}/run-once").text
+    assert "warning" in text
 
 
 def test_searches_dashboard_statuses_actions_and_previews(monkeypatch):
@@ -535,6 +576,25 @@ def test_searches_dashboard_worker_status_block(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "scoring_enabled", True)
     monkeypatch.setattr(settings, "scrape_preferred_engine", "playwright")
     monkeypatch.setattr(settings, "scrape_headless", False)
+    monkeypatch.setattr(settings, "scrape_timeout_retry_once", True)
+    monkeypatch.setattr(settings, "scrape_max_pages", 3)
+    monkeypatch.setattr(settings, "scrape_debug_dump_html", True)
+    debug_dir = tmp_path / "debug_html"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    (debug_dir / "sample.html").write_text("<html>ok</html>", encoding="utf-8")
+    monkeypatch.setattr(settings, "scrape_debug_dump_dir", str(debug_dir))
+    monkeypatch.setattr(settings, "jsonl_outbox_path", str(tmp_path / "alerts.jsonl"))
+    monkeypatch.setattr(settings, "google_sheets_webhook_enabled", True)
+    monkeypatch.setattr(settings, "google_sheets_webhook_url", "https://example.com/hook")
+    monkeypatch.setattr(settings, "google_sheets_webhook_secret", "gs-secret")
+    monkeypatch.setattr(settings, "smtp_host", "smtp.example.com")
+    monkeypatch.setattr(settings, "smtp_port", 2525)
+    monkeypatch.setattr(settings, "smtp_username", "user@example.com")
+    monkeypatch.setattr(settings, "smtp_password", "smtp-secret")
+    monkeypatch.setattr(settings, "email_from", "from@example.com")
+    monkeypatch.setattr(settings, "email_to", "to@example.com")
+    monkeypatch.setattr(settings, "telegram_bot_token", "tg-secret")
+    monkeypatch.setattr(settings, "telegram_chat_id", "42")
     monkeypatch.setattr(settings, "api_key", "secret")
     now = datetime.utcnow()
     with Session() as s:
@@ -579,6 +639,16 @@ def test_searches_dashboard_worker_status_block(monkeypatch, tmp_path):
     assert "scrape_preferred_engine=playwright" in page
     assert "scoring_enabled=True" in page
     assert "scrape_headless=False" in page
+    assert "scrape_timeout_retry_once=True" in page
+    assert "scrape_max_pages=3" in page
+    assert "jsonl enabled=yes" in page
+    assert "google_sheets enabled=yes webhook_url_set=yes secret_set=yes" in page
+    assert "email enabled=no smtp_host=smtp.example.com smtp_port=2525 username_set=yes password_set=yes email_from_set=yes email_to_set=yes" in page
+    assert "telegram token_set=yes chat_id_set=yes" in page
+    assert "debug_dump_file_count=1" in page
+    assert "smtp-secret" not in page
+    assert "tg-secret" not in page
+    assert "gs-secret" not in page
     assert "Active searches:</strong> 2" in page
     assert "Due now:</strong> 1" in page
     assert f"Last success:</strong> {now}" in page

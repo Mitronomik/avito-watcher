@@ -163,6 +163,20 @@ def _badge(text: str, level: str) -> str:
     return f"<span class='badge badge-{level}'>{html.escape(text)}</span>"
 
 
+def _bool_label(value: object) -> str:
+    return "yes" if bool(value) else "no"
+
+
+def _delivery_badge(attempted: int, unsuccessful: int, failed: int, unknown: int) -> str:
+    if attempted == 0:
+        return _badge("neutral", "gray")
+    if failed > 0 or unknown > 0:
+        return _badge("warning", "yellow")
+    if unsuccessful == 0:
+        return _badge("success", "green")
+    return _badge("warning", "yellow")
+
+
 async def _parse_form(request: Request) -> dict[str, str]:
     data = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
     return {k: v[-1] if v else "" for k, v in data.items()}
@@ -325,7 +339,12 @@ def searches(request: Request, db: Session = Depends(get_db)):
     runtime = runtime_diagnostics()
     lock_path = settings.monitor_worker_lock_path
     lock_exists = Path(lock_path).exists()
-    runtime_alert_channels = ", ".join(runtime.get("alert_channels") or [])
+    runtime_alert_channels_list = runtime.get("alert_channels") or []
+    runtime_alert_channels = ", ".join(runtime_alert_channels_list)
+    debug_dump_dir = Path(str(runtime.get("scrape_debug_dump_dir") or ""))
+    debug_dump_count = "missing"
+    if debug_dump_dir.exists() and debug_dump_dir.is_dir():
+        debug_dump_count = str(sum(1 for _ in debug_dump_dir.iterdir() if _.is_file()))
     runtime_block = (
         "<section><h2>Worker status</h2>"
         "<p>The worker is a separate long-running process. Admin UI does not start or stop it.</p>"
@@ -335,7 +354,17 @@ def searches(request: Request, db: Session = Depends(get_db)):
         f"<strong>Runtime:</strong> alert_channels={html.escape(runtime_alert_channels or '—')}; "
         f"scoring_enabled={html.escape(str(runtime.get('scoring_enabled')))}; "
         f"scrape_preferred_engine={html.escape(str(runtime.get('scrape_preferred_engine')))}; "
-        f"scrape_headless={html.escape(str(runtime.get('scrape_headless')))}<br>"
+        f"scrape_headless={html.escape(str(runtime.get('scrape_headless')))}; "
+        f"scrape_timeout_retry_once={html.escape(str(runtime.get('scrape_timeout_retry_once')))}; "
+        f"scrape_max_pages={html.escape(str(runtime.get('scrape_max_pages')))}<br>"
+        f"<strong>Channels:</strong> configured={html.escape(runtime_alert_channels or '—')}; "
+        f"jsonl enabled={_bool_label('jsonl' in runtime_alert_channels_list)} path=<code>{html.escape(settings.jsonl_outbox_path)}</code>; "
+        f"google_sheets enabled={_bool_label(settings.google_sheets_webhook_enabled)} webhook_url_set={_bool_label(settings.google_sheets_webhook_url)} secret_set={_bool_label(settings.google_sheets_webhook_secret)}; "
+        f"email enabled={_bool_label('email' in runtime_alert_channels_list)} smtp_host={html.escape(settings.smtp_host or '—')} smtp_port={html.escape(str(settings.smtp_port))} username_set={_bool_label(settings.smtp_username)} password_set={_bool_label(settings.smtp_password)} email_from_set={_bool_label(settings.email_from)} email_to_set={_bool_label(settings.email_to)}; "
+        f"telegram token_set={_bool_label(settings.telegram_bot_token)} chat_id_set={_bool_label(settings.telegram_chat_id)}<br>"
+        f"<strong>Debug:</strong> scrape_debug_dump_html={html.escape(str(runtime.get('scrape_debug_dump_html')))}; "
+        f"scrape_debug_dump_dir=<code>{html.escape(str(runtime.get('scrape_debug_dump_dir')))}</code>; "
+        f"debug_dump_file_count={html.escape(debug_dump_count)}<br>"
         f"<strong>Active searches:</strong> {len(active_searches)}<br>"
         f"<strong>Due now:</strong> {due_now_count}<br>"
         f"<strong>Last success:</strong> {html.escape(str(last_success or '—'))}<br>"
@@ -596,4 +625,54 @@ def run_once(search_id: int, request: Request):
             "parser_stats": _parser_stats_snapshot(parser_instance),
             "runtime": runtime_diagnostics(),
         }
-    return _render_page('Run once', f"<h1>Run once result</h1><pre>{html.escape(json.dumps(result, ensure_ascii=False, indent=2))}</pre><p><a href='{_admin_url('/admin/searches', api_key)}'>Back</a></p>")
+    parser_stats = result.get("parser_stats", {}) if isinstance(result, dict) else {}
+    delivery_channels = sorted(
+        set((result.get("delivery_attempted_by_channel") or {}).keys())
+        | set((result.get("delivery_success_by_channel") or {}).keys())
+        | set((result.get("delivery_skipped_by_channel") or {}).keys())
+        | set((result.get("delivery_failed_by_channel") or {}).keys())
+        | set((result.get("delivery_unknown_by_channel") or {}).keys())
+        | set((result.get("delivery_unsuccessful_by_channel") or {}).keys())
+    )
+    summary_rows = [
+        ("ok", result.get("ok")),
+        ("error", result.get("error")),
+        ("created", result.get("created")),
+        ("alerted", result.get("alerted")),
+        ("filtered", result.get("filtered")),
+        ("total_seen", result.get("total_seen")),
+        ("pages_seen", result.get("pages_seen")),
+        ("pages_attempted", result.get("pages_attempted")),
+        ("pagination_stopped_reason", result.get("pagination_stopped_reason")),
+        ("page_errors_count", len(result.get("page_errors", []) or [])),
+        ("parser_engine_used", parser_stats.get("engine_used")),
+        ("layout_changed_hint", parser_stats.get("layout_changed_hint")),
+        ("timeout_failure_count", parser_stats.get("timeout_failure_count")),
+        ("proxy_quarantine_on_failure_count", parser_stats.get("proxy_quarantine_on_failure_count")),
+    ]
+    summary_table = "".join(
+        f"<tr><td>{html.escape(str(k))}</td><td>{html.escape(str(v if v is not None else '—'))}</td></tr>"
+        for k, v in summary_rows
+    )
+    delivery_table = ""
+    if delivery_channels:
+        delivery_rows = []
+        for channel in delivery_channels:
+            attempted = int((result.get("delivery_attempted_by_channel") or {}).get(channel, 0) or 0)
+            success = int((result.get("delivery_success_by_channel") or {}).get(channel, 0) or 0)
+            skipped = int((result.get("delivery_skipped_by_channel") or {}).get(channel, 0) or 0)
+            failed = int((result.get("delivery_failed_by_channel") or {}).get(channel, 0) or 0)
+            unknown = int((result.get("delivery_unknown_by_channel") or {}).get(channel, 0) or 0)
+            unsuccessful = int((result.get("delivery_unsuccessful_by_channel") or {}).get(channel, 0) or 0)
+            delivery_rows.append(
+                f"<tr><td>{html.escape(channel)}</td><td>{attempted}</td><td>{success}</td><td>{skipped}</td><td>{failed}</td><td>{unknown}</td><td>{unsuccessful}</td><td>{_delivery_badge(attempted, unsuccessful, failed, unknown)}</td></tr>"
+            )
+        delivery_table = f"<h2>Delivery counters</h2><table><tr><th>channel</th><th>attempted</th><th>success</th><th>skipped</th><th>failed</th><th>unknown</th><th>unsuccessful</th><th>status</th></tr>{''.join(delivery_rows)}</table>"
+    body = (
+        "<h1>Run once result</h1>"
+        f"<h2>Summary</h2><table><tr><th>metric</th><th>value</th></tr>{summary_table}</table>"
+        f"{delivery_table}"
+        f"<pre>{html.escape(json.dumps(result, ensure_ascii=False, indent=2))}</pre>"
+        f"<p><a href='{_admin_url('/admin/searches', api_key)}'>Back</a></p>"
+    )
+    return _render_page('Run once', body)
