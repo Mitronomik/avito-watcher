@@ -411,7 +411,7 @@ class MonitorService:
         card: ListingCard,
         message: str,
         payload: dict,
-    ) -> bool:
+    ) -> dict[str, list[str]]:
         notifier_channels = getattr(self.notifier, "channels", [self.notifier])
         channel_names = [ch.channel_name for ch in notifier_channels]
         pending_channels = []
@@ -421,7 +421,13 @@ class MonitorService:
                 pending_channels.append(channel_name)
 
         if not pending_channels:
-            return False
+            return {
+                "attempted": [],
+                "successful": [],
+                "skipped": [],
+                "failed": [],
+                "unknown": [],
+            }
 
         channels = getattr(self.notifier, "channels", [self.notifier])
         if all(hasattr(channel, "send_listing_alert") for channel in channels):
@@ -431,21 +437,45 @@ class MonitorService:
                 if channel.channel_name in pending_channels
             }
             successful = []
+            skipped = []
+            failed = []
+            unknown = []
             for channel_name in pending_channels:
                 channel = channel_map.get(channel_name)
                 if channel is None:
+                    unknown.append(channel_name)
                     continue
                 try:
                     delivered = await channel.send_listing_alert(message, payload)
                 except Exception:
                     logger.exception("Alert channel failed", extra={"channel": channel_name})
+                    failed.append(channel_name)
+                    continue
+                if delivered is True:
+                    successful.append(channel_name)
                     continue
                 if delivered is False:
+                    skipped.append(channel_name)
                     continue
-                successful.append(channel_name)
+                logger.debug(
+                    "Alert channel returned unexpected delivery result type",
+                    extra={"channel": channel_name, "result_type": type(delivered).__name__},
+                )
+                unknown.append(channel_name)
         else:
-            successful = await self.notifier.send_listing_alert(message, payload)
+            skipped = []
+            failed = []
+            unknown = []
+            try:
+                successful = await self.notifier.send_listing_alert(message, payload)
+            except Exception:
+                logger.exception("Alert notifier failed")
+                successful = []
+                failed = list(pending_channels)
             successful = [name for name in successful if name in pending_channels]
+            if not failed:
+                successful_set = set(successful)
+                unknown = [name for name in pending_channels if name not in successful_set]
         for channel_name in successful:
             alert_repo.create(
                 listing_external_id=card.external_id,
@@ -453,7 +483,13 @@ class MonitorService:
                 channel=channel_name,
             )
 
-        return bool(successful)
+        return {
+            "attempted": pending_channels,
+            "successful": successful,
+            "skipped": skipped,
+            "failed": failed,
+            "unknown": unknown,
+        }
 
     async def process_search(self, db: Session, search: SearchJob) -> dict:
         search_repo = SearchRepository(db)
@@ -610,6 +646,14 @@ class MonitorService:
         filtered_samples: list[dict] = []
         publication_missing_allowed_count = 0
         publication_missing_rejected_count = 0
+        configured_channels = [
+            ch.channel_name for ch in getattr(self.notifier, "channels", [self.notifier])
+        ]
+        delivery_attempted_by_channel = {channel: 0 for channel in configured_channels}
+        delivery_success_by_channel = {channel: 0 for channel in configured_channels}
+        delivery_skipped_by_channel = {channel: 0 for channel in configured_channels}
+        delivery_failed_by_channel = {channel: 0 for channel in configured_channels}
+        delivery_unknown_by_channel = {channel: 0 for channel in configured_channels}
 
         for card in cards:
             now = self._now()
@@ -650,8 +694,28 @@ class MonitorService:
                     continue
 
                 message, payload = retry_context
-                sent = await self._deliver_pending_alerts(alert_repo, card, message, payload)
-                if sent:
+                delivery = await self._deliver_pending_alerts(alert_repo, card, message, payload)
+                for channel in delivery["attempted"]:
+                    delivery_attempted_by_channel[channel] = (
+                        delivery_attempted_by_channel.get(channel, 0) + 1
+                    )
+                for channel in delivery["successful"]:
+                    delivery_success_by_channel[channel] = (
+                        delivery_success_by_channel.get(channel, 0) + 1
+                    )
+                for channel in delivery["skipped"]:
+                    delivery_skipped_by_channel[channel] = (
+                        delivery_skipped_by_channel.get(channel, 0) + 1
+                    )
+                for channel in delivery["failed"]:
+                    delivery_failed_by_channel[channel] = (
+                        delivery_failed_by_channel.get(channel, 0) + 1
+                    )
+                for channel in delivery["unknown"]:
+                    delivery_unknown_by_channel[channel] = (
+                        delivery_unknown_by_channel.get(channel, 0) + 1
+                    )
+                if delivery["successful"]:
                     alerted += 1
 
                 continue
@@ -781,11 +845,39 @@ class MonitorService:
                 tags=llm.get("tags", []),
             )
 
-            sent = await self._deliver_pending_alerts(alert_repo, card, message, payload)
-            if sent:
+            delivery = await self._deliver_pending_alerts(alert_repo, card, message, payload)
+            for channel in delivery["attempted"]:
+                delivery_attempted_by_channel[channel] = (
+                    delivery_attempted_by_channel.get(channel, 0) + 1
+                )
+            for channel in delivery["successful"]:
+                delivery_success_by_channel[channel] = (
+                    delivery_success_by_channel.get(channel, 0) + 1
+                )
+            for channel in delivery["skipped"]:
+                delivery_skipped_by_channel[channel] = (
+                    delivery_skipped_by_channel.get(channel, 0) + 1
+                )
+            for channel in delivery["failed"]:
+                delivery_failed_by_channel[channel] = (
+                    delivery_failed_by_channel.get(channel, 0) + 1
+                )
+            for channel in delivery["unknown"]:
+                delivery_unknown_by_channel[channel] = (
+                    delivery_unknown_by_channel.get(channel, 0) + 1
+                )
+            if delivery["successful"]:
                 alerted += 1
 
         filtered = filtered_by_rules + filtered_by_publication_date
+        delivery_unsuccessful_by_channel = {
+            channel: (
+                delivery_skipped_by_channel.get(channel, 0)
+                + delivery_failed_by_channel.get(channel, 0)
+                + delivery_unknown_by_channel.get(channel, 0)
+            )
+            for channel in configured_channels
+        }
         return {
             **enrichment_stats,
             "created": created,
@@ -799,6 +891,12 @@ class MonitorService:
             "filtered_samples": filtered_samples,
             "publication_missing_allowed_count": publication_missing_allowed_count,
             "publication_missing_rejected_count": publication_missing_rejected_count,
+            "delivery_attempted_by_channel": delivery_attempted_by_channel,
+            "delivery_success_by_channel": delivery_success_by_channel,
+            "delivery_skipped_by_channel": delivery_skipped_by_channel,
+            "delivery_failed_by_channel": delivery_failed_by_channel,
+            "delivery_unknown_by_channel": delivery_unknown_by_channel,
+            "delivery_unsuccessful_by_channel": delivery_unsuccessful_by_channel,
         }
 
     def run_once(self, search_job_id: int) -> dict:
