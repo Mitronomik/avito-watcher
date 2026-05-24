@@ -8,7 +8,7 @@
  */
 
 const DEFAULT_SHEET_NAME = 'Alerts';
-const FALLBACK_WEBHOOK_SECRET = ''; // Prefer Script Properties over hardcoding.
+const FALLBACK_WEBHOOK_SECRET = ''; // Empty fallback is only for local/manual testing. Use Script Properties WEBHOOK_SECRET in production.
 
 const COLUMNS = [
   'sent_at',

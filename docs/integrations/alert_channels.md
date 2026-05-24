@@ -64,6 +64,14 @@ Production candidates (pick what your installation supports):
    - leave script-level fallback constant for local testing.
 5. Save script.
 
+
+### Production security warning
+
+- `FALLBACK_WEBHOOK_SECRET = ''` is acceptable only for local/manual testing.
+- Do **not** deploy a public/Anyone-access Web App in production with empty `WEBHOOK_SECRET`.
+- For production, set non-empty `WEBHOOK_SECRET` in Script Properties and set matching `GOOGLE_SHEETS_WEBHOOK_SECRET` in `.env`.
+- Never hardcode real secrets in repository files.
+
 ### 2) Deploy Apps Script as Web App
 
 1. Click **Deploy → New deployment**.
@@ -91,8 +99,12 @@ Run one monitoring pass and then verify:
 Example command:
 
 ```bash
-python -m app.cli run-once
+python3 -m app.cli run-once --search-id <id>
 ```
+Important CLI scope note:
+
+- With `--search-id <id>`, only the selected search job is executed.
+- Without `--search-id`, `run-once` may execute **all due active searches**.
 
 ## Email setup
 
@@ -120,8 +132,13 @@ Notes:
 Smoke command:
 
 ```bash
-python -m app.cli run-once
+python3 -m app.cli run-once --search-id <id>
 ```
+
+Important CLI scope note:
+
+- With `--search-id <id>`, only the selected search job is executed.
+- Without `--search-id`, `run-once` may execute **all due active searches**.
 
 Then confirm:
 
