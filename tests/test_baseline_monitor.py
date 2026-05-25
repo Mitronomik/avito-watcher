@@ -2354,3 +2354,37 @@ def test_llm_failed_does_not_block_and_updates_counters(db_session, monkeypatch)
     assert result["created"] == 1
     assert result["alerted"] == 1
     assert result["llm_failed"] == 1
+
+
+def test_scorer_exception_uses_provider_aware_model_metadata(db_session, monkeypatch):
+    monkeypatch.setattr("app.services.monitor_service.settings.scoring_enabled", True)
+    monkeypatch.setattr("app.services.monitor_service.settings.llm_provider", "openai_compatible")
+    monkeypatch.setattr("app.services.monitor_service.settings.llm_model", "")
+    monkeypatch.setattr("app.services.monitor_service.settings.llm_base_url", "")
+    monkeypatch.setattr("app.services.monitor_service.settings.ollama_model", "legacy-ollama")
+
+    search = make_search(db_session)
+    baseline_service = MonitorService(
+        parser=FakeParser([[card("1")]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+    run(baseline_service, db_session, search)
+
+    failing_service = MonitorService(
+        parser=FakeParser([[card("1"), card("2")]]),
+        scorer=FailingScorer(),
+        notifier=FakeNotifier(),
+    )
+    run(failing_service, db_session, search)
+
+    snapshot = (
+        db_session.query(ListingSnapshot)
+        .filter(ListingSnapshot.external_id == "2")
+        .order_by(ListingSnapshot.id.desc())
+        .first()
+    )
+    assert snapshot is not None
+    llm = snapshot.payload_json["llm_score"]
+    assert llm["provider"] == "openai_compatible"
+    assert llm["model"] == ""

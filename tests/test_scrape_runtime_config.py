@@ -106,3 +106,43 @@ def test_llm_shadow_mode_default_true(monkeypatch):
     monkeypatch.delenv("LLM_SHADOW_MODE", raising=False)
     settings = Settings(database_url="sqlite:///tmp.db", _env_file=None)
     assert settings.llm_shadow_mode is True
+
+
+def test_runtime_diagnostics_llm_off_not_configured(monkeypatch):
+    monkeypatch.setattr("app.services.monitor_service.settings.llm_provider", "off")
+    monkeypatch.setattr("app.services.monitor_service.settings.llm_model", "")
+    monkeypatch.setattr("app.services.monitor_service.settings.llm_base_url", "")
+    runtime = runtime_diagnostics()
+    assert runtime["llm_model_set"] is False
+    assert runtime["llm_base_url_set"] is False
+
+
+def test_runtime_diagnostics_llm_ollama_legacy_fallback_counts(monkeypatch):
+    monkeypatch.setattr("app.services.monitor_service.settings.llm_provider", "ollama")
+    monkeypatch.setattr("app.services.monitor_service.settings.llm_model", "")
+    monkeypatch.setattr("app.services.monitor_service.settings.llm_base_url", "")
+    monkeypatch.setattr("app.services.monitor_service.settings.ollama_model", "legacy-model")
+    monkeypatch.setattr("app.services.monitor_service.settings.ollama_base_url", "http://legacy")
+    runtime = runtime_diagnostics()
+    assert runtime["llm_model_set"] is True
+    assert runtime["llm_base_url_set"] is True
+
+
+def test_runtime_diagnostics_openai_does_not_count_ollama_defaults(monkeypatch):
+    monkeypatch.setattr("app.services.monitor_service.settings.llm_provider", "openai_compatible")
+    monkeypatch.setattr("app.services.monitor_service.settings.llm_model", "")
+    monkeypatch.setattr("app.services.monitor_service.settings.llm_base_url", "")
+    monkeypatch.setattr("app.services.monitor_service.settings.ollama_model", "legacy-model")
+    monkeypatch.setattr("app.services.monitor_service.settings.ollama_base_url", "http://legacy")
+    runtime = runtime_diagnostics()
+    assert runtime["llm_model_set"] is False
+    assert runtime["llm_base_url_set"] is False
+
+
+def test_runtime_diagnostics_openai_explicit_config(monkeypatch):
+    monkeypatch.setattr("app.services.monitor_service.settings.llm_provider", "openai_compatible")
+    monkeypatch.setattr("app.services.monitor_service.settings.llm_model", "gpt")
+    monkeypatch.setattr("app.services.monitor_service.settings.llm_base_url", "http://openai-like")
+    runtime = runtime_diagnostics()
+    assert runtime["llm_model_set"] is True
+    assert runtime["llm_base_url_set"] is True

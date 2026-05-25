@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
+from app.agents.llm_providers import resolve_llm_runtime_config
 from app.agents.scorer import ListingScorer
 from app.core.config import settings
 from app.db.session import SessionLocal
@@ -82,17 +83,28 @@ def runtime_diagnostics() -> dict:
         for item in settings.alert_channels.split(",")
         if item.strip()
     ]
+    llm_cfg = resolve_llm_runtime_config()
+    if llm_cfg.provider == "off":
+        llm_model_set = False
+        llm_base_url_set = False
+    elif llm_cfg.provider == "openai_compatible":
+        llm_model_set = bool(settings.llm_model)
+        llm_base_url_set = bool(settings.llm_base_url)
+    else:
+        llm_model_set = bool(llm_cfg.model)
+        llm_base_url_set = bool(llm_cfg.base_url)
+
     return {
         "alert_channels": alert_channels,
         "scoring_enabled": settings.scoring_enabled,
-        "llm_provider": settings.llm_provider,
-        "llm_model_set": bool(settings.llm_model or settings.ollama_model),
-        "llm_base_url_set": bool(settings.llm_base_url or settings.ollama_base_url),
+        "llm_provider": llm_cfg.provider,
+        "llm_model_set": llm_model_set,
+        "llm_base_url_set": llm_base_url_set,
         "llm_api_key_set": bool(settings.llm_api_key),
-        "llm_timeout_sec": settings.llm_timeout_sec,
-        "llm_max_retries": settings.llm_max_retries,
+        "llm_timeout_sec": llm_cfg.timeout_sec,
+        "llm_max_retries": llm_cfg.max_retries,
         "llm_shadow_mode": settings.llm_shadow_mode,
-        "llm_prompt_version": settings.llm_prompt_version,
+        "llm_prompt_version": llm_cfg.prompt_version,
         "scrape_preferred_engine": settings.scrape_preferred_engine,
         "scrape_allowed_engines": settings.scrape_allowed_engines,
         "scrape_timeout_retry_once": settings.scrape_timeout_retry_once,
@@ -893,19 +905,20 @@ class MonitorService:
             if settings.scoring_enabled:
                 scored += 1
                 llm_attempted += 1
+                llm_cfg = resolve_llm_runtime_config()
                 try:
                     llm = await self.scorer.score(card)
                     if not isinstance(llm, dict):
-                        llm = {"score": None, "summary": "", "tags": [], "status": "failed", "provider": settings.llm_provider, "model": settings.llm_model or settings.ollama_model, "prompt_version": settings.llm_prompt_version, "error_type": "invalid_result"}
+                        llm = {"score": None, "summary": "", "tags": [], "status": "failed", "provider": llm_cfg.provider, "model": llm_cfg.model, "prompt_version": llm_cfg.prompt_version, "error_type": "invalid_result"}
                     elif "status" not in llm:
                         llm = {
                             "score": llm.get("score"),
                             "summary": llm.get("summary", ""),
                             "tags": llm.get("tags", []),
                             "status": "success",
-                            "provider": settings.llm_provider,
-                            "model": settings.llm_model or settings.ollama_model,
-                            "prompt_version": settings.llm_prompt_version,
+                            "provider": llm_cfg.provider,
+                            "model": llm_cfg.model,
+                            "prompt_version": llm_cfg.prompt_version,
                             "error_type": None,
                         }
                 except Exception as exc:
@@ -914,9 +927,9 @@ class MonitorService:
                         "summary": "",
                         "tags": [],
                         "status": "failed",
-                        "provider": settings.llm_provider,
-                        "model": settings.llm_model or settings.ollama_model,
-                        "prompt_version": settings.llm_prompt_version,
+                        "provider": llm_cfg.provider,
+                        "model": llm_cfg.model,
+                        "prompt_version": llm_cfg.prompt_version,
                         "error_type": exc.__class__.__name__,
                     }
                 if llm.get("status") == "success":
