@@ -336,6 +336,15 @@ def _state_html(items_payload: str, extra: str = "") -> str:
     )
 
 
+def _raw_state_html(state_obj: dict, extra: str = "") -> str:
+    state_json = json.dumps(state_obj, ensure_ascii=False)
+    encoded = "".join(f"%{b:02X}" for b in state_json.encode("utf-8"))
+    return (
+        "<html><head><title>Авито</title></head><body>"
+        f"<script>window.__preloadedState__=\"{encoded}\";</script>{extra}</body></html>"
+    )
+
+
 def test_serp_fallback_parses_preloaded_state_catalog_items():
     parser = AvitoParser()
     html = _state_html("""[
@@ -416,6 +425,54 @@ def test_layout_changed_when_no_state_and_no_links():
     assert exc_info.value.error_type == ParserErrorType.LAYOUT_CHANGED
     stats = parser.cycle_stats()
     assert stats["layout_changed_hint"] == "plain_layout_changed"
+
+
+def test_hydration_without_cards_without_catalog_items_is_classified():
+    parser = AvitoParser()
+    html = _raw_state_html({"foo": {"ids": [{"externalId": "8085355489"} for _ in range(3)]}})
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        with pytest.raises(ParserError) as exc_info:
+            asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry"))
+    assert exc_info.value.error_type == ParserErrorType.LAYOUT_CHANGED
+    stats = parser.cycle_stats()
+    assert stats["layout_changed_hint"] == "hydration_without_cards_without_catalog_items"
+
+
+def test_external_id_only_preloaded_state_does_not_produce_cards():
+    parser = AvitoParser()
+    html = _raw_state_html({"search": {"payload": [{"id": 8085355489}, {"externalId": "8085355490"}]}})
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        with pytest.raises(ParserError):
+            asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry"))
+    stats = parser.cycle_stats()
+    assert stats["serp_state_fallback_succeeded"] is False
+    assert stats["serp_state_fallback_card_count"] == 0
+
+
+def test_recursive_item_like_preloaded_state_can_produce_cards():
+    parser = AvitoParser()
+    html = _raw_state_html(
+        {
+            "data": {
+                "hydration": {
+                    "cards": [
+                        {
+                            "externalId": "8085355489",
+                            "title": "1-к. квартира, 40 м²",
+                            "href": "/sankt-peterburg/kvartiry/test_8085355489",
+                            "price": {"value": 7000000},
+                            "address": "Санкт-Петербург",
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        cards = asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+    assert len(cards) == 1
+    assert cards[0].external_id == "8085355489"
+    assert cards[0].title.startswith("1-к.")
 
 
 def test_cycle_stats_defaults_include_zero_serp_fallback_counters():

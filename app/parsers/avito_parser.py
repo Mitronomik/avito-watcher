@@ -68,6 +68,8 @@ AREA_RE = re.compile(r"(?<!\d)(\d+(?:[,.]\d+)?)\s*(?:м²|кв\.?\s*м)(?!\w)", 
 ROOMS_RE = re.compile(r"(?<!\d)([1-4])\s*-\s*к\.", re.IGNORECASE)
 AVITO_LISTING_URL_PATH_RE = re.compile(r"^/[a-z0-9_-]+/kvartiry/[^/\s]+_(\d{10})(?:\?.*)?$", re.IGNORECASE)
 MAX_FUTURE_PUBLISHED_AT_DAYS = 7
+MAX_DIAGNOSTIC_STATE_PATHS = 12
+MAX_DIAGNOSTIC_OBJECT_KEY_SETS = 8
 PUBLICATION_MARKER_SELECTORS = (
     '[data-marker*="item-date"]',
     '[data-marker*="date"]',
@@ -951,17 +953,130 @@ class AvitoParser:
 
     @staticmethod
     def _extract_catalog_items_from_preloaded_state(page_html: str) -> list[dict]:
+        state = AvitoParser._extract_preloaded_state(page_html)
+        if not isinstance(state, dict):
+            return []
+        items = (((state or {}).get("data") or {}).get("catalog") or {}).get("items")
+        return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+    @staticmethod
+    def _extract_preloaded_state(page_html: str) -> dict | None:
         match = re.search(r"window\.__preloadedState__\s*=\s*\"((?:\\.|[^\"\\])*)\"", page_html)
         if not match:
-            return []
+            return None
         try:
             encoded = json.loads(f"\"{match.group(1)}\"")
             decoded = unquote(encoded)
             state = json.loads(decoded)
         except (json.JSONDecodeError, ValueError):
+            return None
+        return state if isinstance(state, dict) else None
+
+    @classmethod
+    def _analyze_preloaded_state_candidates(cls, state: dict | None) -> dict:
+        if not isinstance(state, dict):
+            return {
+                "candidate_state_paths": [],
+                "candidate_object_key_sets": [],
+                "state_item_like_dict_count": 0,
+                "external_id_candidate_count_in_state": 0,
+            }
+        paths: list[str] = []
+        key_sets: list[str] = []
+        item_like_count = 0
+        external_ids: set[str] = set()
+
+        def walk(node: object, path: str) -> None:
+            nonlocal item_like_count
+            if isinstance(node, dict):
+                keys = {str(k) for k in node.keys()}
+                has_id = any(k in keys for k in ("id", "itemId", "externalId"))
+                has_title = any(k in keys for k in ("title", "name"))
+                has_price = "price" in keys or "priceDetailed" in keys
+                has_url = any(k in keys for k in ("url", "href", "urlPath"))
+                has_location = any(k in keys for k in ("address", "location"))
+                signals = sum((has_id, has_title, has_price, has_url, has_location))
+                if signals >= 2:
+                    item_like_count += 1
+                if has_id and len(paths) < MAX_DIAGNOSTIC_STATE_PATHS:
+                    paths.append(path[:120])
+                    if len(key_sets) < MAX_DIAGNOSTIC_OBJECT_KEY_SETS:
+                        key_sets.append(",".join(sorted(keys))[:160])
+                for id_key in ("id", "itemId", "externalId"):
+                    id_value = node.get(id_key)
+                    if isinstance(id_value, int):
+                        candidate = str(id_value)
+                    elif isinstance(id_value, str):
+                        candidate = id_value.strip()
+                    else:
+                        continue
+                    if re.fullmatch(r"\d{10}", candidate):
+                        external_ids.add(candidate)
+                for key, value in node.items():
+                    if isinstance(key, str):
+                        next_path = f"{path}.{key}" if path else key
+                    else:
+                        next_path = f"{path}.[key]" if path else "[key]"
+                    walk(value, next_path)
+                return
+            if isinstance(node, list):
+                for idx, value in enumerate(node[:250]):
+                    walk(value, f"{path}[{idx}]")
+
+        walk(state, "")
+        return {
+            "candidate_state_paths": list(dict.fromkeys(paths)),
+            "candidate_object_key_sets": list(dict.fromkeys(key_sets)),
+            "state_item_like_dict_count": item_like_count,
+            "external_id_candidate_count_in_state": len(external_ids),
+        }
+
+    @classmethod
+    def _extract_cards_from_preloaded_state_candidates(cls, state: dict | None) -> list[ListingCard]:
+        if not isinstance(state, dict):
             return []
-        items = (((state or {}).get("data") or {}).get("catalog") or {}).get("items")
-        return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+        cards: list[ListingCard] = []
+        seen: set[str] = set()
+
+        def walk(node: object) -> None:
+            if isinstance(node, dict):
+                ext = node.get("externalId") or node.get("itemId") or node.get("id")
+                if isinstance(ext, (int, str)):
+                    ext_id = str(ext).strip()
+                    title_raw = node.get("title") or node.get("name")
+                    title = cls._normalize_text_line(str(title_raw)) if isinstance(title_raw, str) else ""
+                    url_raw = node.get("url") or node.get("href") or node.get("urlPath")
+                    url = cls._normalize_text_line(str(url_raw)) if isinstance(url_raw, str) else ""
+                    if url and url.startswith("/"):
+                        url = cls._normalize_listing_url(url)
+                    price_raw = node.get("price")
+                    if isinstance(price_raw, dict):
+                        price_raw = price_raw.get("value")
+                    reliable_url = bool(url and (url.startswith("https://www.avito.ru/") or AVITO_LISTING_URL_PATH_RE.match(urlparse(url).path)))
+                    has_minimal = bool(ext_id and title and reliable_url)
+                    has_extended = bool(ext_id and title and isinstance(price_raw, (int, float)) and reliable_url)
+                    if (has_minimal or has_extended) and ext_id not in seen:
+                        seen.add(ext_id)
+                        cards.append(ListingCard(
+                            external_id=ext_id,
+                            url=url,
+                            title=title,
+                            price=float(price_raw) if isinstance(price_raw, (int, float)) else None,
+                            address=cls._normalize_text_line(str(node.get("address") or node.get("location") or "")),
+                            area_m2=cls._extract_area_m2(title),
+                            rooms=cls._extract_rooms(title),
+                            published_label="",
+                            published_at=None,
+                            raw={"source": "serp_preloaded_state_recursive"},
+                        ))
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node[:250]:
+                    walk(value)
+
+        walk(state)
+        return cards
 
     @staticmethod
     def _normalize_listing_url(url_path: str) -> str:
@@ -1077,7 +1192,10 @@ class AvitoParser:
     @classmethod
     def _build_fallback_diagnostics(cls, soup, page_html: str) -> dict:
         avito_urls = cls._extract_avito_listing_urls(page_html)
+        state = cls._extract_preloaded_state(page_html)
         catalog_items = cls._extract_catalog_items_from_preloaded_state(page_html)
+        state_diag = cls._analyze_preloaded_state_candidates(state)
+        html_external_id_count = len({m.group(1) for m in re.finditer(r"_(\d{10})(?:\\?|\"|$)", page_html)})
         return {
             "serp_state_fallback_attempted": False,
             "serp_state_fallback_succeeded": False,
@@ -1088,8 +1206,11 @@ class AvitoParser:
             "has_preloaded_state": "window.__preloadedState__" in page_html,
             "has_catalog_items_state": bool(catalog_items),
             "catalog_items_candidate_count": len(catalog_items),
-            "external_id_candidate_count": len({m.group(1) for m in re.finditer(r"_(\d{10})(?:\\?|\"|$)", page_html)}),
+            "external_id_candidate_count": max(html_external_id_count, state_diag["external_id_candidate_count_in_state"]),
             "avito_listing_url_candidate_count": len(avito_urls),
+            "candidate_state_paths": state_diag["candidate_state_paths"],
+            "candidate_object_key_sets": state_diag["candidate_object_key_sets"],
+            "state_item_like_dict_count": state_diag["state_item_like_dict_count"],
             "has_listing_links_without_card_markers": bool(avito_urls),
             "script_tag_count": len(soup.find_all("script")),
             "body_text_length": len(soup.get_text(separator=" ", strip=True)),
@@ -1100,6 +1221,8 @@ class AvitoParser:
     def _parse_cards_from_serp_fallback(cls, soup, page_html: str, diagnostics: dict) -> list[ListingCard]:
         diagnostics["serp_state_fallback_attempted"] = True
         state_cards = cls._extract_cards_from_catalog_items(page_html)
+        if not state_cards:
+            state_cards = cls._extract_cards_from_preloaded_state_candidates(cls._extract_preloaded_state(page_html))
         diagnostics["serp_state_fallback_card_count"] = len(state_cards)
         diagnostics["serp_state_fallback_succeeded"] = bool(state_cards)
         if state_cards:
@@ -1112,7 +1235,14 @@ class AvitoParser:
         if link_cards:
             diagnostics["layout_changed_hint"] = "listing_links_without_card_markers"
             return link_cards
-        if diagnostics["has_preloaded_state"]:
+        if (
+            diagnostics["has_preloaded_state"]
+            and not diagnostics["has_catalog_items_state"]
+            and not diagnostics.get("has_data_marker_item", False)
+            and diagnostics["external_id_candidate_count"] > 0
+        ):
+            diagnostics["layout_changed_hint"] = "hydration_without_cards_without_catalog_items"
+        elif diagnostics["has_preloaded_state"]:
             diagnostics["layout_changed_hint"] = "hydration_without_cards"
         elif cls._looks_like_empty_results(soup.get_text(separator=" ", strip=True)):
             diagnostics["layout_changed_hint"] = "empty_results"
