@@ -2207,7 +2207,7 @@ def test_publication_only_failure_counters(monkeypatch, db_session):
     assert result["item_page_details_enrichment_failed"] == 0
 
 
-def test_skipped_limit_counts_overlap_for_both_counters(monkeypatch, db_session):
+def test_skipped_limit_excludes_old_publication_filtered_cards_for_details(monkeypatch, db_session):
     monkeypatch.setattr("app.services.monitor_service.settings.scrape_enrich_missing_published_at", True)
     monkeypatch.setattr("app.services.monitor_service.settings.scrape_enrich_item_page_details", True)
     monkeypatch.setattr("app.services.monitor_service.settings.scrape_item_page_limit_per_run", 1)
@@ -2217,4 +2217,98 @@ def test_skipped_limit_counts_overlap_for_both_counters(monkeypatch, db_session)
     run(service, db_session, search)
     result = run(service, db_session, search)
     assert result["item_page_publication_enrichment_skipped_limit"] == 1
+    assert result["item_page_details_enrichment_skipped_limit"] == 0
+
+def test_details_enrichment_skips_old_listing_after_publication_enrichment(monkeypatch, db_session):
+    class Parser(FakeParser):
+        def __init__(self, batches):
+            super().__init__(batches)
+            self.detail_calls = 0
+
+        async def fetch_item_details(self, item_url: str):
+            self.detail_calls += 1
+            details = await super().fetch_item_details(item_url)
+            details["published_label"] = "16 мая в 10:00"
+            return details
+
+    now = datetime(2026, 5, 17, 12, 0, 0)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_enrich_missing_published_at", True)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_enrich_item_page_details", True)
+    search = make_search(db_session, filters_json={"max_age_hours": 1, "require_published_at": True})
+    parser = Parser([[card("1", published_at=now - timedelta(minutes=5))], [card("1", published_at=now - timedelta(minutes=5)), card("2")]])
+    service = MonitorService(parser=parser, scorer=FakeScorer(), notifier=FakeNotifier(), now_func=lambda: now)
+    run(service, db_session, search)
+    parser.detail_calls = 0
+    result = run(service, db_session, search)
+
+    snapshot = db_session.scalar(select(ListingSnapshot).where(ListingSnapshot.external_id == "2"))
+    assert parser.detail_calls == 1
+    assert result["item_page_publication_enrichment_attempted"] == 1
+    assert result["item_page_details_enrichment_attempted"] == 0
+    assert result["created"] == 0
+    assert snapshot is None
+
+
+def test_details_enrichment_uses_remaining_budget_only(monkeypatch, db_session):
+    class Parser(FakeParser):
+        def __init__(self, batches):
+            super().__init__(batches)
+            self.detail_calls = 0
+
+        async def fetch_item_details(self, item_url: str):
+            self.detail_calls += 1
+            details = await super().fetch_item_details(item_url)
+            details["published_label"] = "17 мая в 11:00"
+            return details
+
+    now = datetime(2026, 5, 17, 12, 0, 0)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_enrich_missing_published_at", True)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_enrich_item_page_details", True)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_item_page_limit_per_run", 2)
+    search = make_search(db_session, filters_json={"require_published_at": True})
+    parser = Parser([[card("1", published_at=now - timedelta(minutes=10))], [card("1", published_at=now - timedelta(minutes=10)), card("2"), card("3"), card("4", published_at=now - timedelta(minutes=10))]])
+    service = MonitorService(parser=parser, scorer=FakeScorer(), notifier=FakeNotifier(), now_func=lambda: now)
+    run(service, db_session, search)
+    parser.detail_calls = 0
+    result = run(service, db_session, search)
+
+    assert parser.detail_calls == 2
+    assert result["item_page_publication_enrichment_attempted"] == 2
+    assert result["item_page_details_enrichment_attempted"] == 2
+    assert result["item_page_details_enrichment_succeeded"] == 2
     assert result["item_page_details_enrichment_skipped_limit"] == 1
+
+def test_details_reuse_from_publication_phase_ignores_remaining_network_budget(monkeypatch, db_session):
+    class Parser(FakeParser):
+        def __init__(self, batches):
+            super().__init__(batches)
+            self.detail_calls = 0
+
+        async def fetch_item_details(self, item_url: str):
+            self.detail_calls += 1
+            details = await super().fetch_item_details(item_url)
+            details["published_label"] = "17 мая в 11:30"
+            details["description"] = "reuse me"
+            return details
+
+    now = datetime(2026, 5, 17, 12, 0, 0)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_enrich_missing_published_at", True)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_enrich_item_page_details", True)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_item_page_limit_per_run", 1)
+
+    search = make_search(db_session, filters_json={"require_published_at": True})
+    parser = Parser([[card("1", published_at=now - timedelta(minutes=10))], [card("1", published_at=now - timedelta(minutes=10)), card("2")]])
+    service = MonitorService(parser=parser, scorer=FakeScorer(), notifier=FakeNotifier(), now_func=lambda: now)
+
+    run(service, db_session, search)
+    parser.detail_calls = 0
+    result = run(service, db_session, search)
+
+    snapshot = db_session.scalar(select(ListingSnapshot).where(ListingSnapshot.external_id == "2"))
+    assert parser.detail_calls == 1
+    assert result["item_page_publication_enrichment_attempted"] == 1
+    assert result["item_page_details_enrichment_attempted"] == 1
+    assert result["item_page_details_enrichment_succeeded"] == 1
+    assert result["item_page_details_enrichment_skipped_limit"] == 0
+    assert snapshot is not None
+    assert snapshot.payload_json["item_page"]["description"] == "reuse me"
