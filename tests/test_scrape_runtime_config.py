@@ -89,3 +89,8 @@ def test_runtime_diagnostics_includes_timeout_retry_settings(monkeypatch):
     runtime = runtime_diagnostics()
     assert runtime["scrape_timeout_retry_once"] is True
     assert runtime["scrape_timeout_retry_delay_ms"] == 222
+
+
+def test_scrape_enrich_item_page_details_default_false():
+    settings = Settings(database_url="sqlite:///tmp.db", _env_file=None)
+    assert settings.scrape_enrich_item_page_details is False

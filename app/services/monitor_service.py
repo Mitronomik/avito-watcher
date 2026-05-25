@@ -583,10 +583,21 @@ class MonitorService:
         limit = max(int(settings.scrape_item_page_limit_per_run), 0)
         delay_ms = max(int(settings.scrape_item_page_delay_ms), 0)
         jitter_ms = max(int(settings.scrape_item_page_jitter_ms), 0)
+        remaining_limit = limit
+        fetched_details_by_external_id: dict[str, dict] = {}
+
+        async def _fetch_details(card: ListingCard, is_first_fetch: bool) -> dict:
+            if not is_first_fetch:
+                sleep_ms = delay_ms + (random.randint(0, jitter_ms) if jitter_ms > 0 else 0)
+                if sleep_ms > 0:
+                    await asyncio.sleep(sleep_ms / 1000.0)
+            return await self.parser.fetch_item_details(card.url)
+
         publication_targets: list[ListingCard] = []
         if settings.scrape_enrich_missing_published_at:
-            missing_cards = [card for card in cards if card.published_at is None]
-            for card in missing_cards:
+            for card in cards:
+                if card.published_at is not None:
+                    continue
                 cached = self._publication_enrichment_cache.get(card.external_id)
                 if cached is None:
                     publication_targets.append(card)
@@ -594,64 +605,69 @@ class MonitorService:
                 card.published_label, card.published_at = cached
                 cache_hits += 1
 
-        details_targets: list[ListingCard] = []
+            skipped_limit = max(len(publication_targets) - remaining_limit, 0)
+            fetch_count = min(len(publication_targets), remaining_limit)
+            for idx, card in enumerate(publication_targets[:fetch_count]):
+                attempted += 1
+                try:
+                    details = await _fetch_details(card, is_first_fetch=(attempted + details_attempted == 1 and idx == 0))
+                except Exception:
+                    failed += 1
+                    continue
+                fetched_details_by_external_id[card.external_id] = details
+                label = str(details.get("published_label") or "")
+                if not label:
+                    failed += 1
+                    continue
+                published_at = AvitoParser._parse_published_at(label, self._now())
+                if published_at is None:
+                    failed += 1
+                    continue
+                card.published_label = label
+                card.published_at = published_at
+                self._publication_enrichment_cache[card.external_id] = (label, published_at)
+                succeeded += 1
+            remaining_limit -= fetch_count
+
         if settings.scrape_enrich_item_page_details:
-            details_cards = [card for card in cards if passes_rule_filters(card, filters)]
-            for card in details_cards:
+            now = self._now()
+            details_targets: list[ListingCard] = []
+            for card in cards:
+                if not passes_rule_filters(card, filters):
+                    continue
+                if explain_publication_filter_failures(card, filters, now):
+                    continue
+                details_targets.append(card)
+
+            uncached_targets: list[ListingCard] = []
+            for card in details_targets:
                 cached_details = self._item_page_details_cache.get(card.external_id)
                 if cached_details is not None:
                     card.raw["item_page"] = {**cached_details, "enriched_at": self._now().isoformat(), "version": "v2"}
                     details_cache_hits += 1
                     continue
-                details_targets.append(card)
+                uncached_targets.append(card)
 
-        ordered_targets = list(publication_targets)
-        publication_ids = {card.external_id for card in publication_targets}
-        for card in details_targets:
-            if card.external_id not in publication_ids:
-                ordered_targets.append(card)
-        fetch_targets = ordered_targets[:limit]
-        publication_target_ids = {card.external_id for card in publication_targets}
-        details_target_ids = {card.external_id for card in details_targets}
-        fetched_ids = {card.external_id for card in fetch_targets}
-        skipped_limit = len(publication_target_ids - fetched_ids)
-        details_skipped_limit = len(details_target_ids - fetched_ids)
+            details_skipped_limit = max(len(uncached_targets) - remaining_limit, 0)
+            fetchable_targets = uncached_targets[:remaining_limit]
+            reused_targets = [card for card in fetchable_targets if card.external_id in fetched_details_by_external_id]
+            network_targets = [card for card in fetchable_targets if card.external_id not in fetched_details_by_external_id]
 
-        for idx, card in enumerate(fetch_targets):
-            if idx > 0:
-                sleep_ms = delay_ms + (random.randint(0, jitter_ms) if jitter_ms > 0 else 0)
-                if sleep_ms > 0:
-                    await asyncio.sleep(sleep_ms / 1000.0)
-            in_publication_targets = card.external_id in publication_target_ids
-            in_details_targets = card.external_id in details_target_ids
-            if in_publication_targets:
-                attempted += 1
-            if in_details_targets:
+            for card in reused_targets:
+                details = fetched_details_by_external_id[card.external_id]
                 details_attempted += 1
-            try:
-                details = await self.parser.fetch_item_details(card.url)
-            except Exception:
-                if in_publication_targets:
-                    failed += 1
-                if in_details_targets:
+                card.raw["item_page"] = {**details, "enriched_at": self._now().isoformat(), "version": "v2"}
+                self._item_page_details_cache[card.external_id] = details
+                details_succeeded += 1
+
+            for idx, card in enumerate(network_targets):
+                details_attempted += 1
+                try:
+                    details = await _fetch_details(card, is_first_fetch=(attempted + details_attempted == 1 and idx == 0 and not reused_targets))
+                except Exception:
                     details_failed += 1
-                continue
-            if in_publication_targets:
-                label = str(details.get("published_label") or "")
-                if label:
-                    published_at = AvitoParser._parse_published_at(label, self._now())
-                    if published_at is not None:
-                        card.published_label = label
-                        card.published_at = published_at
-                        self._publication_enrichment_cache[card.external_id] = (label, published_at)
-                        succeeded += 1
-                    else:
-                        failed += 1
-                else:
-                    failed += 1
-            if in_details_targets:
-                details_payload = {**details, "enriched_at": self._now().isoformat(), "version": "v2"}
-                card.raw["item_page"] = details_payload
+                    continue
+                card.raw["item_page"] = {**details, "enriched_at": self._now().isoformat(), "version": "v2"}
                 self._item_page_details_cache[card.external_id] = details
                 details_succeeded += 1
 
