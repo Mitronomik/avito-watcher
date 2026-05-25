@@ -70,6 +70,8 @@ AVITO_LISTING_URL_PATH_RE = re.compile(r"^/[a-z0-9_-]+/kvartiry/[^/\s]+_(\d{10})
 MAX_FUTURE_PUBLISHED_AT_DAYS = 7
 MAX_DIAGNOSTIC_STATE_PATHS = 12
 MAX_DIAGNOSTIC_OBJECT_KEY_SETS = 8
+MAX_PRELOADED_STATE_SCAN_NODES = 5000
+MAX_PRELOADED_STATE_SCAN_DEPTH = 24
 PUBLICATION_MARKER_SELECTORS = (
     '[data-marker*="item-date"]',
     '[data-marker*="date"]',
@@ -985,9 +987,14 @@ class AvitoParser:
         key_sets: list[str] = []
         item_like_count = 0
         external_ids: set[str] = set()
+        remaining_nodes = MAX_PRELOADED_STATE_SCAN_NODES
 
-        def walk(node: object, path: str) -> None:
+        def walk(node: object, path: str, depth: int) -> None:
+            nonlocal remaining_nodes
             nonlocal item_like_count
+            if depth > MAX_PRELOADED_STATE_SCAN_DEPTH or remaining_nodes <= 0:
+                return
+            remaining_nodes -= 1
             if isinstance(node, dict):
                 keys = {str(k) for k in node.keys()}
                 has_id = any(k in keys for k in ("id", "itemId", "externalId"))
@@ -1017,13 +1024,15 @@ class AvitoParser:
                         next_path = f"{path}.{key}" if path else key
                     else:
                         next_path = f"{path}.[key]" if path else "[key]"
-                    walk(value, next_path)
+                    walk(value, next_path, depth + 1)
                 return
             if isinstance(node, list):
                 for idx, value in enumerate(node[:250]):
-                    walk(value, f"{path}[{idx}]")
+                    if remaining_nodes <= 0:
+                        break
+                    walk(value, f"{path}[{idx}]", depth + 1)
 
-        walk(state, "")
+        walk(state, "", 0)
         return {
             "candidate_state_paths": list(dict.fromkeys(paths)),
             "candidate_object_key_sets": list(dict.fromkeys(key_sets)),
@@ -1037,45 +1046,66 @@ class AvitoParser:
             return []
         cards: list[ListingCard] = []
         seen: set[str] = set()
+        remaining_nodes = MAX_PRELOADED_STATE_SCAN_NODES
 
-        def walk(node: object) -> None:
+        def _resolve_valid_external_id(ext_candidate: object, normalized_url: str) -> str | None:
+            ext_id = str(ext_candidate).strip() if isinstance(ext_candidate, (int, str)) else ""
+            ext_id_valid = ext_id if re.fullmatch(r"\d{10}", ext_id) else ""
+            url_match = AVITO_LISTING_URL_PATH_RE.match(urlparse(normalized_url).path) if normalized_url else None
+            url_id = url_match.group(1) if url_match else ""
+            if ext_id_valid and url_id and ext_id_valid != url_id:
+                return None
+            if ext_id_valid:
+                return ext_id_valid
+            if url_id:
+                return url_id
+            return None
+
+        def walk(node: object, depth: int) -> None:
+            nonlocal remaining_nodes
+            if len(cards) >= CARD_LIMIT or depth > MAX_PRELOADED_STATE_SCAN_DEPTH or remaining_nodes <= 0:
+                return
+            remaining_nodes -= 1
             if isinstance(node, dict):
                 ext = node.get("externalId") or node.get("itemId") or node.get("id")
-                if isinstance(ext, (int, str)):
-                    ext_id = str(ext).strip()
-                    title_raw = node.get("title") or node.get("name")
-                    title = cls._normalize_text_line(str(title_raw)) if isinstance(title_raw, str) else ""
-                    url_raw = node.get("url") or node.get("href") or node.get("urlPath")
-                    url = cls._normalize_text_line(str(url_raw)) if isinstance(url_raw, str) else ""
-                    if url and url.startswith("/"):
-                        url = cls._normalize_listing_url(url)
-                    price_raw = node.get("price")
-                    if isinstance(price_raw, dict):
-                        price_raw = price_raw.get("value")
-                    reliable_url = bool(url and (url.startswith("https://www.avito.ru/") or AVITO_LISTING_URL_PATH_RE.match(urlparse(url).path)))
-                    has_minimal = bool(ext_id and title and reliable_url)
-                    has_extended = bool(ext_id and title and isinstance(price_raw, (int, float)) and reliable_url)
-                    if (has_minimal or has_extended) and ext_id not in seen:
-                        seen.add(ext_id)
-                        cards.append(ListingCard(
-                            external_id=ext_id,
-                            url=url,
-                            title=title,
-                            price=float(price_raw) if isinstance(price_raw, (int, float)) else None,
-                            address=cls._normalize_text_line(str(node.get("address") or node.get("location") or "")),
-                            area_m2=cls._extract_area_m2(title),
-                            rooms=cls._extract_rooms(title),
-                            published_label="",
-                            published_at=None,
-                            raw={"source": "serp_preloaded_state_recursive"},
-                        ))
+                title_raw = node.get("title") or node.get("name")
+                title = cls._normalize_text_line(str(title_raw)) if isinstance(title_raw, str) else ""
+                url_raw = node.get("url") or node.get("href") or node.get("urlPath")
+                url = cls._normalize_text_line(str(url_raw)) if isinstance(url_raw, str) else ""
+                if url and url.startswith("/"):
+                    url = cls._normalize_listing_url(url)
+                ext_id = _resolve_valid_external_id(ext, url)
+                price_raw = node.get("price")
+                if isinstance(price_raw, dict):
+                    price_raw = price_raw.get("value")
+                reliable_url = bool(url and (url.startswith("https://www.avito.ru/") or AVITO_LISTING_URL_PATH_RE.match(urlparse(url).path)))
+                has_minimal = bool(ext_id and title and reliable_url)
+                has_extended = bool(ext_id and title and isinstance(price_raw, (int, float)) and reliable_url)
+                if (has_minimal or has_extended) and ext_id not in seen:
+                    seen.add(ext_id)
+                    cards.append(ListingCard(
+                        external_id=ext_id,
+                        url=url,
+                        title=title,
+                        price=float(price_raw) if isinstance(price_raw, (int, float)) else None,
+                        address=cls._normalize_text_line(str(node.get("address") or node.get("location") or "")),
+                        area_m2=cls._extract_area_m2(title),
+                        rooms=cls._extract_rooms(title),
+                        published_label="",
+                        published_at=None,
+                        raw={"source": "serp_preloaded_state_recursive"},
+                    ))
                 for value in node.values():
-                    walk(value)
+                    if len(cards) >= CARD_LIMIT or remaining_nodes <= 0:
+                        break
+                    walk(value, depth + 1)
             elif isinstance(node, list):
                 for value in node[:250]:
-                    walk(value)
+                    if len(cards) >= CARD_LIMIT or remaining_nodes <= 0:
+                        break
+                    walk(value, depth + 1)
 
-        walk(state)
+        walk(state, 0)
         return cards
 
     @staticmethod
