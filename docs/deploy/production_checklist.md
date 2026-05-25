@@ -37,26 +37,54 @@ pytest -q
   - LLM API keys (if used)
 - Never log or commit secrets/tokens/passwords.
 
-## Deploy steps (Docker Compose)
+## Compose safety gate (required before deploy)
 
-1. Prepare environment file from template:
-   - `cp deploy/env.production.example .env`
-   - Fill real secret values outside git.
-2. Validate compose config:
+Current `deploy/docker-compose.yml` should be reviewed as a pre-prod baseline, not assumed hardened production defaults.
+
+Run:
 
 ```bash
 docker compose -f deploy/docker-compose.yml config
 ```
 
-3. Build and start services:
+Verify resolved values for app/worker match intended production values:
+
+- `DATABASE_URL`
+- `API_KEY`
+- `PROXY_URLS`
+- `ALERT_CHANNELS`
+- Google Sheets (`GOOGLE_SHEETS_WEBHOOK_*`) and email (`SMTP_*`, `EMAIL_*`) vars
+- LLM vars (`SCORING_ENABLED`, `LLM_PROVIDER`, `LLM_*`)
+
+Do **not** proceed if `postgres:postgres`, placeholder secrets, or unexpected defaults remain.
+
+## Deploy steps (Docker Compose)
+
+1. Prepare environment file from template:
+   - `cp deploy/env.production.example .env`
+   - Fill real secret values outside git.
+2. Pass compose safety gate above.
+3. Build/start infra + API without worker auto-monitoring:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d --build
+docker compose -f deploy/docker-compose.yml up -d --build postgres redis app
+```
+
+(Alternative: start all services with worker scaled to zero.)
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d --build --scale worker=0
 ```
 
 ## Database migration
 
-Run DB migrations to the latest revision before enabling monitoring:
+Run DB migrations to the latest revision before enabling worker monitoring:
+
+```bash
+docker compose -f deploy/docker-compose.yml run --rm app alembic upgrade head
+```
+
+Local/dev alternative:
 
 ```bash
 alembic upgrade head
@@ -69,6 +97,10 @@ alembic upgrade head
 - `worker` is the automatic monitoring process.
 - Ensure only worker is responsible for periodic monitoring.
 
+## App health/admin check before worker
+
+Confirm API/admin is reachable and healthy before enabling worker.
+
 ## Manual run-once smoke
 
 Run an explicit one-pass smoke for a known search:
@@ -79,13 +111,19 @@ python3 -m app.cli run-once --search-id <ID>
 
 Expected: run completes without crash and processes feed for the selected search.
 
+After smoke passes, start worker:
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d worker
+```
+
 ## Alert channel smoke criteria
 
 Verify alert delivery on enabled channels:
 
 - JSONL: new alert line appears in `JSONL_OUTBOX_PATH`.
-- Google Sheets: webhook receives row with listing payload.
-- Email: message arrives with listing summary/content.
+- Google Sheets: webhook receives row with listing payload (if enabled).
+- Email: message arrives with listing summary/content (if enabled).
 
 ## Admin checks after deploy
 
@@ -98,24 +136,37 @@ Verify operational status in admin/API:
 - Debug dump count does not grow unexpectedly (unless intentionally enabled).
 - Runtime flags match rollout policy (`SCORING_ENABLED`, `LLM_PROVIDER`, enrichment flags, channels).
 
-## AI shadow-mode smoke (optional)
+## AI shadow-mode smoke (optional, controlled one-off)
 
-Run lightweight checks without placing AI into critical delivery path:
+First-production worker default remains:
+
+- `SCORING_ENABLED=false`
+- `LLM_PROVIDER=off`
+- `LLM_SHADOW_MODE=true`
+
+Optional shadow smoke commands below are one-off checks to exercise LLM path and are **not** first-prod worker defaults:
 
 ```bash
-LLM_PROVIDER=off python3 -m app.cli run-once --search-id <ID>
-LLM_PROVIDER=ollama LLM_BASE_URL=http://localhost:11434 LLM_MODEL=<model> python3 -m app.cli run-once --search-id <ID>
-LLM_PROVIDER=openai_compatible LLM_BASE_URL=<base_url> LLM_MODEL=<model> LLM_API_KEY=<key> python3 -m app.cli run-once --search-id <ID>
+SCORING_ENABLED=true LLM_SHADOW_MODE=true LLM_PROVIDER=off python3 -m app.cli run-once --search-id <ID>
+SCORING_ENABLED=true LLM_SHADOW_MODE=true LLM_PROVIDER=ollama LLM_BASE_URL=http://localhost:11434 LLM_MODEL=<model> python3 -m app.cli run-once --search-id <ID>
+SCORING_ENABLED=true LLM_SHADOW_MODE=true LLM_PROVIDER=openai_compatible LLM_BASE_URL=<base_url> LLM_MODEL=<model> LLM_API_KEY=<key> python3 -m app.cli run-once --search-id <ID>
 ```
-
-Keep `SCORING_ENABLED=false` for first production rollout.
 
 ## Rollback
 
 If smoke checks fail or alert quality regresses:
 
-1. Pause worker or scale it down.
+1. Pause worker:
+
+```bash
+docker compose -f deploy/docker-compose.yml stop worker
+```
+
 2. Revert to last known-good image/tag.
 3. Restore previous `.env` secret set (if changed).
-4. Re-run `alembic upgrade head` only if required for rollback target compatibility.
-5. Resume worker and re-run run-once smoke.
+4. Re-run migrations only as required for rollback target compatibility.
+5. Resume worker and re-run run-once smoke:
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d worker
+```
