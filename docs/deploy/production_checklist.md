@@ -103,7 +103,15 @@ Confirm API/admin is reachable and healthy before enabling worker.
 
 ## Manual run-once smoke
 
-Run an explicit one-pass smoke for a known search:
+Run an explicit one-pass smoke for a known search.
+
+Primary (Docker Compose):
+
+```bash
+docker compose -f deploy/docker-compose.yml run --rm app python3 -m app.cli run-once --search-id <ID>
+```
+
+Local/dev alternative:
 
 ```bash
 python3 -m app.cli run-once --search-id <ID>
@@ -144,12 +152,14 @@ First-production worker default remains:
 - `LLM_PROVIDER=off`
 - `LLM_SHADOW_MODE=true`
 
-Optional shadow smoke commands below are one-off checks to exercise LLM path and are **not** first-prod worker defaults:
+Optional shadow smoke commands below are one-off checks to exercise LLM path and are **not** first-prod worker defaults.
+
+Run these inside app container via Docker Compose:
 
 ```bash
-SCORING_ENABLED=true LLM_SHADOW_MODE=true LLM_PROVIDER=off python3 -m app.cli run-once --search-id <ID>
-SCORING_ENABLED=true LLM_SHADOW_MODE=true LLM_PROVIDER=ollama LLM_BASE_URL=http://localhost:11434 LLM_MODEL=<model> python3 -m app.cli run-once --search-id <ID>
-SCORING_ENABLED=true LLM_SHADOW_MODE=true LLM_PROVIDER=openai_compatible LLM_BASE_URL=<base_url> LLM_MODEL=<model> LLM_API_KEY=<key> python3 -m app.cli run-once --search-id <ID>
+docker compose -f deploy/docker-compose.yml run --rm -e SCORING_ENABLED=true -e LLM_SHADOW_MODE=true -e LLM_PROVIDER=off app python3 -m app.cli run-once --search-id <ID>
+docker compose -f deploy/docker-compose.yml run --rm -e SCORING_ENABLED=true -e LLM_SHADOW_MODE=true -e LLM_PROVIDER=ollama -e LLM_BASE_URL=http://localhost:11434 -e LLM_MODEL=<model> app python3 -m app.cli run-once --search-id <ID>
+docker compose -f deploy/docker-compose.yml run --rm -e SCORING_ENABLED=true -e LLM_SHADOW_MODE=true -e LLM_PROVIDER=openai_compatible -e LLM_BASE_URL=<base_url> -e LLM_MODEL=<model> -e LLM_API_KEY=<key> app python3 -m app.cli run-once --search-id <ID>
 ```
 
 ## Rollback
