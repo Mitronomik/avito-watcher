@@ -1048,11 +1048,9 @@ class AvitoParser:
         seen: set[str] = set()
         remaining_nodes = MAX_PRELOADED_STATE_SCAN_NODES
 
-        def _resolve_valid_external_id(ext_candidate: object, normalized_url: str) -> str | None:
+        def _resolve_valid_external_id(ext_candidate: object, normalized_url: str, url_id: str) -> str | None:
             ext_id = str(ext_candidate).strip() if isinstance(ext_candidate, (int, str)) else ""
             ext_id_valid = ext_id if re.fullmatch(r"\d{10}", ext_id) else ""
-            url_match = AVITO_LISTING_URL_PATH_RE.match(urlparse(normalized_url).path) if normalized_url else None
-            url_id = url_match.group(1) if url_match else ""
             if ext_id_valid and url_id and ext_id_valid != url_id:
                 return None
             if ext_id_valid:
@@ -1071,21 +1069,20 @@ class AvitoParser:
                 title_raw = node.get("title") or node.get("name")
                 title = cls._normalize_text_line(str(title_raw)) if isinstance(title_raw, str) else ""
                 url_raw = node.get("url") or node.get("href") or node.get("urlPath")
-                url = cls._normalize_text_line(str(url_raw)) if isinstance(url_raw, str) else ""
-                if url and url.startswith("/"):
-                    url = cls._normalize_listing_url(url)
-                ext_id = _resolve_valid_external_id(ext, url)
+                url_candidate = cls._normalize_text_line(str(url_raw)) if isinstance(url_raw, str) else ""
+                normalized_url, url_id = cls._normalize_and_validate_recursive_fallback_url(url_candidate)
+                ext_id = _resolve_valid_external_id(ext, normalized_url, url_id)
                 price_raw = node.get("price")
                 if isinstance(price_raw, dict):
                     price_raw = price_raw.get("value")
-                reliable_url = bool(url and (url.startswith("https://www.avito.ru/") or AVITO_LISTING_URL_PATH_RE.match(urlparse(url).path)))
+                reliable_url = bool(normalized_url and url_id)
                 has_minimal = bool(ext_id and title and reliable_url)
                 has_extended = bool(ext_id and title and isinstance(price_raw, (int, float)) and reliable_url)
                 if (has_minimal or has_extended) and ext_id not in seen:
                     seen.add(ext_id)
                     cards.append(ListingCard(
                         external_id=ext_id,
-                        url=url,
+                        url=normalized_url,
                         title=title,
                         price=float(price_raw) if isinstance(price_raw, (int, float)) else None,
                         address=cls._normalize_text_line(str(node.get("address") or node.get("location") or "")),
@@ -1111,6 +1108,20 @@ class AvitoParser:
     @staticmethod
     def _normalize_listing_url(url_path: str) -> str:
         return urljoin("https://www.avito.ru", url_path)
+
+    @classmethod
+    def _normalize_and_validate_recursive_fallback_url(cls, url_value: str) -> tuple[str, str]:
+        if not url_value:
+            return "", ""
+        normalized_url = cls._normalize_listing_url(url_value) if url_value.startswith("/") else url_value
+        parsed = urlparse(normalized_url)
+        host = (parsed.hostname or "").lower()
+        if not (host == AVITO_HOST_SUFFIX or host.endswith(f".{AVITO_HOST_SUFFIX}")):
+            return "", ""
+        match = AVITO_LISTING_URL_PATH_RE.match(parsed.path or "")
+        if not match:
+            return "", ""
+        return normalized_url, match.group(1)
 
     @classmethod
     def _extract_catalog_item_address(cls, item: dict) -> str:
