@@ -435,7 +435,40 @@ def test_hydration_without_cards_without_catalog_items_is_classified():
             asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry"))
     assert exc_info.value.error_type == ParserErrorType.LAYOUT_CHANGED
     stats = parser.cycle_stats()
-    assert stats["layout_changed_hint"] == "hydration_without_cards_without_catalog_items"
+    assert stats["layout_changed_hint"] == "hydration_without_cards"
+
+def test_category_tree_preloaded_state_keeps_zero_cards_and_listing_only_diagnostics():
+    parser = AvitoParser()
+    html = _raw_state_html(
+        {
+            "layout": {
+                "footer": {
+                    "categoryTree": [
+                        {
+                            "categoryId": 1,
+                            "id": "8085355489",
+                            "name": "Квартиры",
+                            "url": "/moskva/kvartiry",
+                            "subs": [
+                                {"categoryId": 2, "id": "8085355490", "name": "1-комнатные", "url": "/moskva/kvartiry/prodam"}
+                            ],
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    soup = BeautifulSoup(html, "lxml")
+    diagnostics = parser._build_fallback_diagnostics(soup=soup, page_html=html)
+    cards = parser._parse_cards_from_serp_fallback(soup=soup, page_html=html, diagnostics=diagnostics)
+
+    assert cards == []
+    assert diagnostics["listing_like_state_object_count"] == 0
+    assert diagnostics["state_10_digit_id_candidate_count"] > 0
+    assert diagnostics["navigation_like_state_object_count"] > 0
+    assert all("categoryTree" not in path for path in diagnostics["candidate_state_paths"])
+    assert diagnostics["layout_changed_hint"] == "hydration_without_listing_payload"
+    assert diagnostics["no_listing_payload_detected"] is True
 
 
 def test_external_id_only_preloaded_state_does_not_produce_cards():
