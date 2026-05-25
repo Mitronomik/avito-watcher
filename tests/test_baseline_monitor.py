@@ -2205,3 +2205,16 @@ def test_publication_only_failure_counters(monkeypatch, db_session):
     assert result["item_page_publication_enrichment_failed"] == 1
     assert result["item_page_details_enrichment_attempted"] == 0
     assert result["item_page_details_enrichment_failed"] == 0
+
+
+def test_skipped_limit_counts_overlap_for_both_counters(monkeypatch, db_session):
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_enrich_missing_published_at", True)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_enrich_item_page_details", True)
+    monkeypatch.setattr("app.services.monitor_service.settings.scrape_item_page_limit_per_run", 1)
+    search = make_search(db_session, filters_json={"require_published_at": True})
+    parser = FakeParser([[card("1", published_label="17 мая в 11:30", published_at=datetime(2026, 5, 17, 8, 30, 0))], [card("1", published_label="17 мая в 11:30", published_at=datetime(2026, 5, 17, 8, 30, 0)), card("2"), card("3")]])
+    service = MonitorService(parser=parser, scorer=FakeScorer(), notifier=FakeNotifier(), now_func=lambda: datetime(2026, 5, 17, 12, 0, 0))
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+    assert result["item_page_publication_enrichment_skipped_limit"] == 1
+    assert result["item_page_details_enrichment_skipped_limit"] == 1

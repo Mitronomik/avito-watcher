@@ -981,7 +981,9 @@ class AvitoParser:
                 parsed_href = urlparse(href)
                 if not parsed_href.netloc:
                     seller_profile_url = urljoin("https://www.avito.ru", href)
-                elif parsed_href.netloc.endswith(AVITO_HOST_SUFFIX):
+                elif parsed_href.hostname in {"avito.ru", "www.avito.ru"} or (
+                    parsed_href.hostname is not None and parsed_href.hostname.endswith(".avito.ru")
+                ):
                     seller_profile_url = href
                 else:
                     warnings.append("seller_profile_url_external_ignored")

@@ -610,13 +610,12 @@ class MonitorService:
         for card in details_targets:
             if card.external_id not in publication_ids:
                 ordered_targets.append(card)
-        if limit >= 0 and len(ordered_targets) > limit:
-            skipped_total = len(ordered_targets) - limit
-            skipped_limit = max(len(publication_targets) - limit, 0)
-            details_skipped_limit = max(skipped_total - skipped_limit, 0)
         fetch_targets = ordered_targets[:limit]
         publication_target_ids = {card.external_id for card in publication_targets}
         details_target_ids = {card.external_id for card in details_targets}
+        fetched_ids = {card.external_id for card in fetch_targets}
+        skipped_limit = len(publication_target_ids - fetched_ids)
+        details_skipped_limit = len(details_target_ids - fetched_ids)
 
         for idx, card in enumerate(fetch_targets):
             if idx > 0:
