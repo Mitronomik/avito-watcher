@@ -11,7 +11,7 @@ from app import cli
 from app.models.alert_sent import AlertSent
 from app.models.listing import Listing
 from app.models.listing_snapshot import ListingSnapshot
-from app.parsers.avito_parser import AvitoParser, _Engine
+from app.parsers.avito_parser import CARD_LIMIT, AvitoParser, _Engine
 from app.parsers.errors import ParserError, ParserErrorType
 from app.parsers.schemas import ListingCard
 from app.services.monitor_service import MonitorService
@@ -336,6 +336,15 @@ def _state_html(items_payload: str, extra: str = "") -> str:
     )
 
 
+def _raw_state_html(state_obj: dict, extra: str = "") -> str:
+    state_json = json.dumps(state_obj, ensure_ascii=False)
+    encoded = "".join(f"%{b:02X}" for b in state_json.encode("utf-8"))
+    return (
+        "<html><head><title>Авито</title></head><body>"
+        f"<script>window.__preloadedState__=\"{encoded}\";</script>{extra}</body></html>"
+    )
+
+
 def test_serp_fallback_parses_preloaded_state_catalog_items():
     parser = AvitoParser()
     html = _state_html("""[
@@ -416,6 +425,130 @@ def test_layout_changed_when_no_state_and_no_links():
     assert exc_info.value.error_type == ParserErrorType.LAYOUT_CHANGED
     stats = parser.cycle_stats()
     assert stats["layout_changed_hint"] == "plain_layout_changed"
+
+
+def test_hydration_without_cards_without_catalog_items_is_classified():
+    parser = AvitoParser()
+    html = _raw_state_html({"foo": {"ids": [{"externalId": "8085355489"} for _ in range(3)]}})
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        with pytest.raises(ParserError) as exc_info:
+            asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry"))
+    assert exc_info.value.error_type == ParserErrorType.LAYOUT_CHANGED
+    stats = parser.cycle_stats()
+    assert stats["layout_changed_hint"] == "hydration_without_cards_without_catalog_items"
+
+
+def test_external_id_only_preloaded_state_does_not_produce_cards():
+    parser = AvitoParser()
+    html = _raw_state_html({"search": {"payload": [{"id": 8085355489}, {"externalId": "8085355490"}]}})
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        with pytest.raises(ParserError):
+            asyncio.run(parser.fetch_search_cards("https://www.avito.ru/moskva/kvartiry"))
+    stats = parser.cycle_stats()
+    assert stats["serp_state_fallback_succeeded"] is False
+    assert stats["serp_state_fallback_card_count"] == 0
+
+
+def test_recursive_item_like_preloaded_state_can_produce_cards():
+    parser = AvitoParser()
+    html = _raw_state_html(
+        {
+            "data": {
+                "hydration": {
+                    "cards": [
+                        {
+                            "externalId": "8085355489",
+                            "title": "1-к. квартира, 40 м²",
+                            "href": "/sankt-peterburg/kvartiry/test_8085355489",
+                            "price": {"value": 7000000},
+                            "address": "Санкт-Петербург",
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        cards = asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+    assert len(cards) == 1
+    assert cards[0].external_id == "8085355489"
+    assert cards[0].title.startswith("1-к.")
+
+
+def test_recursive_state_uses_url_id_when_raw_id_invalid():
+    parser = AvitoParser()
+    html = _raw_state_html({
+        "data": {"hydration": {"cards": [{"id": "abc", "title": "1-к. квартира, 40 м²", "href": "/sankt-peterburg/kvartiry/test_8085355489"}]}}
+    })
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        cards = asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+    assert len(cards) == 1
+    assert cards[0].external_id == "8085355489"
+
+
+def test_recursive_state_skips_when_id_mismatches_url_id():
+    parser = AvitoParser()
+    html = _raw_state_html({
+        "data": {"hydration": {"cards": [{"id": "1111111111", "title": "1-к. квартира, 40 м²", "href": "/sankt-peterburg/kvartiry/test_8085355489"}]}}
+    })
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        with pytest.raises(ParserError):
+            asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+
+
+def test_recursive_state_uses_valid_url_id_when_no_id_present():
+    parser = AvitoParser()
+    html = _raw_state_html({
+        "data": {"hydration": {"cards": [{"title": "1-к. квартира, 40 м²", "href": "/sankt-peterburg/kvartiry/test_8085355489"}]}}
+    })
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        cards = asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+    assert len(cards) == 1
+    assert cards[0].external_id == "8085355489"
+
+
+def test_recursive_state_allows_absolute_www_avito_url():
+    parser = AvitoParser()
+    html = _raw_state_html({
+        "data": {"hydration": {"cards": [{"externalId": "8085355489", "title": "1-к. квартира, 40 м²", "url": "https://www.avito.ru/sankt-peterburg/kvartiry/test_8085355489"}]}}
+    })
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        cards = asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+    assert len(cards) == 1
+    assert cards[0].url.startswith("https://www.avito.ru/")
+
+
+def test_recursive_state_allows_relative_url_after_normalization():
+    parser = AvitoParser()
+    html = _raw_state_html({
+        "data": {"hydration": {"cards": [{"externalId": "8085355489", "title": "1-к. квартира, 40 м²", "href": "/sankt-peterburg/kvartiry/test_8085355489"}]}}
+    })
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        cards = asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+    assert len(cards) == 1
+    assert cards[0].url == "https://www.avito.ru/sankt-peterburg/kvartiry/test_8085355489"
+
+
+def test_recursive_state_rejects_non_avito_host_even_with_valid_path():
+    parser = AvitoParser()
+    html = _raw_state_html({
+        "data": {"hydration": {"cards": [{"externalId": "8085355489", "title": "1-к. квартира, 40 м²", "url": "https://evil.example/sankt-peterburg/kvartiry/test_8085355489"}]}}
+    })
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        with pytest.raises(ParserError):
+            asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+
+
+def test_recursive_state_extraction_is_limited_by_card_limit():
+    parser = AvitoParser()
+    cards_payload = [
+        {"externalId": f"{8085355400 + i:010d}", "title": f"1-к. квартира, {30 + i} м²", "href": f"/sankt-peterburg/kvartiry/test_{8085355400 + i:010d}"}
+        for i in range(CARD_LIMIT + 15)
+    ]
+    html = _raw_state_html({"data": {"hydration": {"cards": cards_payload}}})
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        cards = asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+    assert len(cards) == CARD_LIMIT
 
 
 def test_cycle_stats_defaults_include_zero_serp_fallback_counters():
