@@ -648,10 +648,14 @@ class MonitorService:
                     continue
                 uncached_targets.append(card)
 
-            details_skipped_limit = max(len(uncached_targets) - remaining_limit, 0)
-            fetchable_targets = uncached_targets[:remaining_limit]
-            reused_targets = [card for card in fetchable_targets if card.external_id in fetched_details_by_external_id]
-            network_targets = [card for card in fetchable_targets if card.external_id not in fetched_details_by_external_id]
+            reused_targets = [
+                card for card in uncached_targets if card.external_id in fetched_details_by_external_id
+            ]
+            network_candidates = [
+                card for card in uncached_targets if card.external_id not in fetched_details_by_external_id
+            ]
+            network_targets = network_candidates[:remaining_limit]
+            details_skipped_limit = max(len(network_candidates) - len(network_targets), 0)
 
             for card in reused_targets:
                 details = fetched_details_by_external_id[card.external_id]
