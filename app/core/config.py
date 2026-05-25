@@ -12,6 +12,15 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen2.5:7b-instruct"
     scoring_enabled: bool = True
+    llm_provider: Literal["off", "ollama", "openai_compatible"] = "off"
+    llm_base_url: str = ""
+    llm_model: str = ""
+    llm_api_key: str = ""
+    llm_timeout_sec: int = 60
+    llm_max_retries: int = 2
+    llm_retry_delay_sec: float = 1.0
+    llm_shadow_mode: bool = True
+    llm_prompt_version: str = "listing-summary-v1"
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     api_key: str = ""

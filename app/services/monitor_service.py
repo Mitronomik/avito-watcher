@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
+from app.agents.llm_providers import resolve_llm_runtime_config
 from app.agents.scorer import ListingScorer
 from app.core.config import settings
 from app.db.session import SessionLocal
@@ -82,9 +83,28 @@ def runtime_diagnostics() -> dict:
         for item in settings.alert_channels.split(",")
         if item.strip()
     ]
+    llm_cfg = resolve_llm_runtime_config()
+    if llm_cfg.provider == "off":
+        llm_model_set = False
+        llm_base_url_set = False
+    elif llm_cfg.provider == "openai_compatible":
+        llm_model_set = bool(settings.llm_model)
+        llm_base_url_set = bool(settings.llm_base_url)
+    else:
+        llm_model_set = bool(llm_cfg.model)
+        llm_base_url_set = bool(llm_cfg.base_url)
+
     return {
         "alert_channels": alert_channels,
         "scoring_enabled": settings.scoring_enabled,
+        "llm_provider": llm_cfg.provider,
+        "llm_model_set": llm_model_set,
+        "llm_base_url_set": llm_base_url_set,
+        "llm_api_key_set": bool(settings.llm_api_key),
+        "llm_timeout_sec": llm_cfg.timeout_sec,
+        "llm_max_retries": llm_cfg.max_retries,
+        "llm_shadow_mode": settings.llm_shadow_mode,
+        "llm_prompt_version": llm_cfg.prompt_version,
         "scrape_preferred_engine": settings.scrape_preferred_engine,
         "scrape_allowed_engines": settings.scrape_allowed_engines,
         "scrape_timeout_retry_once": settings.scrape_timeout_retry_once,
@@ -385,13 +405,14 @@ class MonitorService:
         if llm is None:
             return None
 
-        summary = llm.get("summary", "")
+        use_llm = not settings.llm_shadow_mode and llm.get("status") == "success"
+        summary = llm.get("summary", "") if use_llm else ""
         payload = self._build_alert_payload(
             card=card,
             search_name=search_name,
             summary=summary,
-            score=llm.get("score"),
-            tags=llm.get("tags", []),
+            score=llm.get("score") if use_llm else None,
+            tags=llm.get("tags", []) if use_llm else [],
         )
         message = build_listing_message(
             {
@@ -719,6 +740,10 @@ class MonitorService:
         filtered_by_rules = 0
         filtered_by_publication_date = 0
         scored = 0
+        llm_attempted = 0
+        llm_succeeded = 0
+        llm_failed = 0
+        llm_skipped = 0
         filtered_samples: list[dict] = []
         publication_missing_allowed_count = 0
         publication_missing_rejected_count = 0
@@ -879,16 +904,43 @@ class MonitorService:
 
             if settings.scoring_enabled:
                 scored += 1
+                llm_attempted += 1
+                llm_cfg = resolve_llm_runtime_config()
                 try:
                     llm = await self.scorer.score(card)
+                    if not isinstance(llm, dict):
+                        llm = {"score": None, "summary": "", "tags": [], "status": "failed", "provider": llm_cfg.provider, "model": llm_cfg.model, "prompt_version": llm_cfg.prompt_version, "error_type": "invalid_result"}
+                    elif "status" not in llm:
+                        llm = {
+                            "score": llm.get("score"),
+                            "summary": llm.get("summary", ""),
+                            "tags": llm.get("tags", []),
+                            "status": "success",
+                            "provider": llm_cfg.provider,
+                            "model": llm_cfg.model,
+                            "prompt_version": llm_cfg.prompt_version,
+                            "error_type": None,
+                        }
                 except Exception as exc:
                     llm = {
-                        "score": 0,
-                        "summary": f"LLM scoring unavailable: {exc}",
-                        "tags": ["llm_error"],
+                        "score": None,
+                        "summary": "",
+                        "tags": [],
+                        "status": "failed",
+                        "provider": llm_cfg.provider,
+                        "model": llm_cfg.model,
+                        "prompt_version": llm_cfg.prompt_version,
+                        "error_type": exc.__class__.__name__,
                     }
+                if llm.get("status") == "success":
+                    llm_succeeded += 1
+                elif llm.get("status") == "skipped":
+                    llm_skipped += 1
+                else:
+                    llm_failed += 1
             else:
-                llm = {"score": None, "summary": "", "tags": []}
+                llm_skipped += 1
+                llm = {"score": None, "summary": "", "tags": [], "status": "skipped", "provider": "off", "model": "", "prompt_version": settings.llm_prompt_version, "error_type": None}
 
             listing_repo.create_snapshot(
                 external_id=card.external_id,
@@ -901,6 +953,11 @@ class MonitorService:
                 observed_at=now,
             )
 
+            use_llm_for_alert = (not settings.llm_shadow_mode) and llm.get("status") == "success"
+            alert_summary = llm.get("summary", "") if use_llm_for_alert else ""
+            alert_score = llm.get("score") if use_llm_for_alert else None
+            alert_tags = llm.get("tags", []) if use_llm_for_alert else []
+
             message = build_listing_message(
                 {
                     "title": card.title,
@@ -911,14 +968,14 @@ class MonitorService:
                     "published_label": card.published_label,
                     "url": card.url,
                 },
-                llm.get("summary", ""),
+                alert_summary,
             )
             payload = self._build_alert_payload(
                 card=card,
                 search_name=search_name,
-                summary=llm.get("summary", ""),
-                score=llm.get("score"),
-                tags=llm.get("tags", []),
+                summary=alert_summary,
+                score=alert_score,
+                tags=alert_tags,
             )
 
             delivery = await self._deliver_pending_alerts(alert_repo, card, message, payload)
@@ -963,6 +1020,11 @@ class MonitorService:
             "filtered_by_rules": filtered_by_rules,
             "filtered_by_publication_date": filtered_by_publication_date,
             "scored": scored,
+            "llm_attempted": llm_attempted,
+            "llm_succeeded": llm_succeeded,
+            "llm_failed": llm_failed,
+            "llm_skipped": llm_skipped,
+            "llm_shadow_mode": settings.llm_shadow_mode,
             "total_seen": len(cards),
             "filtered_samples": filtered_samples,
             "publication_missing_allowed_count": publication_missing_allowed_count,
