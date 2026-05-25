@@ -978,7 +978,13 @@ class AvitoParser:
         if seller_profile_tag is not None:
             href = str(seller_profile_tag.get("href", "")).strip()
             if href:
-                seller_profile_url = urljoin("https://www.avito.ru", href)
+                parsed_href = urlparse(href)
+                if not parsed_href.netloc:
+                    seller_profile_url = urljoin("https://www.avito.ru", href)
+                elif parsed_href.netloc.endswith(AVITO_HOST_SUFFIX):
+                    seller_profile_url = href
+                else:
+                    warnings.append("seller_profile_url_external_ignored")
 
         seller_text = " ".join(
             part for part in (seller_name, soup.get_text(separator=" ", strip=True)[:2000]) if part

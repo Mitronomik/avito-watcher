@@ -1771,3 +1771,21 @@ def test_fetch_item_details_extracts_sanitized_fields(monkeypatch):
     assert details["seller_type"] == "owner"
     assert details["image_count"] == 1
     assert "<script>" not in details["description"]
+
+
+def test_fetch_item_details_ignores_external_seller_profile_url(monkeypatch):
+    parser = AvitoParser()
+    html = """
+    <html><body>
+      <div data-marker="item-view/item-date">17 мая в 12:01</div>
+      <a data-marker="seller-info/name" href="https://example.com/u1">seller</a>
+    </body></html>
+    """
+
+    async def fake_fetch(_url: str):
+        return html
+
+    monkeypatch.setattr(parser, "_fetch_page_html", fake_fetch)
+    details = asyncio.run(parser.fetch_item_details("https://www.avito.ru/item_1"))
+    assert details["seller_profile_url"] == ""
+    assert "seller_profile_url_external_ignored" in details["warnings"]

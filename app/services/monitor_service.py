@@ -583,51 +583,61 @@ class MonitorService:
         limit = max(int(settings.scrape_item_page_limit_per_run), 0)
         delay_ms = max(int(settings.scrape_item_page_delay_ms), 0)
         jitter_ms = max(int(settings.scrape_item_page_jitter_ms), 0)
-        missing_cards = [card for card in cards if card.published_at is None]
-        details_enabled = settings.scrape_enrich_item_page_details
-        details_cards = [card for card in cards if passes_rule_filters(card, filters)] if details_enabled else []
-        targets: list[ListingCard] = []
-        for card in missing_cards:
-            cached = self._publication_enrichment_cache.get(card.external_id)
-            if cached is None:
-                targets.append(card)
-                continue
-            card.published_label, card.published_at = cached
-            cache_hits += 1
+        publication_targets: list[ListingCard] = []
+        if settings.scrape_enrich_missing_published_at:
+            missing_cards = [card for card in cards if card.published_at is None]
+            for card in missing_cards:
+                cached = self._publication_enrichment_cache.get(card.external_id)
+                if cached is None:
+                    publication_targets.append(card)
+                    continue
+                card.published_label, card.published_at = cached
+                cache_hits += 1
 
         details_targets: list[ListingCard] = []
-        if details_enabled:
-            seen_ids = {card.external_id for card in targets}
+        if settings.scrape_enrich_item_page_details:
+            details_cards = [card for card in cards if passes_rule_filters(card, filters)]
             for card in details_cards:
                 cached_details = self._item_page_details_cache.get(card.external_id)
                 if cached_details is not None:
                     card.raw["item_page"] = {**cached_details, "enriched_at": self._now().isoformat(), "version": "v2"}
                     details_cache_hits += 1
                     continue
-                if card.external_id not in seen_ids:
-                    details_targets.append(card)
-        ordered_targets = targets + details_targets
+                details_targets.append(card)
+
+        ordered_targets = list(publication_targets)
+        publication_ids = {card.external_id for card in publication_targets}
+        for card in details_targets:
+            if card.external_id not in publication_ids:
+                ordered_targets.append(card)
         if limit >= 0 and len(ordered_targets) > limit:
             skipped_total = len(ordered_targets) - limit
-            skipped_limit = max(len(targets) - limit, 0)
+            skipped_limit = max(len(publication_targets) - limit, 0)
             details_skipped_limit = max(skipped_total - skipped_limit, 0)
         fetch_targets = ordered_targets[:limit]
+        publication_target_ids = {card.external_id for card in publication_targets}
+        details_target_ids = {card.external_id for card in details_targets}
 
         for idx, card in enumerate(fetch_targets):
             if idx > 0:
                 sleep_ms = delay_ms + (random.randint(0, jitter_ms) if jitter_ms > 0 else 0)
                 if sleep_ms > 0:
                     await asyncio.sleep(sleep_ms / 1000.0)
-            attempted += 1
+            in_publication_targets = card.external_id in publication_target_ids
+            in_details_targets = card.external_id in details_target_ids
+            if in_publication_targets:
+                attempted += 1
+            if in_details_targets:
+                details_attempted += 1
             try:
                 details = await self.parser.fetch_item_details(card.url)
             except Exception:
-                if card in targets:
+                if in_publication_targets:
                     failed += 1
-                if card in details_targets:
+                if in_details_targets:
                     details_failed += 1
                 continue
-            if card in targets:
+            if in_publication_targets:
                 label = str(details.get("published_label") or "")
                 if label:
                     published_at = AvitoParser._parse_published_at(label, self._now())
@@ -640,8 +650,7 @@ class MonitorService:
                         failed += 1
                 else:
                     failed += 1
-            if card in details_targets or details_enabled:
-                details_attempted += 1
+            if in_details_targets:
                 details_payload = {**details, "enriched_at": self._now().isoformat(), "version": "v2"}
                 card.raw["item_page"] = details_payload
                 self._item_page_details_cache[card.external_id] = details
