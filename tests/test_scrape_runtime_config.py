@@ -95,3 +95,14 @@ def test_scrape_enrich_item_page_details_default_false(monkeypatch):
     monkeypatch.delenv("SCRAPE_ENRICH_ITEM_PAGE_DETAILS", raising=False)
     settings = Settings(database_url="sqlite:///tmp.db", _env_file=None)
     assert settings.scrape_enrich_item_page_details is False
+
+def test_llm_provider_default_off(monkeypatch):
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    settings = Settings(database_url="sqlite:///tmp.db", _env_file=None)
+    assert settings.llm_provider == "off"
+
+
+def test_llm_shadow_mode_default_true(monkeypatch):
+    monkeypatch.delenv("LLM_SHADOW_MODE", raising=False)
+    settings = Settings(database_url="sqlite:///tmp.db", _env_file=None)
+    assert settings.llm_shadow_mode is True
