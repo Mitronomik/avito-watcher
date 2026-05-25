@@ -979,14 +979,20 @@ class AvitoParser:
             href = str(seller_profile_tag.get("href", "")).strip()
             if href:
                 parsed_href = urlparse(href)
-                if not parsed_href.netloc:
+                if href.startswith("/") and not parsed_href.netloc:
                     seller_profile_url = urljoin("https://www.avito.ru", href)
-                elif parsed_href.hostname in {"avito.ru", "www.avito.ru"} or (
-                    parsed_href.hostname is not None and parsed_href.hostname.endswith(".avito.ru")
+                elif (
+                    parsed_href.scheme in {"http", "https"}
+                    and (
+                        parsed_href.hostname in {"avito.ru", "www.avito.ru"}
+                        or (parsed_href.hostname is not None and parsed_href.hostname.endswith(".avito.ru"))
+                    )
                 ):
                     seller_profile_url = href
-                else:
+                elif parsed_href.scheme in {"http", "https"}:
                     warnings.append("seller_profile_url_external_ignored")
+                else:
+                    warnings.append("seller_profile_url_invalid_ignored")
 
         seller_text = " ".join(
             part for part in (seller_name, soup.get_text(separator=" ", strip=True)[:2000]) if part
