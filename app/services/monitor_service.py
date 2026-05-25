@@ -96,6 +96,7 @@ def runtime_diagnostics() -> dict:
         "scrape_page_delay_ms": settings.scrape_page_delay_ms,
         "scrape_page_jitter_ms": settings.scrape_page_jitter_ms,
         "scrape_enrich_missing_published_at": settings.scrape_enrich_missing_published_at,
+        "scrape_enrich_item_page_details": settings.scrape_enrich_item_page_details,
         "scrape_item_page_delay_ms": settings.scrape_item_page_delay_ms,
         "scrape_item_page_jitter_ms": settings.scrape_item_page_jitter_ms,
         "scrape_item_page_limit_per_run": settings.scrape_item_page_limit_per_run,
@@ -311,6 +312,7 @@ class MonitorService:
         self.notifier = notifier or self._build_notifier()
         self.now_func = now_func or _utcnow
         self._publication_enrichment_cache: dict[str, tuple[str, datetime]] = {}
+        self._item_page_details_cache: dict[str, dict] = {}
 
     def _now(self) -> datetime:
         return _as_utc_naive(self.now_func())
@@ -553,25 +555,37 @@ class MonitorService:
             raise ValueError(f"Search job {search_job_id} not found")
         return await self.process_search(db, search)
 
-    async def _enrich_missing_published_at(self, cards: list[ListingCard]) -> dict[str, int]:
+    async def _enrich_item_page(self, cards: list[ListingCard], filters: dict | None) -> dict[str, int]:
         attempted = 0
         succeeded = 0
         failed = 0
         skipped_limit = 0
         cache_hits = 0
-        if not settings.scrape_enrich_missing_published_at:
+        details_attempted = 0
+        details_succeeded = 0
+        details_failed = 0
+        details_skipped_limit = 0
+        details_cache_hits = 0
+        if not settings.scrape_enrich_missing_published_at and not settings.scrape_enrich_item_page_details:
             return {
                 "item_page_publication_enrichment_attempted": attempted,
                 "item_page_publication_enrichment_succeeded": succeeded,
                 "item_page_publication_enrichment_failed": failed,
                 "item_page_publication_enrichment_skipped_limit": skipped_limit,
                 "item_page_publication_enrichment_cache_hits": cache_hits,
+                "item_page_details_enrichment_attempted": details_attempted,
+                "item_page_details_enrichment_succeeded": details_succeeded,
+                "item_page_details_enrichment_failed": details_failed,
+                "item_page_details_enrichment_skipped_limit": details_skipped_limit,
+                "item_page_details_enrichment_cache_hits": details_cache_hits,
             }
 
         limit = max(int(settings.scrape_item_page_limit_per_run), 0)
         delay_ms = max(int(settings.scrape_item_page_delay_ms), 0)
         jitter_ms = max(int(settings.scrape_item_page_jitter_ms), 0)
         missing_cards = [card for card in cards if card.published_at is None]
+        details_enabled = settings.scrape_enrich_item_page_details
+        details_cards = [card for card in cards if passes_rule_filters(card, filters)] if details_enabled else []
         targets: list[ListingCard] = []
         for card in missing_cards:
             cached = self._publication_enrichment_cache.get(card.external_id)
@@ -581,9 +595,23 @@ class MonitorService:
             card.published_label, card.published_at = cached
             cache_hits += 1
 
-        if limit >= 0 and len(targets) > limit:
-            skipped_limit = len(targets) - limit
-        fetch_targets = targets[:limit]
+        details_targets: list[ListingCard] = []
+        if details_enabled:
+            seen_ids = {card.external_id for card in targets}
+            for card in details_cards:
+                cached_details = self._item_page_details_cache.get(card.external_id)
+                if cached_details is not None:
+                    card.raw["item_page"] = {**cached_details, "enriched_at": self._now().isoformat(), "version": "v2"}
+                    details_cache_hits += 1
+                    continue
+                if card.external_id not in seen_ids:
+                    details_targets.append(card)
+        ordered_targets = targets + details_targets
+        if limit >= 0 and len(ordered_targets) > limit:
+            skipped_total = len(ordered_targets) - limit
+            skipped_limit = max(len(targets) - limit, 0)
+            details_skipped_limit = max(skipped_total - skipped_limit, 0)
+        fetch_targets = ordered_targets[:limit]
 
         for idx, card in enumerate(fetch_targets):
             if idx > 0:
@@ -592,21 +620,32 @@ class MonitorService:
                     await asyncio.sleep(sleep_ms / 1000.0)
             attempted += 1
             try:
-                label = await self.parser.fetch_item_publication_label(card.url)
+                details = await self.parser.fetch_item_details(card.url)
             except Exception:
-                failed += 1
+                if card in targets:
+                    failed += 1
+                if card in details_targets:
+                    details_failed += 1
                 continue
-            if not label:
-                failed += 1
-                continue
-            published_at = AvitoParser._parse_published_at(label, self._now())
-            if published_at is None:
-                failed += 1
-                continue
-            card.published_label = label
-            card.published_at = published_at
-            self._publication_enrichment_cache[card.external_id] = (label, published_at)
-            succeeded += 1
+            if card in targets:
+                label = str(details.get("published_label") or "")
+                if label:
+                    published_at = AvitoParser._parse_published_at(label, self._now())
+                    if published_at is not None:
+                        card.published_label = label
+                        card.published_at = published_at
+                        self._publication_enrichment_cache[card.external_id] = (label, published_at)
+                        succeeded += 1
+                    else:
+                        failed += 1
+                else:
+                    failed += 1
+            if card in details_targets or details_enabled:
+                details_attempted += 1
+                details_payload = {**details, "enriched_at": self._now().isoformat(), "version": "v2"}
+                card.raw["item_page"] = details_payload
+                self._item_page_details_cache[card.external_id] = details
+                details_succeeded += 1
 
         return {
             "item_page_publication_enrichment_attempted": attempted,
@@ -614,6 +653,11 @@ class MonitorService:
             "item_page_publication_enrichment_failed": failed,
             "item_page_publication_enrichment_skipped_limit": skipped_limit,
             "item_page_publication_enrichment_cache_hits": cache_hits,
+            "item_page_details_enrichment_attempted": details_attempted,
+            "item_page_details_enrichment_succeeded": details_succeeded,
+            "item_page_details_enrichment_failed": details_failed,
+            "item_page_details_enrichment_skipped_limit": details_skipped_limit,
+            "item_page_details_enrichment_cache_hits": details_cache_hits,
         }
 
     async def _process_cards(
@@ -634,7 +678,11 @@ class MonitorService:
             for card in cards
             if card.published_at is None and existing_by_external_id.get(card.external_id) is None
         ]
-        enrichment_stats = await self._enrich_missing_published_at(enrichment_candidates)
+        if settings.scrape_enrich_item_page_details:
+            enrichment_candidates = [
+                card for card in cards if existing_by_external_id.get(card.external_id) is None
+            ]
+        enrichment_stats = await self._enrich_item_page(enrichment_candidates, filters)
         alert_repo = AlertRepository(db)
 
         created = 0

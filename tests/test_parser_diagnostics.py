@@ -1742,3 +1742,32 @@ def test_extract_item_page_publication_label_from_sort_formated_date():
 def test_extract_item_page_publication_label_fallback_text():
     html = '<div>Размещено сегодня в 12:34</div>'
     assert AvitoParser._extract_item_page_publication_label(html) == "сегодня в 12:34"
+
+
+def test_fetch_item_details_extracts_sanitized_fields(monkeypatch):
+    parser = AvitoParser()
+    html = """
+    <html><body>
+      <div data-marker="item-view/item-date">17 мая в 12:01</div>
+      <div data-marker="item-view/item-description">Описание квартиры</div>
+      <div data-marker="seller-info/name">Частное лицо</div>
+      <a data-marker="seller-info/name" href="/user/u1">seller</a>
+      <div data-marker="item-view/address">ул. Пушкина</div>
+      <div data-marker="item-metro">м. Петроградская</div>
+      <div data-marker="walk">5 мин.</div>
+      <span data-marker="item/badge">Срочно</span>
+      <img src="https://10.img.avito.st/image.jpg"/>
+      <script>alert(1)</script>
+    </body></html>
+    """
+
+    async def fake_fetch(_url: str):
+        return html
+
+    monkeypatch.setattr(parser, "_fetch_page_html", fake_fetch)
+    details = asyncio.run(parser.fetch_item_details("https://www.avito.ru/item_1"))
+    assert details["published_label"] == "17 мая в 12:01"
+    assert details["description"] == "Описание квартиры"
+    assert details["seller_type"] == "owner"
+    assert details["image_count"] == 1
+    assert "<script>" not in details["description"]

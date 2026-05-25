@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     scrape_page_delay_ms: int = 0
     scrape_page_jitter_ms: int = 0
     scrape_enrich_missing_published_at: bool = False
+    scrape_enrich_item_page_details: bool = False
     scrape_item_page_delay_ms: int = 0
     scrape_item_page_jitter_ms: int = 0
     scrape_item_page_limit_per_run: int = 10

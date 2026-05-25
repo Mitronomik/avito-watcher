@@ -78,6 +78,9 @@ PUBLICATION_MARKER_SELECTORS = (
     '[data-marker*="date"]',
     '[data-marker*="time"]',
 )
+ITEM_PAGE_DESCRIPTION_MAX = 2000
+ITEM_PAGE_SELLER_NAME_MAX = 120
+ITEM_PAGE_BADGES_MAX = 20
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 logger = logging.getLogger(__name__)
 
@@ -945,6 +948,99 @@ class AvitoParser:
     async def fetch_item_publication_label(self, item_url: str) -> str:
         page_html = await self._fetch_page_html(item_url)
         return self._extract_item_page_publication_label(page_html)
+
+    async def fetch_item_details(self, item_url: str) -> dict:
+        from bs4 import BeautifulSoup
+
+        page_html = await self._fetch_page_html(item_url)
+        soup = BeautifulSoup(page_html, "lxml")
+        warnings: list[str] = []
+
+        published_label = self._extract_item_page_publication_label(page_html)
+        description = self._normalize_text_line(
+            (soup.select_one('[data-marker="item-view/item-description"]') or soup.select_one("[itemprop='description']") or {}).get_text(
+                separator=" ", strip=True
+            ) if (soup.select_one('[data-marker="item-view/item-description"]') or soup.select_one("[itemprop='description']")) else ""
+        )
+        if len(description) > ITEM_PAGE_DESCRIPTION_MAX:
+            description = description[:ITEM_PAGE_DESCRIPTION_MAX].rstrip()
+            warnings.append("description_truncated")
+
+        seller_block = soup.select_one('[data-marker="seller-info/name"]') or soup.select_one('[data-marker="seller-info"]')
+        seller_name = self._normalize_text_line(
+            seller_block.get_text(separator=" ", strip=True) if seller_block is not None else ""
+        )
+        if len(seller_name) > ITEM_PAGE_SELLER_NAME_MAX:
+            seller_name = seller_name[:ITEM_PAGE_SELLER_NAME_MAX].rstrip()
+            warnings.append("seller_name_truncated")
+        seller_profile_tag = soup.select_one('a[data-marker*="seller-info/name"]') or soup.select_one('a[href*="/user/"]')
+        seller_profile_url = ""
+        if seller_profile_tag is not None:
+            href = str(seller_profile_tag.get("href", "")).strip()
+            if href:
+                seller_profile_url = urljoin("https://www.avito.ru", href)
+
+        seller_text = " ".join(
+            part for part in (seller_name, soup.get_text(separator=" ", strip=True)[:2000]) if part
+        ).lower()
+        seller_type = "unknown"
+        confidence = "low"
+        if any(token in seller_text for token in ("собственник", "частное лицо")):
+            seller_type = "owner"
+            confidence = "high"
+        elif any(token in seller_text for token in ("агентство", "компания", "застройщик")):
+            seller_type = "agency"
+            confidence = "high"
+        elif "профессиональный профиль" in seller_text:
+            seller_type = "company"
+            confidence = "medium"
+        else:
+            warnings.append("seller_type_ambiguous")
+
+        address_detail = self._normalize_text_line(
+            (soup.select_one('[data-marker="item-view/address"]') or soup.select_one('[data-marker*="address"]') or {}).get_text(
+                separator=" ", strip=True
+            ) if (soup.select_one('[data-marker="item-view/address"]') or soup.select_one('[data-marker*="address"]')) else ""
+        )
+        metro = self._normalize_text_line(
+            (soup.select_one('[data-marker*="item-metro"]') or soup.select_one('[data-marker*="metro"]') or {}).get_text(
+                separator=" ", strip=True
+            ) if (soup.select_one('[data-marker*="item-metro"]') or soup.select_one('[data-marker*="metro"]')) else ""
+        )
+        walking_time_label = self._normalize_text_line(
+            (soup.select_one('[data-marker*="walk"]') or {}).get_text(separator=" ", strip=True)
+            if soup.select_one('[data-marker*="walk"]') else ""
+        )
+        badges = [
+            self._normalize_text_line(tag.get_text(separator=" ", strip=True))
+            for tag in soup.select('[data-marker*="badge"], [class*="badge"]')
+            if self._normalize_text_line(tag.get_text(separator=" ", strip=True))
+        ][:ITEM_PAGE_BADGES_MAX]
+        if len(soup.select('[data-marker*="badge"], [class*="badge"]')) > ITEM_PAGE_BADGES_MAX:
+            warnings.append("badges_truncated")
+
+        image_urls = set(re.findall(r"https://[^\s\"'>]*avito\.[a-z.]+/[^\s\"'>]+(?:jpg|jpeg|png|webp)", page_html, re.IGNORECASE))
+        image_count = len(image_urls) if image_urls else None
+        if image_count is not None and image_count > 100:
+            image_count = 100
+            warnings.append("image_count_clamped")
+
+        return {
+            "source": "item_page",
+            "url": item_url,
+            "published_label": published_label or "",
+            "description": description,
+            "seller_name": seller_name,
+            "seller_type": seller_type,
+            "seller_profile_url": seller_profile_url,
+            "address_detail": address_detail,
+            "metro": metro,
+            "walking_time_label": walking_time_label,
+            "badges": badges,
+            "image_count": image_count,
+            "confidence": confidence,
+            "warnings": warnings,
+        }
 
     @staticmethod
     def _extract_external_id(href: str | None, idx: int) -> str:
