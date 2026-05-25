@@ -70,6 +70,7 @@ AVITO_LISTING_URL_PATH_RE = re.compile(r"^/[a-z0-9_-]+/kvartiry/[^/\s]+_(\d{10})
 MAX_FUTURE_PUBLISHED_AT_DAYS = 7
 MAX_DIAGNOSTIC_STATE_PATHS = 12
 MAX_DIAGNOSTIC_OBJECT_KEY_SETS = 8
+MAX_DIAGNOSTIC_IGNORED_OBJECT_KEY_SETS = 6
 MAX_PRELOADED_STATE_SCAN_NODES = 5000
 MAX_PRELOADED_STATE_SCAN_DEPTH = 24
 PUBLICATION_MARKER_SELECTORS = (
@@ -680,7 +681,11 @@ class AvitoParser:
             "has_catalog_items_state": diagnostics.get("has_catalog_items_state", False),
             "catalog_items_candidate_count": diagnostics.get("catalog_items_candidate_count", 0),
             "external_id_candidate_count": diagnostics.get("external_id_candidate_count", 0),
+            "state_10_digit_id_candidate_count": diagnostics.get("state_10_digit_id_candidate_count", 0),
             "avito_listing_url_candidate_count": diagnostics.get("avito_listing_url_candidate_count", 0),
+            "listing_like_state_object_count": diagnostics.get("listing_like_state_object_count", 0),
+            "navigation_like_state_object_count": diagnostics.get("navigation_like_state_object_count", 0),
+            "no_listing_payload_detected": diagnostics.get("no_listing_payload_detected", False),
             "has_listing_links_without_card_markers": diagnostics.get("has_listing_links_without_card_markers", False),
             "script_tag_count": diagnostics.get("script_tag_count", 0),
             "body_text_length": diagnostics.get("body_text_length", len(body_text)),
@@ -980,35 +985,64 @@ class AvitoParser:
             return {
                 "candidate_state_paths": [],
                 "candidate_object_key_sets": [],
-                "state_item_like_dict_count": 0,
+                "ignored_candidate_object_key_sets": [],
+                "listing_like_state_object_count": 0,
+                "navigation_like_state_object_count": 0,
+                "state_10_digit_id_candidate_count_in_state": 0,
                 "external_id_candidate_count_in_state": 0,
             }
-        paths: list[str] = []
-        key_sets: list[str] = []
-        item_like_count = 0
-        external_ids: set[str] = set()
+        listing_paths: list[str] = []
+        listing_key_sets: list[str] = []
+        ignored_key_sets: list[str] = []
+        listing_like_count = 0
+        navigation_like_count = 0
+        state_10_digit_ids: set[str] = set()
+        listing_external_ids: set[str] = set()
         remaining_nodes = MAX_PRELOADED_STATE_SCAN_NODES
 
         def walk(node: object, path: str, depth: int) -> None:
             nonlocal remaining_nodes
-            nonlocal item_like_count
+            nonlocal listing_like_count
+            nonlocal navigation_like_count
             if depth > MAX_PRELOADED_STATE_SCAN_DEPTH or remaining_nodes <= 0:
                 return
             remaining_nodes -= 1
             if isinstance(node, dict):
                 keys = {str(k) for k in node.keys()}
-                has_id = any(k in keys for k in ("id", "itemId", "externalId"))
                 has_title = any(k in keys for k in ("title", "name"))
-                has_price = "price" in keys or "priceDetailed" in keys
                 has_url = any(k in keys for k in ("url", "href", "urlPath"))
-                has_location = any(k in keys for k in ("address", "location"))
-                signals = sum((has_id, has_title, has_price, has_url, has_location))
-                if signals >= 2:
-                    item_like_count += 1
-                if has_id and len(paths) < MAX_DIAGNOSTIC_STATE_PATHS:
-                    paths.append(path[:120])
-                    if len(key_sets) < MAX_DIAGNOSTIC_OBJECT_KEY_SETS:
-                        key_sets.append(",".join(sorted(keys))[:160])
+                url_raw = node.get("url") or node.get("href") or node.get("urlPath")
+                url_candidate = cls._normalize_text_line(str(url_raw)) if isinstance(url_raw, str) else ""
+                normalized_url, url_id = cls._normalize_and_validate_recursive_fallback_url(url_candidate)
+
+                ext = node.get("externalId") or node.get("itemId") or node.get("id")
+                ext_id = str(ext).strip() if isinstance(ext, (int, str)) else ""
+                ext_id_valid = ext_id if re.fullmatch(r"\d{10}", ext_id) else ""
+                resolved_listing_id = ""
+                if ext_id_valid and url_id and ext_id_valid == url_id:
+                    resolved_listing_id = ext_id_valid
+                elif ext_id_valid and not url_id:
+                    resolved_listing_id = ""
+                elif url_id and not ext_id_valid:
+                    resolved_listing_id = url_id
+
+                is_listing_like = bool(has_title and has_url and normalized_url and resolved_listing_id)
+                if is_listing_like:
+                    listing_like_count += 1
+                    listing_external_ids.add(resolved_listing_id)
+                    if len(listing_paths) < MAX_DIAGNOSTIC_STATE_PATHS:
+                        listing_paths.append(path[:120])
+                    if len(listing_key_sets) < MAX_DIAGNOSTIC_OBJECT_KEY_SETS:
+                        listing_key_sets.append(",".join(sorted(keys))[:160])
+                elif has_title and has_url and (
+                    "categorytree" in path.lower()
+                    or "categoryid" in keys
+                    or "subs" in keys
+                ):
+                    navigation_like_count += 1
+                    if len(ignored_key_sets) < MAX_DIAGNOSTIC_IGNORED_OBJECT_KEY_SETS:
+                        ignored_key_sets.append(",".join(sorted(keys))[:160])
+
                 for id_key in ("id", "itemId", "externalId"):
                     id_value = node.get(id_key)
                     if isinstance(id_value, int):
@@ -1018,7 +1052,7 @@ class AvitoParser:
                     else:
                         continue
                     if re.fullmatch(r"\d{10}", candidate):
-                        external_ids.add(candidate)
+                        state_10_digit_ids.add(candidate)
                 for key, value in node.items():
                     if isinstance(key, str):
                         next_path = f"{path}.{key}" if path else key
@@ -1034,10 +1068,13 @@ class AvitoParser:
 
         walk(state, "", 0)
         return {
-            "candidate_state_paths": list(dict.fromkeys(paths)),
-            "candidate_object_key_sets": list(dict.fromkeys(key_sets)),
-            "state_item_like_dict_count": item_like_count,
-            "external_id_candidate_count_in_state": len(external_ids),
+            "candidate_state_paths": list(dict.fromkeys(listing_paths)),
+            "candidate_object_key_sets": list(dict.fromkeys(listing_key_sets)),
+            "ignored_candidate_object_key_sets": list(dict.fromkeys(ignored_key_sets)),
+            "listing_like_state_object_count": listing_like_count,
+            "navigation_like_state_object_count": navigation_like_count,
+            "state_10_digit_id_candidate_count_in_state": len(state_10_digit_ids),
+            "external_id_candidate_count_in_state": len(listing_external_ids),
         }
 
     @classmethod
@@ -1247,11 +1284,17 @@ class AvitoParser:
             "has_preloaded_state": "window.__preloadedState__" in page_html,
             "has_catalog_items_state": bool(catalog_items),
             "catalog_items_candidate_count": len(catalog_items),
-            "external_id_candidate_count": max(html_external_id_count, state_diag["external_id_candidate_count_in_state"]),
+            "external_id_candidate_count": state_diag["external_id_candidate_count_in_state"],
+            "state_10_digit_id_candidate_count": max(
+                html_external_id_count,
+                state_diag["state_10_digit_id_candidate_count_in_state"],
+            ),
             "avito_listing_url_candidate_count": len(avito_urls),
             "candidate_state_paths": state_diag["candidate_state_paths"],
             "candidate_object_key_sets": state_diag["candidate_object_key_sets"],
-            "state_item_like_dict_count": state_diag["state_item_like_dict_count"],
+            "ignored_candidate_object_key_sets": state_diag["ignored_candidate_object_key_sets"],
+            "listing_like_state_object_count": state_diag["listing_like_state_object_count"],
+            "navigation_like_state_object_count": state_diag["navigation_like_state_object_count"],
             "has_listing_links_without_card_markers": bool(avito_urls),
             "script_tag_count": len(soup.find_all("script")),
             "body_text_length": len(soup.get_text(separator=" ", strip=True)),
@@ -1277,6 +1320,15 @@ class AvitoParser:
             diagnostics["layout_changed_hint"] = "listing_links_without_card_markers"
             return link_cards
         if (
+            diagnostics["has_preloaded_state"]
+            and not diagnostics["has_catalog_items_state"]
+            and not diagnostics.get("has_data_marker_item", False)
+            and diagnostics.get("listing_like_state_object_count", 0) == 0
+            and diagnostics.get("navigation_like_state_object_count", 0) > 0
+        ):
+            diagnostics["layout_changed_hint"] = "hydration_without_listing_payload"
+            diagnostics["no_listing_payload_detected"] = True
+        elif (
             diagnostics["has_preloaded_state"]
             and not diagnostics["has_catalog_items_state"]
             and not diagnostics.get("has_data_marker_item", False)
