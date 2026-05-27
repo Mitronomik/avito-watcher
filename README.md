@@ -15,6 +15,11 @@ cp .env.example .env
 ./scripts/bootstrap.sh
 ```
 
+## Production deploy
+
+- Чеклист первого продакшн-деплоя: `docs/deploy/production_checklist.md`
+- Безопасный шаблон переменных окружения: `deploy/env.production.example`
+
 ## Runtime-флаги скрейпинга
 
 - `SCRAPE_HEADLESS=true` — рекомендуется для Docker/VPS и используется по умолчанию.
