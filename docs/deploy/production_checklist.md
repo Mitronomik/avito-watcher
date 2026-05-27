@@ -65,8 +65,16 @@ Do **not** proceed if `postgres:postgres`, placeholder secrets, or unexpected de
 1. Prepare environment file from template:
    - `cp deploy/env.production.example .env`
    - Fill real secret values outside git.
-2. Pass compose safety gate above.
-3. Build/start infra + API without worker auto-monitoring:
+2. Prepare mounted data directories used by containers:
+
+```bash
+mkdir -p data/debug_html
+```
+
+`./data` is mounted to `/app/data` and is used for JSONL alerts, debug dumps, and worker lock files.
+
+3. Pass compose safety gate above.
+4. Build/start infra + API without worker auto-monitoring:
 
 ```bash
 docker compose -f deploy/docker-compose.prod.yml up -d --build postgres redis app
@@ -125,9 +133,9 @@ docker compose -f deploy/docker-compose.prod.yml --profile worker up -d worker
 Worker operations:
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml stop worker
-docker compose -f deploy/docker-compose.prod.yml restart worker
-docker compose -f deploy/docker-compose.prod.yml logs -f worker --tail=200
+docker compose -f deploy/docker-compose.prod.yml --profile worker stop worker
+docker compose -f deploy/docker-compose.prod.yml --profile worker restart worker
+docker compose -f deploy/docker-compose.prod.yml --profile worker logs -f worker --tail=200
 ```
 
 ## Worker lifecycle
@@ -183,7 +191,7 @@ If smoke checks fail or alert quality regresses:
 1. Pause worker:
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml stop worker
+docker compose -f deploy/docker-compose.prod.yml --profile worker stop worker
 ```
 
 2. Revert to last known-good image/tag.
