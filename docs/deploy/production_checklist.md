@@ -46,7 +46,7 @@ Use `deploy/docker-compose.prod.yml` as the production deployment path.
 Run:
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml config
+docker compose --env-file .env -f deploy/docker-compose.prod.yml config
 ```
 
 Verify resolved values for app/worker match intended production values:
@@ -59,6 +59,22 @@ Verify resolved values for app/worker match intended production values:
 - LLM vars (`SCORING_ENABLED`, `LLM_PROVIDER`, `LLM_*`)
 
 Do **not** proceed if `postgres:postgres`, placeholder secrets, or unexpected defaults remain.
+
+Interpolation note:
+
+- First copy `deploy/env.production.example` to root `.env` and fill real production values there.
+- Docker Compose interpolation for `${POSTGRES_*}` in `deploy/docker-compose.prod.yml` must use `--env-file .env`.
+- Service-level `env_file: ../.env` is a separate mechanism that passes env values into containers at runtime.
+- Do not rely on `deploy/env.production.example` directly for final production render.
+
+Optional local template dry-run:
+
+```bash
+cp .env .env.local.backup
+cp deploy/env.production.example .env
+docker compose --env-file .env -f deploy/docker-compose.prod.yml config
+mv .env.local.backup .env
+```
 
 ## Deploy steps (Docker Compose)
 
