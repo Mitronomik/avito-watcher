@@ -71,7 +71,7 @@ Do **not** proceed if `postgres:postgres`, placeholder secrets, or unexpected de
 mkdir -p data/debug_html
 ```
 
-`./data` is mounted to `/app/data` and is used for JSONL alerts, debug dumps, and worker lock files.
+Root `./data` is mounted to `/app/data` (via `../data:/app/data` in `deploy/docker-compose.prod.yml`) and is used for JSONL alerts, debug HTML dumps, and worker lock files. Create it before the first compose up.
 
 3. Pass compose safety gate above.
 4. Build/start infra + API without worker auto-monitoring:
@@ -175,13 +175,25 @@ First-production worker default remains:
 
 Optional shadow smoke commands below are one-off checks to exercise LLM path and are **not** first-prod worker defaults.
 
-Run these inside app container via Docker Compose:
+DeepSeek should be enabled only after core smoke passes, through existing `openai_compatible` provider:
+
+- `LLM_PROVIDER=openai_compatible`
+- `LLM_BASE_URL=https://api.deepseek.com`
+- `LLM_MODEL=deepseek-v4-pro`
+- Keep `LLM_SHADOW_MODE=true` first.
+- LLM path must stay fail-soft and must not block alert delivery.
+
+Docker Compose DeepSeek shadow smoke:
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml run --rm -e SCORING_ENABLED=true -e LLM_SHADOW_MODE=true -e LLM_PROVIDER=off app python3 -m app.cli run-once --search-id <ID>
+docker compose -f deploy/docker-compose.prod.yml run --rm   -e SCORING_ENABLED=true   -e LLM_SHADOW_MODE=true   -e LLM_PROVIDER=openai_compatible   -e LLM_BASE_URL=https://api.deepseek.com   -e LLM_MODEL=deepseek-v4-pro   -e LLM_API_KEY=<deepseek-api-key>   app python3 -m app.cli run-once --search-id <ID>
+```
+
+Optional local Ollama (not default production path):
+
+```bash
 docker compose -f deploy/docker-compose.prod.yml --profile llm-local up -d ollama
 docker compose -f deploy/docker-compose.prod.yml run --rm -e SCORING_ENABLED=true -e LLM_SHADOW_MODE=true -e LLM_PROVIDER=ollama -e LLM_BASE_URL=http://ollama:11434 -e LLM_MODEL=<model> app python3 -m app.cli run-once --search-id <ID>
-docker compose -f deploy/docker-compose.prod.yml run --rm -e SCORING_ENABLED=true -e LLM_SHADOW_MODE=true -e LLM_PROVIDER=openai_compatible -e LLM_BASE_URL=<base_url> -e LLM_MODEL=<model> -e LLM_API_KEY=<key> app python3 -m app.cli run-once --search-id <ID>
 ```
 
 ## Rollback
