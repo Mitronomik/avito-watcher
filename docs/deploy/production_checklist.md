@@ -39,12 +39,14 @@ pytest -q
 
 ## Compose safety gate (required before deploy)
 
-Current `deploy/docker-compose.yml` should be reviewed as a pre-prod baseline, not assumed hardened production defaults.
+Use `deploy/docker-compose.prod.yml` as the production deployment path.
+
+`deploy/docker-compose.yml` remains a dev/pre-prod baseline and should not be treated as hardened production defaults.
 
 Run:
 
 ```bash
-docker compose -f deploy/docker-compose.yml config
+docker compose --env-file .env -f deploy/docker-compose.prod.yml config
 ```
 
 Verify resolved values for app/worker match intended production values:
@@ -58,30 +60,49 @@ Verify resolved values for app/worker match intended production values:
 
 Do **not** proceed if `postgres:postgres`, placeholder secrets, or unexpected defaults remain.
 
+Interpolation note:
+
+- First copy `deploy/env.production.example` to root `.env` and fill real production values there.
+- Docker Compose interpolation for `${POSTGRES_*}` in `deploy/docker-compose.prod.yml` must use `--env-file .env`.
+- Service-level `env_file: ../.env` is a separate mechanism that passes env values into containers at runtime.
+- Do not rely on `deploy/env.production.example` directly for final production render.
+
+Optional local template dry-run:
+
+```bash
+cp .env .env.local.backup
+cp deploy/env.production.example .env
+docker compose --env-file .env -f deploy/docker-compose.prod.yml config
+mv .env.local.backup .env
+```
+
 ## Deploy steps (Docker Compose)
 
 1. Prepare environment file from template:
    - `cp deploy/env.production.example .env`
    - Fill real secret values outside git.
-2. Pass compose safety gate above.
-3. Build/start infra + API without worker auto-monitoring:
+2. Prepare mounted data directories used by containers:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d --build postgres redis app
+mkdir -p data/debug_html
 ```
 
-(Alternative: start all services with worker scaled to zero.)
+Root `./data` is mounted to `/app/data` (via `../data:/app/data` in `deploy/docker-compose.prod.yml`) and is used for JSONL alerts, debug HTML dumps, and worker lock files. Create it before the first compose up.
+
+3. Pass compose safety gate above.
+4. Build/start infra + API without worker auto-monitoring:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d --build --scale worker=0
+docker compose -f deploy/docker-compose.prod.yml up -d --build postgres redis app
 ```
+
 
 ## Database migration
 
 Run DB migrations to the latest revision before enabling worker monitoring:
 
 ```bash
-docker compose -f deploy/docker-compose.yml run --rm app alembic upgrade head
+docker compose -f deploy/docker-compose.prod.yml run --rm app alembic upgrade head
 ```
 
 Local/dev alternative:
@@ -108,7 +129,7 @@ Run an explicit one-pass smoke for a known search.
 Primary (Docker Compose):
 
 ```bash
-docker compose -f deploy/docker-compose.yml run --rm app python3 -m app.cli run-once --search-id <ID>
+docker compose -f deploy/docker-compose.prod.yml run --rm app python3 -m app.cli run-once --search-id <ID>
 ```
 
 Local/dev alternative:
@@ -122,8 +143,24 @@ Expected: run completes without crash and processes feed for the selected search
 After smoke passes, start worker:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d worker
+docker compose -f deploy/docker-compose.prod.yml --profile worker up -d worker
 ```
+
+Worker operations:
+
+```bash
+docker compose -f deploy/docker-compose.prod.yml --profile worker stop worker
+docker compose -f deploy/docker-compose.prod.yml --profile worker restart worker
+docker compose -f deploy/docker-compose.prod.yml --profile worker logs -f worker --tail=200
+```
+
+## Worker lifecycle
+
+- Worker is a long-running process.
+- It continuously picks active/due searches.
+- Newly activated searches are picked up on the next cycle.
+- Worker process lifecycle is controlled by Docker Compose/systemd, not by admin UI.
+- Admin UI can observe worker status and run manual `run-once`, but it does not start/stop worker.
 
 ## Alert channel smoke criteria
 
@@ -154,12 +191,25 @@ First-production worker default remains:
 
 Optional shadow smoke commands below are one-off checks to exercise LLM path and are **not** first-prod worker defaults.
 
-Run these inside app container via Docker Compose:
+DeepSeek should be enabled only after core smoke passes, through existing `openai_compatible` provider:
+
+- `LLM_PROVIDER=openai_compatible`
+- `LLM_BASE_URL=https://api.deepseek.com`
+- `LLM_MODEL=deepseek-v4-pro`
+- Keep `LLM_SHADOW_MODE=true` first.
+- LLM path must stay fail-soft and must not block alert delivery.
+
+Docker Compose DeepSeek shadow smoke:
 
 ```bash
-docker compose -f deploy/docker-compose.yml run --rm -e SCORING_ENABLED=true -e LLM_SHADOW_MODE=true -e LLM_PROVIDER=off app python3 -m app.cli run-once --search-id <ID>
-docker compose -f deploy/docker-compose.yml run --rm -e SCORING_ENABLED=true -e LLM_SHADOW_MODE=true -e LLM_PROVIDER=ollama -e LLM_BASE_URL=http://localhost:11434 -e LLM_MODEL=<model> app python3 -m app.cli run-once --search-id <ID>
-docker compose -f deploy/docker-compose.yml run --rm -e SCORING_ENABLED=true -e LLM_SHADOW_MODE=true -e LLM_PROVIDER=openai_compatible -e LLM_BASE_URL=<base_url> -e LLM_MODEL=<model> -e LLM_API_KEY=<key> app python3 -m app.cli run-once --search-id <ID>
+docker compose -f deploy/docker-compose.prod.yml run --rm   -e SCORING_ENABLED=true   -e LLM_SHADOW_MODE=true   -e LLM_PROVIDER=openai_compatible   -e LLM_BASE_URL=https://api.deepseek.com   -e LLM_MODEL=deepseek-v4-pro   -e LLM_API_KEY=<deepseek-api-key>   app python3 -m app.cli run-once --search-id <ID>
+```
+
+Optional local Ollama (not default production path):
+
+```bash
+docker compose -f deploy/docker-compose.prod.yml --profile llm-local up -d ollama
+docker compose -f deploy/docker-compose.prod.yml run --rm -e SCORING_ENABLED=true -e LLM_SHADOW_MODE=true -e LLM_PROVIDER=ollama -e LLM_BASE_URL=http://ollama:11434 -e LLM_MODEL=<model> app python3 -m app.cli run-once --search-id <ID>
 ```
 
 ## Rollback
@@ -169,7 +219,7 @@ If smoke checks fail or alert quality regresses:
 1. Pause worker:
 
 ```bash
-docker compose -f deploy/docker-compose.yml stop worker
+docker compose -f deploy/docker-compose.prod.yml --profile worker stop worker
 ```
 
 2. Revert to last known-good image/tag.
@@ -178,5 +228,5 @@ docker compose -f deploy/docker-compose.yml stop worker
 5. Resume worker and re-run run-once smoke:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d worker
+docker compose -f deploy/docker-compose.prod.yml --profile worker up -d worker
 ```
