@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libx11-6 \
     libglib2.0-0 \
+    libgtk-3-0 \
     libnss3 \
     libxcb1 \
     libxcomposite1 \
@@ -41,6 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgbm1 \
     libasound2 \
     xvfb \
+    xauth \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
