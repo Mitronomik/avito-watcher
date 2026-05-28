@@ -138,7 +138,7 @@ Confirm API/admin is reachable and healthy before enabling worker.
 When Docker is available, confirm the production app image includes Xvfb support before run-once smoke:
 
 ```bash
-docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm app python3 -c "import shutil; print('Xvfb=', shutil.which('Xvfb')); print('xvfb-run=', shutil.which('xvfb-run')); print('xauth=', shutil.which('xauth'))"
+docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm app python3 -c "import shutil; print('Xvfb=', shutil.which('Xvfb')); print('xvfb-run=', shutil.which('xvfb-run')); print('xauth=', shutil.which('xauth')); assert shutil.which('Xvfb'); assert shutil.which('xvfb-run'); assert shutil.which('xauth')"
 ```
 
 Then verify Camoufox can start with a virtual headless display:
