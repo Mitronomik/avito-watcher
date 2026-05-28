@@ -78,10 +78,9 @@ mv .env.local.backup .env
 
 ## Deploy steps (Docker Compose)
 
-1. Prepare environment file from template:
+1. Prepare the environment file and mounted data directories:
    - `cp deploy/env.production.example .env`
    - Fill real secret values outside git.
-2. Prepare mounted data directories used by containers:
 
 ```bash
 mkdir -p data/debug_html
@@ -89,8 +88,14 @@ mkdir -p data/debug_html
 
 Root `./data` is mounted to `/app/data` (via `../data:/app/data` in `deploy/docker-compose.prod.yml`) and is used for JSONL alerts, debug HTML dumps, and worker lock files. Create it before the first compose up.
 
-3. Pass compose safety gate above.
-4. Start only infrastructure first; do not start the API or worker before migrations on a clean database:
+2. Pass compose safety gate above.
+3. Build the app image explicitly before migrations; do not rely on an implicit image build from `run` or `up`:
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.prod.yml build app
+```
+
+4. Start only infrastructure; do not start the API or worker before migrations on a clean database:
 
 ```bash
 docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d postgres redis
@@ -99,16 +104,16 @@ docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d postgres 
 
 ## Database migration
 
-Run DB migrations to the latest revision before starting the API or enabling worker monitoring:
+5. Run DB migrations to the latest revision before starting the API or enabling worker monitoring:
 
 ```bash
 docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm app alembic upgrade head
 ```
 
-5. Build/start API after migrations, without worker auto-monitoring:
+6. Start API after migrations, without worker auto-monitoring:
 
 ```bash
-docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d --build app
+docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d app
 ```
 
 Local/dev alternative:
@@ -128,9 +133,35 @@ alembic upgrade head
 
 Confirm API/admin is reachable and healthy before enabling worker.
 
+## Docker Xvfb/Camoufox smoke checks
+
+When Docker is available, confirm the production app image includes Xvfb support before run-once smoke:
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm app python3 -c "import shutil; print('Xvfb=', shutil.which('Xvfb')); print('xvfb-run=', shutil.which('xvfb-run')); print('xauth=', shutil.which('xauth'))"
+```
+
+Then verify Camoufox can start with a virtual headless display:
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm app python3 - <<'PY'
+import asyncio
+from camoufox.async_api import AsyncCamoufox
+
+async def main():
+    async with AsyncCamoufox(headless="virtual") as browser:
+        page = await browser.new_page()
+        await page.goto("about:blank")
+        print("camoufox_virtual_ok")
+
+asyncio.run(main())
+PY
+```
+
+
 ## Manual run-once smoke
 
-Run an explicit one-pass smoke for a known search.
+7. Run an explicit one-pass smoke for a known search.
 
 Primary (Docker Compose):
 
@@ -146,7 +177,7 @@ python3 -m app.cli run-once --search-id <ID>
 
 Expected: run completes without crash and processes feed for the selected search.
 
-After smoke passes, start worker:
+8. After smoke passes, start worker:
 
 ```bash
 docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile worker up -d worker
