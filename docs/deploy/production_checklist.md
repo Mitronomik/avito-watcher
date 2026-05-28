@@ -90,19 +90,25 @@ mkdir -p data/debug_html
 Root `./data` is mounted to `/app/data` (via `../data:/app/data` in `deploy/docker-compose.prod.yml`) and is used for JSONL alerts, debug HTML dumps, and worker lock files. Create it before the first compose up.
 
 3. Pass compose safety gate above.
-4. Build/start infra + API without worker auto-monitoring:
+4. Start only infrastructure first; do not start the API or worker before migrations on a clean database:
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml up -d --build postgres redis app
+docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d postgres redis
 ```
 
 
 ## Database migration
 
-Run DB migrations to the latest revision before enabling worker monitoring:
+Run DB migrations to the latest revision before starting the API or enabling worker monitoring:
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml run --rm app alembic upgrade head
+docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm app alembic upgrade head
+```
+
+5. Build/start API after migrations, without worker auto-monitoring:
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d --build app
 ```
 
 Local/dev alternative:
@@ -129,7 +135,7 @@ Run an explicit one-pass smoke for a known search.
 Primary (Docker Compose):
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml run --rm app python3 -m app.cli run-once --search-id <ID>
+docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm app python3 -m app.cli run-once --search-id <ID>
 ```
 
 Local/dev alternative:
@@ -143,15 +149,15 @@ Expected: run completes without crash and processes feed for the selected search
 After smoke passes, start worker:
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml --profile worker up -d worker
+docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile worker up -d worker
 ```
 
 Worker operations:
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml --profile worker stop worker
-docker compose -f deploy/docker-compose.prod.yml --profile worker restart worker
-docker compose -f deploy/docker-compose.prod.yml --profile worker logs -f worker --tail=200
+docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile worker stop worker
+docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile worker restart worker
+docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile worker logs -f worker --tail=200
 ```
 
 ## Worker lifecycle
@@ -202,14 +208,14 @@ DeepSeek should be enabled only after core smoke passes, through existing `opena
 Docker Compose DeepSeek shadow smoke:
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml run --rm   -e SCORING_ENABLED=true   -e LLM_SHADOW_MODE=true   -e LLM_PROVIDER=openai_compatible   -e LLM_BASE_URL=https://api.deepseek.com   -e LLM_MODEL=deepseek-v4-pro   -e LLM_API_KEY=<deepseek-api-key>   app python3 -m app.cli run-once --search-id <ID>
+docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm   -e SCORING_ENABLED=true   -e LLM_SHADOW_MODE=true   -e LLM_PROVIDER=openai_compatible   -e LLM_BASE_URL=https://api.deepseek.com   -e LLM_MODEL=deepseek-v4-pro   -e LLM_API_KEY=<deepseek-api-key>   app python3 -m app.cli run-once --search-id <ID>
 ```
 
 Optional local Ollama (not default production path):
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml --profile llm-local up -d ollama
-docker compose -f deploy/docker-compose.prod.yml run --rm -e SCORING_ENABLED=true -e LLM_SHADOW_MODE=true -e LLM_PROVIDER=ollama -e LLM_BASE_URL=http://ollama:11434 -e LLM_MODEL=<model> app python3 -m app.cli run-once --search-id <ID>
+docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile llm-local up -d ollama
+docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm -e SCORING_ENABLED=true -e LLM_SHADOW_MODE=true -e LLM_PROVIDER=ollama -e LLM_BASE_URL=http://ollama:11434 -e LLM_MODEL=<model> app python3 -m app.cli run-once --search-id <ID>
 ```
 
 ## Rollback
@@ -219,7 +225,7 @@ If smoke checks fail or alert quality regresses:
 1. Pause worker:
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml --profile worker stop worker
+docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile worker stop worker
 ```
 
 2. Revert to last known-good image/tag.
@@ -228,5 +234,5 @@ docker compose -f deploy/docker-compose.prod.yml --profile worker stop worker
 5. Resume worker and re-run run-once smoke:
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml --profile worker up -d worker
+docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile worker up -d worker
 ```

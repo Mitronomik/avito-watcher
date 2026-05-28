@@ -40,6 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxtst6 \
     libgbm1 \
     libasound2 \
+    xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
