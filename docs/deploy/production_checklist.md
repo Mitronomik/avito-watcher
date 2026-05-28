@@ -141,10 +141,34 @@ When Docker is available, confirm the production app image includes Xvfb support
 docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm app python3 -c "import shutil; print('Xvfb=', shutil.which('Xvfb')); print('xvfb-run=', shutil.which('xvfb-run')); print('xauth=', shutil.which('xauth')); assert shutil.which('Xvfb'); assert shutil.which('xvfb-run'); assert shutil.which('xauth')"
 ```
 
+For a direct image smoke after building a release candidate locally:
+
+```bash
+docker build -t avito-watcher:camoufox-runtime-smoke .
+docker run --rm avito-watcher:camoufox-runtime-smoke python3 -c "import shutil; print('Xvfb=', shutil.which('Xvfb')); print('xvfb-run=', shutil.which('xvfb-run')); print('xauth=', shutil.which('xauth')); assert shutil.which('Xvfb'); assert shutil.which('xvfb-run'); assert shutil.which('xauth')"
+```
+
 Then verify Camoufox can start with a virtual headless display:
 
 ```bash
 docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm app python3 - <<'PY'
+import asyncio
+from camoufox.async_api import AsyncCamoufox
+
+async def main():
+    async with AsyncCamoufox(headless="virtual") as browser:
+        page = await browser.new_page()
+        await page.goto("about:blank")
+        print("camoufox_virtual_ok")
+
+asyncio.run(main())
+PY
+```
+
+Direct image equivalent:
+
+```bash
+docker run --rm avito-watcher:camoufox-runtime-smoke python3 - <<'PY'
 import asyncio
 from camoufox.async_api import AsyncCamoufox
 
@@ -167,6 +191,18 @@ Primary (Docker Compose):
 
 ```bash
 docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm app python3 -m app.cli run-once --search-id <ID>
+```
+
+Proxy-backed production smoke when `PROXY_URLS` is configured in `.env`:
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm app python3 -m app.cli run-once --search-id <ID>
+```
+
+Direct image proxy smoke when using the local release-candidate tag:
+
+```bash
+docker run --rm --env-file .env avito-watcher:camoufox-runtime-smoke python3 -m app.cli run-once --search-id <ID>
 ```
 
 Local/dev alternative:
