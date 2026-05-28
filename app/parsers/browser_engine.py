@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import importlib.util
 import logging
 import inspect
 import platform
@@ -117,6 +118,10 @@ def _nodriver_proxy_args(proxy_url: str | None) -> list[str]:
 
 def _is_humanize_enabled() -> bool:
     return settings.scrape_humanize
+
+
+def _camoufox_geoip_available() -> bool:
+    return importlib.util.find_spec("geoip2") is not None
 
 
 def _timeout_seconds() -> float:
@@ -482,7 +487,12 @@ async def open_camoufox_session(proxy_url: Optional[str]):
         _cf_headless = False
     camoufox_kwargs = {"headless": _cf_headless, "proxy": proxy_cfg}
     if proxy_cfg:
-        camoufox_kwargs["geoip"] = True
+        if _camoufox_geoip_available():
+            camoufox_kwargs["geoip"] = True
+        else:
+            logger.warning(
+                "[browser_engine] camoufox: geoip extra is not installed; continuing with proxy without geoip"
+            )
     browser_cm = AsyncCamoufox(**camoufox_kwargs)
     browser = await browser_cm.__aenter__()
     try:

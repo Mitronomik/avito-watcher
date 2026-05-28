@@ -1172,11 +1172,61 @@ def test_open_camoufox_session_headless_virtual_only_linux_and_geoip_with_proxy(
     monkeypatch.setitem(sys.modules, "camoufox.async_api", fake_mod)
     monkeypatch.setattr("app.parsers.browser_engine.settings.scrape_headless", True)
     monkeypatch.setattr("app.parsers.browser_engine.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("app.parsers.browser_engine._camoufox_geoip_available", lambda: True)
 
     session = asyncio.run(open_camoufox_session("http://user:pass@1.2.3.4:8080"))
     assert session is not None
     assert captured["headless"] is True
     assert captured["geoip"] is True
+    assert captured["proxy"] == {"server": "http://1.2.3.4:8080", "username": "user", "password": "pass"}
+
+
+def test_open_camoufox_session_proxy_geoip_unavailable_warns_and_keeps_proxy(monkeypatch, caplog):
+    captured = {}
+
+    class FakeContext:
+        async def grant_permissions(self, _perms):
+            return None
+
+        async def set_geolocation(self, _geo):
+            return None
+
+    class FakePage:
+        def __init__(self):
+            self.context = FakeContext()
+
+        async def add_init_script(self, _script):
+            return None
+
+    class FakeBrowser:
+        async def new_page(self):
+            return FakePage()
+
+    class FakeAsyncCamoufox:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return FakeBrowser()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    fake_mod = ModuleType("camoufox.async_api")
+    fake_mod.AsyncCamoufox = FakeAsyncCamoufox
+    monkeypatch.setitem(sys.modules, "camoufox.async_api", fake_mod)
+    monkeypatch.setattr("app.parsers.browser_engine.settings.scrape_headless", True)
+    monkeypatch.setattr("app.parsers.browser_engine.platform.system", lambda: "Linux")
+    monkeypatch.setattr("app.parsers.browser_engine._camoufox_geoip_available", lambda: False)
+
+    with caplog.at_level(logging.WARNING):
+        session = asyncio.run(open_camoufox_session("http://user:pass@1.2.3.4:8080"))
+
+    assert session is not None
+    assert captured["headless"] == "virtual"
+    assert captured["proxy"] == {"server": "http://1.2.3.4:8080", "username": "user", "password": "pass"}
+    assert "geoip" not in captured
+    assert "geoip extra is not installed" in caplog.text
 
 
 def test_open_camoufox_session_headless_virtual_on_linux_no_geoip_without_proxy(monkeypatch):
@@ -1215,6 +1265,7 @@ def test_open_camoufox_session_headless_virtual_on_linux_no_geoip_without_proxy(
     monkeypatch.setitem(sys.modules, "camoufox.async_api", fake_mod)
     monkeypatch.setattr("app.parsers.browser_engine.settings.scrape_headless", True)
     monkeypatch.setattr("app.parsers.browser_engine.platform.system", lambda: "Linux")
+    monkeypatch.setattr("app.parsers.browser_engine._camoufox_geoip_available", lambda: True)
 
     session = asyncio.run(open_camoufox_session(None))
     assert session is not None
