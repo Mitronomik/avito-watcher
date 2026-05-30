@@ -6,7 +6,7 @@ import logging
 from types import ModuleType, SimpleNamespace
 
 from app.parsers.block_signals import looks_like_block_or_captcha
-from app.parsers.browser_engine import _is_blocked, _nodriver_proxy_args, _parse_proxy_url, _stop_browser_best_effort
+from app.parsers.browser_engine import _STEALTH_INIT_SCRIPT, _is_blocked, _nodriver_proxy_args, _parse_proxy_url, _stop_browser_best_effort
 from app.parsers.browser_engine import (
     _CamoufoxSession,
     _NodriverSession,
@@ -406,23 +406,54 @@ def test_camoufox_session_warmup_runs_once_per_session(monkeypatch):
             return self
 
         async def text_content(self):
-            return ""
+            return "target body"
 
         async def count(self):
             return 3
 
-    class FakePage:
+    class FakeTargetPage:
+        def __init__(self, name):
+            self.name = name
+            self.closed = False
+
+        async def add_init_script(self, script):
+            events.append((self.name, "add_init_script", script))
+
         async def goto(self, url, wait_until, timeout=None):
-            events.append((url, wait_until))
+            events.append((self.name, "goto", url, wait_until))
 
         async def title(self):
-            return "Avito"
+            events.append((self.name, "title"))
+            return "Target Avito"
 
-        def locator(self, _selector):
+        def locator(self, selector):
+            events.append((self.name, "locator", selector))
             return FakeLocator()
 
         async def content(self):
-            return "<html></html>"
+            events.append((self.name, "content"))
+            return "<html>target</html>"
+
+        async def close(self):
+            self.closed = True
+            events.append((self.name, "close"))
+
+    class FakeContext:
+        def __init__(self):
+            self.pages = []
+
+        async def new_page(self):
+            page = FakeTargetPage(f"target-{len(self.pages) + 1}")
+            self.pages.append(page)
+            events.append((page.name, "new_page"))
+            return page
+
+    class FakeWarmupPage:
+        def __init__(self):
+            self.context = FakeContext()
+
+        async def goto(self, url, wait_until, timeout=None):
+            events.append(("warmup", "goto", url, wait_until))
 
     class FakeBrowser:
         async def __aexit__(self, *_args):
@@ -432,18 +463,87 @@ def test_camoufox_session_warmup_runs_once_per_session(monkeypatch):
         return None
 
     monkeypatch.setattr("app.parsers.browser_engine.asyncio.sleep", _fast_sleep)
-    session = _CamoufoxSession(browser=FakeBrowser(), page=FakePage())
+    warmup_page = FakeWarmupPage()
+    session = _CamoufoxSession(browser=FakeBrowser(), page=warmup_page)
 
     first = asyncio.run(session.fetch("https://www.avito.ru/a"))
     second = asyncio.run(session.fetch("https://www.avito.ru/b"))
 
-    assert first["ok"] is True
-    assert second["ok"] is True
+    assert first == {"ok": True, "engine": "camoufox", "html": "<html>target</html>", "cards_count": 3}
+    assert second == {"ok": True, "engine": "camoufox", "html": "<html>target</html>", "cards_count": 3}
     assert events == [
-        ("https://www.avito.ru/", "domcontentloaded"),
-        ("https://www.avito.ru/a", "domcontentloaded"),
-        ("https://www.avito.ru/b", "domcontentloaded"),
+        ("warmup", "goto", "https://www.avito.ru/", "domcontentloaded"),
+        ("target-1", "new_page"),
+        ("target-1", "add_init_script", _STEALTH_INIT_SCRIPT),
+        ("target-1", "goto", "https://www.avito.ru/a", "domcontentloaded"),
+        ("target-1", "title"),
+        ("target-1", "locator", "body"),
+        ("target-1", "content"),
+        ("target-1", "locator", '[data-marker="item"]'),
+        ("target-1", "close"),
+        ("target-2", "new_page"),
+        ("target-2", "add_init_script", _STEALTH_INIT_SCRIPT),
+        ("target-2", "goto", "https://www.avito.ru/b", "domcontentloaded"),
+        ("target-2", "title"),
+        ("target-2", "locator", "body"),
+        ("target-2", "content"),
+        ("target-2", "locator", '[data-marker="item"]'),
+        ("target-2", "close"),
     ]
+    assert warmup_page.context.pages[0].closed is True
+    assert warmup_page.context.pages[1].closed is True
+
+
+def test_camoufox_fetch_returns_content_if_target_page_close_fails(monkeypatch):
+    class FakeLocator:
+        @property
+        def first(self):
+            return self
+
+        async def text_content(self):
+            return "body"
+
+        async def count(self):
+            return 7
+
+    class TargetPage:
+        async def add_init_script(self, _script):
+            return None
+
+        async def goto(self, *_args, **_kwargs):
+            return None
+
+        async def title(self):
+            return "Avito"
+
+        def locator(self, _selector):
+            return FakeLocator()
+
+        async def content(self):
+            return "<html>ok</html>"
+
+        async def close(self):
+            raise RuntimeError("close failed")
+
+    class Context:
+        async def new_page(self):
+            return TargetPage()
+
+    class WarmupPage:
+        context = Context()
+
+        async def goto(self, *_args, **_kwargs):
+            return None
+
+    async def _fast_sleep(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.parsers.browser_engine.asyncio.sleep", _fast_sleep)
+    session = _CamoufoxSession(browser=SimpleNamespace(), page=WarmupPage())
+
+    result = asyncio.run(session.fetch("https://www.avito.ru/a"))
+
+    assert result == {"ok": True, "engine": "camoufox", "html": "<html>ok</html>", "cards_count": 7}
 
 
 def test_nodriver_warmup_failure_returns_controlled_result(monkeypatch):
@@ -618,9 +718,12 @@ def test_humanize_exception_is_logged_and_non_fatal_camoufox(monkeypatch, caplog
         async def count(self):
             return 1
 
-    class FakePage:
+    class FakeTargetPage:
         def __init__(self):
             self.mouse = FakeMouse()
+
+        async def add_init_script(self, _script):
+            return None
 
         async def goto(self, _url, wait_until, timeout=None):
             return wait_until
@@ -633,6 +736,19 @@ def test_humanize_exception_is_logged_and_non_fatal_camoufox(monkeypatch, caplog
 
         async def content(self):
             return "<html></html>"
+
+        async def close(self):
+            return None
+
+    class FakeContext:
+        async def new_page(self):
+            return FakeTargetPage()
+
+    class FakePage:
+        context = FakeContext()
+
+        async def goto(self, _url, wait_until, timeout=None):
+            return wait_until
 
     class FakeBrowser:
         async def __aexit__(self, *_args):
@@ -1117,23 +1233,43 @@ def test_camoufox_warmup_timeout_classified_as_timeout():
 
 
 def test_camoufox_target_timeout_classified_as_timeout(monkeypatch):
-    class FakePage:
+    class TargetPage:
         def __init__(self):
-            self.calls = 0
+            self.closed = False
+
+        async def add_init_script(self, _script):
+            return None
 
         async def goto(self, *_args, **_kwargs):
-            self.calls += 1
-            if self.calls > 1:
-                raise RuntimeError("Page.goto: Timeout 30000ms exceeded")
+            raise RuntimeError("Page.goto: Timeout 30000ms exceeded")
+
+        async def close(self):
+            self.closed = True
+
+    class Context:
+        def __init__(self):
+            self.target_page = TargetPage()
+
+        async def new_page(self):
+            return self.target_page
+
+    class FakePage:
+        def __init__(self):
+            self.context = Context()
+
+        async def goto(self, *_args, **_kwargs):
+            return None
 
     async def _fast_sleep(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr("app.parsers.browser_engine.asyncio.sleep", _fast_sleep)
-    session = _CamoufoxSession(browser=SimpleNamespace(), page=FakePage())
+    warmup_page = FakePage()
+    session = _CamoufoxSession(browser=SimpleNamespace(), page=warmup_page)
     result = asyncio.run(session.fetch("https://www.avito.ru/a"))
     assert result["ok"] is False
     assert result["error_type"] == "timeout"
+    assert warmup_page.context.target_page.closed is True
 
 
 def test_open_camoufox_session_headless_virtual_only_linux_and_geoip_with_proxy(monkeypatch):

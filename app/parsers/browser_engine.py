@@ -356,8 +356,9 @@ class _NodriverSession:
 
 
 class _CamoufoxSession:
-    def __init__(self, browser, page):
+    def __init__(self, browser, page, runtime_browser=None):
         self._browser = browser
+        self._runtime_browser = runtime_browser
         self._page = page
         self._warmed_up = False
         self._closed = False
@@ -388,26 +389,37 @@ class _CamoufoxSession:
     def broken(self) -> bool:
         return self._broken
 
+    async def _new_target_page(self):
+        context = getattr(self._page, "context", None)
+        if context is not None and hasattr(context, "new_page"):
+            return await context.new_page()
+        if self._runtime_browser is not None and hasattr(self._runtime_browser, "new_page"):
+            return await self._runtime_browser.new_page()
+        return await self._page.context.new_page()
+
     async def fetch(self, url: str) -> dict:
         if self._closed:
             return {"ok": False, "engine": "camoufox", "error_type": "exception", "error": "camoufox session is closed"}
+        target_page = None
         try:
             warmup_result = await self._ensure_warmup()
             if warmup_result is not None:
                 return warmup_result
-            await self._page.goto(url, wait_until="domcontentloaded", timeout=settings.scrape_timeout_ms)
+            target_page = await self._new_target_page()
+            await target_page.add_init_script(_STEALTH_INIT_SCRIPT)
+            await target_page.goto(url, wait_until="domcontentloaded", timeout=settings.scrape_timeout_ms)
             if _is_humanize_enabled():
                 try:
-                    await _humanize_camoufox_page(self._page)
+                    await _humanize_camoufox_page(target_page)
                 except Exception as exc:
                     logger.warning("[browser_engine] camoufox humanize failed: %s", exc)
             await asyncio.sleep(random.uniform(3.0, 6.0))
-            title = await self._page.title() or ""
-            body = (await self._page.locator("body").first.text_content()) or ""
-            html = await self._page.content() or ""
+            title = await target_page.title() or ""
+            body = (await target_page.locator("body").first.text_content()) or ""
+            html = await target_page.content() or ""
             if _is_blocked(title, body):
                 return {"ok": False, "engine": "camoufox", "error_type": "possible_captcha_or_block"}
-            cards_count = await self._page.locator('[data-marker="item"]').count()
+            cards_count = await target_page.locator('[data-marker="item"]').count()
             return {"ok": True, "engine": "camoufox", "html": html, "cards_count": cards_count}
         except asyncio.TimeoutError:
             return _timeout_result("camoufox", "target")
@@ -415,6 +427,12 @@ class _CamoufoxSession:
             if "Timeout" in str(exc):
                 return _timeout_result("camoufox", "target")
             return {"ok": False, "engine": "camoufox", "error_type": "exception", "error": str(exc)}
+        finally:
+            if target_page is not None:
+                try:
+                    await target_page.close()
+                except Exception as exc:
+                    logger.debug("[browser_engine] camoufox: target page close skipped: %s", exc)
 
     async def close(self) -> None:
         if self._closed:
@@ -503,7 +521,7 @@ async def open_camoufox_session(proxy_url: Optional[str]):
             await page.context.set_geolocation({"latitude": 59.9386, "longitude": 30.3141})
         except Exception as _geo_exc:
             logger.debug("[browser_engine] camoufox: geolocation setup skipped: %s", _geo_exc)
-        return _CamoufoxSession(browser_cm, page)
+        return _CamoufoxSession(browser_cm, page, runtime_browser=browser)
     except Exception:
         import sys as _sys
 
