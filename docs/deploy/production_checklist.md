@@ -234,6 +234,7 @@ docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile worke
 - Newly activated searches are picked up on the next cycle.
 - Worker process lifecycle is controlled by Docker Compose/systemd, not by admin UI.
 - Admin UI can observe worker status and run manual `run-once`, but it does not start/stop worker.
+- Worker liveness is currently checked through worker logs, admin lock/runtime status, and monitor cycle summaries. The production worker does not expose an HTTP endpoint, so Docker HTTP health is disabled for the worker service.
 
 ## Alert channel smoke criteria
 
