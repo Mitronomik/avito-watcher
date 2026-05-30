@@ -1232,6 +1232,16 @@ def test_camoufox_warmup_timeout_classified_as_timeout():
     assert result["error_type"] == "timeout"
 
 
+
+def test_camoufox_new_target_page_without_context_or_runtime_browser_raises():
+    session = _CamoufoxSession(browser=SimpleNamespace(), page=SimpleNamespace())
+
+    async def _run():
+        await session._new_target_page()
+
+    with pytest.raises(RuntimeError, match="no page context or runtime browser new_page available"):
+        asyncio.run(_run())
+
 def test_camoufox_target_timeout_classified_as_timeout(monkeypatch):
     class TargetPage:
         def __init__(self):
