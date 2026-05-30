@@ -390,11 +390,11 @@ class _CamoufoxSession:
         return self._broken
 
     async def _new_target_page(self):
+        if self._runtime_browser is not None and hasattr(self._runtime_browser, "new_page"):
+            return await self._runtime_browser.new_page()
         context = getattr(self._page, "context", None)
         if context is not None and hasattr(context, "new_page"):
             return await context.new_page()
-        if self._runtime_browser is not None and hasattr(self._runtime_browser, "new_page"):
-            return await self._runtime_browser.new_page()
         raise RuntimeError("camoufox target page creation failed: no page context or runtime browser new_page available")
 
     async def fetch(self, url: str) -> dict:

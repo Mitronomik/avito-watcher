@@ -1232,6 +1232,55 @@ def test_camoufox_warmup_timeout_classified_as_timeout():
     assert result["error_type"] == "timeout"
 
 
+def test_camoufox_new_target_page_prefers_runtime_browser_over_context():
+    events = []
+
+    class RuntimeBrowser:
+        async def new_page(self):
+            events.append("runtime.new_page")
+            return "runtime-page"
+
+    class Context:
+        async def new_page(self):
+            events.append("context.new_page")
+            return "context-page"
+
+    session = _CamoufoxSession(
+        browser=SimpleNamespace(),
+        page=SimpleNamespace(context=Context()),
+        runtime_browser=RuntimeBrowser(),
+    )
+
+    async def _run():
+        return await session._new_target_page()
+
+    page = asyncio.run(_run())
+
+    assert page == "runtime-page"
+    assert events == ["runtime.new_page"]
+
+
+def test_camoufox_new_target_page_uses_context_fallback_without_runtime_browser():
+    events = []
+
+    class Context:
+        async def new_page(self):
+            events.append("context.new_page")
+            return "context-page"
+
+    session = _CamoufoxSession(
+        browser=SimpleNamespace(),
+        page=SimpleNamespace(context=Context()),
+    )
+
+    async def _run():
+        return await session._new_target_page()
+
+    page = asyncio.run(_run())
+
+    assert page == "context-page"
+    assert events == ["context.new_page"]
+
 
 def test_camoufox_new_target_page_without_context_or_runtime_browser_raises():
     session = _CamoufoxSession(browser=SimpleNamespace(), page=SimpleNamespace())
