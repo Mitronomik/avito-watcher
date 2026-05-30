@@ -57,6 +57,8 @@ services:
       dockerfile: Dockerfile
     working_dir: /app
     command: python -m app.workers.monitor
+    healthcheck:
+      disable: true
     env_file:
       - ../.env
     environment:
