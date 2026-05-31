@@ -131,6 +131,10 @@ def write_worker_status_atomic(path: str | Path, payload: dict[str, Any]) -> Non
             tmp.flush()
             os.fsync(tmp.fileno())
         os.replace(temp_name, target)
+        try:
+            target.chmod(0o644)
+        except OSError:
+            pass
     finally:
         if temp_name:
             try:
