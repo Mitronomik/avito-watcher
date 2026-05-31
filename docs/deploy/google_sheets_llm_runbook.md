@@ -80,7 +80,9 @@ The Google Sheets webhook receives a JSON object with these fields:
 
 ## Safe Apps Script reference implementation
 
-Use this as a minimal Web App receiver or compare it with the maintained script in `docs/integrations/google_sheets_apps_script.gs`. Store `WEBHOOK_SECRET` in Script Properties before production use.
+Use this as a minimal Web App receiver or compare it with the maintained script in `docs/integrations/google_sheets_apps_script.gs`. Store `WEBHOOK_SECRET` in Script Properties before production use. This implementation assumes a spreadsheet-bound Apps Script because it calls `SpreadsheetApp.getActiveSpreadsheet()`.
+
+If you deploy a standalone Apps Script project, adapt the script to read a `SPREADSHEET_ID` Script Property and open the target spreadsheet with `SpreadsheetApp.openById(...)` before selecting or creating the alert sheet.
 
 ```javascript
 const DEFAULT_SHEET_NAME = 'Alerts';
@@ -204,6 +206,24 @@ function safeError_(err) {
 }
 ```
 
+## Smoke data and dedupe strategy
+
+Each smoke check that expects a new Google Sheets row needs a listing whose `external_id` is pending for the `google_sheets` channel. Alert delivery is deduplicated with per-channel alert records, so after Google Sheets delivery succeeds for an `external_id`, rerunning `run-once` for that same already-delivered listing will not append another Google Sheets row.
+
+Read the `run-once` result before treating a smoke as successful:
+
+- If `created=0`, no new listing snapshot was created and the smoke may not have produced any pending alert.
+- If `delivery_attempted_by_channel.google_sheets=0`, Google Sheets delivery was not actually exercised.
+- The "Google Sheets channel without LLM" smoke and the "LLM included in Google Sheets alert" smoke should not rely on the same already-delivered `external_id` if the operator expects two separate Google Sheets rows.
+
+Recommended safe options:
+
+- Use a temporary smoke `SearchJob` and wait for a genuinely new listing.
+- Re-run smoke only when another new listing appears for the selected search.
+- Otherwise ensure there is a new or pending alert for the `google_sheets` channel before expecting a row.
+
+Do not manually delete production `alert_sent` rows to force re-delivery unless there is a verified backup and an explicit operator decision to mutate production alert history.
+
 ## One-off smoke: Google Sheets channel without LLM
 
 This checks JSONL plus Google Sheets delivery without editing production `.env` and without enabling scoring.
@@ -211,6 +231,7 @@ This checks JSONL plus Google Sheets delivery without editing production `.env` 
 ```bash
 export GOOGLE_SHEETS_WEBHOOK_URL='https://script.google.com/macros/s/<deployment-id>/exec'
 read -r -s GOOGLE_SHEETS_WEBHOOK_SECRET
+export GOOGLE_SHEETS_WEBHOOK_SECRET
 
 docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm \
   -e ALERT_CHANNELS=jsonl,google_sheets \
@@ -238,6 +259,7 @@ This checks that scoring can run and persist its result for history while keepin
 
 ```bash
 read -r -s LLM_API_KEY
+export LLM_API_KEY
 
 docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm \
   -e ALERT_CHANNELS=jsonl,google_sheets \
