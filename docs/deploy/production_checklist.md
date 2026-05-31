@@ -122,6 +122,12 @@ Local/dev alternative:
 alembic upgrade head
 ```
 
+## Backup schedule and retention
+
+Before enabling production monitoring, configure and verify the backup schedule.
+See `docs/deploy/backup_restore.md` for the daily cron example, systemd timer
+alternative, latest-backup verification, and safe retention prune commands.
+
 ## Runtime ownership: app vs worker
 
 - `app` (FastAPI/admin) is API/admin only.
