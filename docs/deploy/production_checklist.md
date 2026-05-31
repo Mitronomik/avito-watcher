@@ -335,6 +335,10 @@ docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile llm-l
 docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm -e SCORING_ENABLED=true -e LLM_SHADOW_MODE=true -e LLM_PROVIDER=ollama -e LLM_BASE_URL=http://ollama:11434 -e LLM_MODEL=<model> app python3 -m app.cli run-once --search-id <ID>
 ```
 
+## Backups and restore
+
+Before risky operations and on a regular production cadence, create operational backups. See [Production backup and restore](backup_restore.md) for exact backup, verification, restore, and rehearsal commands. Database restore is destructive and requires `CONFIRM_RESTORE=yes`.
+
 ## Rollback
 
 If smoke checks fail or alert quality regresses:
