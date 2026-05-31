@@ -1427,7 +1427,7 @@ class AvitoParser:
     def _extract_avito_listing_urls(cls, page_html: str) -> set[str]:
         return {
             match.group(0)
-            for match in re.finditer(r"/[a-z0-9_-]+/kvartiry/[^\\s\"'<>]+_\\d{10}(?:\\?[^\\s\"'<>]*)?", page_html, re.IGNORECASE)
+            for match in re.finditer(r"/[a-z0-9_-]+/kvartiry/[^\s\"'<>]+_\d{10}(?:\?[^\s\"'<>]*)?", page_html, re.IGNORECASE)
             if AVITO_LISTING_URL_PATH_RE.match(match.group(0))
         }
 
