@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from app.core.config import Settings
 from app.services.monitor_service import runtime_diagnostics
 import pytest
@@ -33,6 +35,20 @@ def test_scrape_allowed_engines_default_both():
     assert settings.scrape_allowed_engines == "both"
 
 
+def test_scrape_nodriver_browser_executable_path_default_empty():
+    settings = Settings(database_url="sqlite:///tmp.db", _env_file=None)
+    assert settings.scrape_nodriver_browser_executable_path == ""
+
+
+def test_production_env_keeps_camoufox_only_defaults():
+    production_env = Path("deploy/env.production.example").read_text()
+
+    assert "SCRAPE_PREFERRED_ENGINE=camoufox" in production_env
+    assert "SCRAPE_ALLOWED_ENGINES=camoufox" in production_env
+    assert "SCRAPE_NODRIVER_BROWSER_EXECUTABLE_PATH=" in production_env
+    assert "ALERT_CHANNELS=jsonl" in production_env
+
+
 def test_proxy_quarantine_seconds_default():
     settings = Settings(database_url="sqlite:///tmp.db", _env_file=None)
     assert settings.proxy_quarantine_seconds == 7200
@@ -47,6 +63,13 @@ def test_timeout_retry_settings_defaults():
 def test_scoring_enabled_default_true():
     settings = Settings(database_url="sqlite:///tmp.db", _env_file=None)
     assert settings.scoring_enabled is True
+
+def test_scrape_allowed_engines_invalid_value_fails_clearly(monkeypatch):
+    monkeypatch.setenv("SCRAPE_ALLOWED_ENGINES", "bad")
+    with pytest.raises(Exception) as exc_info:
+        Settings(database_url="sqlite:///tmp.db", _env_file=None)
+    assert "scrape_allowed_engines" in str(exc_info.value)
+
 
 def test_scrape_preferred_engine_invalid_value_fails_clearly(monkeypatch):
     monkeypatch.setenv("SCRAPE_PREFERRED_ENGINE", "bad")

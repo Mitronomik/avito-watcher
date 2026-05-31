@@ -8,6 +8,7 @@ import logging
 import inspect
 import platform
 import random
+import re
 import subprocess
 from typing import Optional
 
@@ -16,6 +17,13 @@ from app.parsers.block_signals import looks_like_block_or_captcha
 from app.parsers.proxy_url import parse_proxy_url
 
 logger = logging.getLogger(__name__)
+
+_PROXY_SECRET_RE = re.compile(r"(?P<scheme>https?://)(?P<user>[^:/@\s]+):(?P<password>[^@/\s]+)@")
+
+
+def _redact_proxy_secrets(value: object) -> str:
+    """Return a log-safe string with proxy credentials redacted."""
+    return _PROXY_SECRET_RE.sub(r"\g<scheme>\g<user>:***@", str(value))
 
 BROWSER_DRIVER_CRASH_ERROR_TYPE = "browser_driver_crash"
 _BROWSER_DRIVER_CRASH_SIGNATURES = (
@@ -474,7 +482,11 @@ async def open_nodriver_session(proxy_url: Optional[str]):
     args = ["--lang=ru-RU", "--window-size=1920,1080", "--disable-blink-features=AutomationControlled"]
     if proxy_url:
         args.extend(_nodriver_proxy_args(proxy_url))
-    browser = await uc.start(headless=settings.scrape_headless, browser_args=args)
+    start_kwargs = {"headless": settings.scrape_headless, "browser_args": args}
+    browser_executable_path = settings.scrape_nodriver_browser_executable_path.strip()
+    if browser_executable_path:
+        start_kwargs["browser_executable_path"] = browser_executable_path
+    browser = await uc.start(**start_kwargs)
 
     try:
         tab = browser.main_tab
@@ -486,7 +498,7 @@ async def open_nodriver_session(proxy_url: Optional[str]):
             try:
                 await tab.send(uc.cdp.page.add_script_to_evaluate_on_new_document(source=_STEALTH_INIT_SCRIPT))
             except Exception as _patch_exc:
-                logger.debug("[browser_engine] nodriver: stealth init-script skipped: %s", _patch_exc)
+                logger.debug("[browser_engine] nodriver: stealth init-script skipped: %s", _redact_proxy_secrets(_patch_exc))
         else:
             logger.warning("[browser_engine] nodriver: main_tab is None before warmup, stealth init-script was not injected")
 
@@ -512,7 +524,7 @@ async def open_nodriver_session(proxy_url: Optional[str]):
 
                     tab.add_handler(uc.cdp.fetch.AuthRequired, _auth_handler)
                 except Exception as _auth_exc:
-                    logger.warning("[browser_engine] nodriver: proxy auth handler setup failed: %s", _auth_exc)
+                    logger.warning("[browser_engine] nodriver: proxy auth handler setup failed: %s", _redact_proxy_secrets(_auth_exc))
             else:
                 logger.warning("[browser_engine] nodriver: main_tab is None before warmup, proxy auth credentials will not be injected")
         return _NodriverSession(uc, browser)
@@ -575,7 +587,7 @@ async def fetch_with_nodriver(url: str, proxy_url: Optional[str]) -> dict:
             logger.info("[browser_engine] nodriver: ok, cards=%d", result.get("cards_count", 0))
         return result
     except Exception as exc:
-        logger.warning("[browser_engine] nodriver exception: %s", exc)
+        logger.warning("[browser_engine] nodriver exception: %s", _redact_proxy_secrets(exc))
         if isinstance(exc, asyncio.TimeoutError):
             return _timeout_result("nodriver", "setup")
         return {"ok": False, "engine": "nodriver", "error_type": "exception", "error": str(exc)}

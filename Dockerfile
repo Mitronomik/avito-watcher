@@ -26,6 +26,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
+    chromium \
     libx11-6 \
     libglib2.0-0 \
     libgtk-3-0 \
@@ -43,6 +44,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libasound2 \
     xvfb \
     xauth \
+    && test -x /usr/bin/chromium \
+    && /usr/bin/chromium --version \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -55,7 +58,8 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # If the assert above passed, this path is correct.
 COPY --from=builder /root/.cache/camoufox /root/.cache/camoufox
 
-# nodriver downloads Chromium lazily on first run — no pre-seeding needed.
+# Chromium is installed in the runtime image so nodriver canary runs do not
+# rely on lazy browser downloads at startup.
 
 COPY . .
 

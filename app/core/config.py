@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     scrape_timeout_retry_once: bool = False
     scrape_timeout_retry_delay_ms: int = 300
     scrape_camoufox_retry_on_driver_crash: bool = True
+    scrape_nodriver_browser_executable_path: str = ""
     proxy_urls: str = ""
     proxy_quarantine_seconds: int = 7200
     alert_channels: str = "jsonl,telegram"
