@@ -67,6 +67,8 @@ class Settings(BaseSettings):
     jsonl_outbox_enabled: bool = True
     jsonl_outbox_path: str = "./data/alerts.jsonl"
     monitor_worker_lock_path: str = "./data/monitor_worker.lock"
+    monitor_worker_status_path: str = "./data/worker_status.json"
+    monitor_worker_stale_after_seconds: int = 180
     # Comma-separated proxy URLs: http://user:pass@host:port,http://...
     # Set via PROXY_URLS env var. Used by AvitoParser via _build_parser().
 

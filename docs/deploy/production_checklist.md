@@ -357,3 +357,30 @@ docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile worke
 ```bash
 docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile worker up -d worker
 ```
+
+## Worker status observability
+
+The worker writes a lightweight JSON status file after each monitor cycle. By
+default the file is:
+
+```bash
+./data/worker_status.json
+```
+
+The admin UI shows the latest status in the existing Worker status block at
+`/admin/searches`, including stale/fresh state, last cycle success/failure, and
+parser health counters such as browser driver crash retries and session reuse.
+The default stale threshold is 180 seconds and can be overridden with:
+
+```bash
+MONITOR_WORKER_STALE_AFTER_SECONDS=180
+```
+
+Inspect the raw file manually on the host with:
+
+```bash
+cat data/worker_status.json
+```
+
+This status file is observability only. It does not start, stop, restart, or
+change the worker cadence.

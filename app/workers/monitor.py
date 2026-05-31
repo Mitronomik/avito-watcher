@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 import random
 import time
+from datetime import datetime, timezone
 
 from app.db.init_db import init_db
 from app.parsers.avito_parser import AvitoParser
@@ -10,6 +11,7 @@ from app.parsers.proxy_manager import ProxyManager
 from app.parsers.proxy_url import validate_proxy_urls
 from app.core.config import settings
 from app.services.monitor_service import MonitorService, runtime_diagnostics
+from app.workers.status import build_worker_status, write_worker_status_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +77,43 @@ def run_monitor_cycle(parser: AvitoParser) -> list[dict]:
     return results
 
 
+def _parser_cycle_stats(parser: AvitoParser) -> dict:
+    cycle_stats = getattr(parser, "cycle_stats", None)
+    if not callable(cycle_stats):
+        return {}
+    try:
+        stats = cycle_stats()
+    except Exception as exc:  # pragma: no cover - defensive observability only
+        logger.warning("failed to collect parser cycle stats for worker status: %s", exc)
+        return {}
+    return stats if isinstance(stats, dict) else {}
+
+
+def _write_cycle_status(
+    parser: AvitoParser,
+    *,
+    cycle_started_at: datetime,
+    cycle_finished_at: datetime,
+    cycle_ok: bool,
+    results: list[dict] | None = None,
+    error: BaseException | None = None,
+) -> None:
+    result_count = len(results) if results is not None else 0
+    payload = build_worker_status(
+        cycle_started_at=cycle_started_at,
+        cycle_finished_at=cycle_finished_at,
+        cycle_ok=cycle_ok,
+        searches_processed=result_count,
+        result_count=result_count,
+        parser_stats=_parser_cycle_stats(parser),
+        error=error,
+    )
+    try:
+        write_worker_status_atomic(settings.monitor_worker_status_path, payload)
+    except Exception as exc:
+        logger.warning("failed to write worker status file: %s", exc)
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -85,10 +124,28 @@ def main() -> None:
         parser = _build_parser()
         logger.info("monitor worker runtime diagnostics: %s", runtime_diagnostics())
         while True:
+            cycle_started_at = datetime.now(timezone.utc)
+            results = None
             try:
-                run_monitor_cycle(parser)
-            except Exception:
+                results = run_monitor_cycle(parser)
+            except Exception as exc:
                 logger.exception("worker cycle failed")
+                _write_cycle_status(
+                    parser,
+                    cycle_started_at=cycle_started_at,
+                    cycle_finished_at=datetime.now(timezone.utc),
+                    cycle_ok=False,
+                    results=results,
+                    error=exc,
+                )
+            else:
+                _write_cycle_status(
+                    parser,
+                    cycle_started_at=cycle_started_at,
+                    cycle_finished_at=datetime.now(timezone.utc),
+                    cycle_ok=True,
+                    results=results,
+                )
             sleep_for = WORKER_CADENCE_SEC + random.uniform(
                 -WORKER_CADENCE_JITTER_SEC,
                 WORKER_CADENCE_JITTER_SEC,

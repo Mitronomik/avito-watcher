@@ -921,3 +921,76 @@ def test_searches_contains_link_to_listings(monkeypatch):
     client, _ = make_client(monkeypatch)
     page = client.get('/admin/searches').text
     assert '/admin/listings' in page
+
+
+def test_admin_worker_status_block_handles_missing_file(monkeypatch, tmp_path):
+    client, _Session = make_client(monkeypatch)
+    status_path = tmp_path / "missing_worker_status.json"
+    monkeypatch.setattr(settings, "monitor_worker_status_path", str(status_path))
+    monkeypatch.setattr(settings, "monitor_worker_stale_after_seconds", 180)
+
+    page = client.get("/admin/searches").text
+
+    assert "Worker status file" in page
+    assert "Missing status file" in page
+    assert f"<code>{status_path}</code>" in page
+    assert "Age seconds:</strong> —" in page
+
+
+def test_admin_worker_status_block_renders_crash_retry_counters(monkeypatch, tmp_path):
+    client, _Session = make_client(monkeypatch)
+    status_path = tmp_path / "worker_status.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "updated_at": "2999-01-01T00:00:00Z",
+                "cycle_started_at": "2999-01-01T00:00:00Z",
+                "cycle_finished_at": "2999-01-01T00:00:01Z",
+                "cycle_ok": True,
+                "cycle_error_type": None,
+                "cycle_error": "",
+                "searches_processed": 3,
+                "result_count": 3,
+                "selected_first_engine": "camoufox",
+                "engine_used": "nodriver",
+                "fallback_used": True,
+                "browser_driver_crash_count": 2,
+                "browser_driver_crash_retry_attempt_count": 2,
+                "browser_driver_crash_retry_success_count": 1,
+                "close_failure_after_driver_crash_count": 1,
+                "engine_error_count": 4,
+                "timeout_failure_count": 5,
+                "block_detected_count": 6,
+                "proxy_failure_count": 7,
+                "session_open_count": 8,
+                "session_reuse_count": 9,
+                "session_evict_count": 10,
+                "session_close_failure_count": 11,
+                "layout_changed_hint": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "monitor_worker_status_path", str(status_path))
+    monkeypatch.setattr(settings, "monitor_worker_stale_after_seconds", 180)
+
+    page = client.get("/admin/searches").text
+
+    assert "Fresh" in page
+    assert "Cycle OK" in page
+    assert "searches_processed=3" in page
+    assert "selected_first_engine=camoufox; engine_used=nodriver" in page
+    assert "fallback_used=True" in page
+    assert "browser_driver_crash_count=2" in page
+    assert "browser_driver_crash_retry_attempt_count=2" in page
+    assert "browser_driver_crash_retry_success_count=1" in page
+    assert "close_failure_after_driver_crash_count=1" in page
+    assert "engine_error_count=4" in page
+    assert "timeout_failure_count=5" in page
+    assert "block_detected_count=6" in page
+    assert "proxy_failure_count=7" in page
+    assert "session_open_count=8" in page
+    assert "session_reuse_count=9" in page
+    assert "session_evict_count=10" in page
+    assert "session_close_failure_count=11" in page
+    assert "layout_changed_hint=False" in page
