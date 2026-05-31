@@ -21,6 +21,7 @@ from app.models.listing import Listing
 from app.parsers.errors import ParserError
 from app.repositories.search_repository import SearchRepository
 from app.services.monitor_service import MonitorService, runtime_diagnostics
+from app.workers.status import read_worker_status, summarize_worker_status
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,120}$")
 FRESHNESS_PRESETS = {"12": 12.0, "24": 24.0, "48": 48.0, "72": 72.0}
@@ -123,6 +124,58 @@ def _render_page(title: str, body: str) -> HTMLResponse:
     return HTMLResponse(f"""<!doctype html><html><head><meta charset='utf-8'><title>{html.escape(title)}</title>
 <style>body{{font-family:Arial,sans-serif;max-width:1100px;margin:1rem auto;padding:0 1rem}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccc;padding:.4rem;vertical-align:top}}input,textarea,select{{width:100%;padding:.35rem}}.row{{margin:.4rem 0}}.section{{border:1px solid #dfe3e8;border-radius:.4rem;padding:.7rem .8rem;margin:.7rem 0;background:#fafbfc}}.section h3{{margin:.1rem 0 .6rem 0}}.checkbox input{{width:auto;margin-right:.35rem}}.actions form{{display:inline-block;margin:.1rem}}.note{{background:#fff7d6;padding:.5rem;border:1px solid #e2c86f}}.error{{background:#ffdede;padding:.5rem;border:1px solid #d66}}.badge{{display:inline-block;padding:.12rem .4rem;border-radius:.35rem;font-size:.8rem;font-weight:600;margin:.08rem .15rem .08rem 0}}.badge-green{{background:#d9f7e6;color:#115c36;border:1px solid #94d6b1}}.badge-yellow{{background:#fff6d6;color:#745700;border:1px solid #f2d37c}}.badge-red{{background:#ffe1e1;color:#7a1212;border:1px solid #f2a5a5}}.badge-gray{{background:#eceef1;color:#3d4954;border:1px solid #c9ced4}}.preview{{font-size:.88rem;word-break:break-all}}code{{font-size:.84rem}}</style></head><body>{body}</body></html>""")
 
+
+
+
+def _render_worker_cycle_status() -> str:
+    status = read_worker_status(settings.monitor_worker_status_path)
+    summary = summarize_worker_status(
+        status,
+        stale_after_seconds=settings.monitor_worker_stale_after_seconds,
+    )
+    payload = summary.get("payload") or {}
+    badge = summary.get("badge") or {"label": "Unknown", "color": "gray"}
+    cycle_ok = summary.get("cycle_ok")
+    cycle_badge = _badge("Cycle OK", "green") if cycle_ok is True else (_badge("Cycle failed", "red") if cycle_ok is False else _badge("Cycle unknown", "gray"))
+    age_seconds = summary.get("age_seconds")
+    age_label = "—" if age_seconds is None else str(age_seconds)
+    error_note = ""
+    if summary.get("state") == "corrupt" and summary.get("error"):
+        error_note = f"<br><strong>Status error:</strong> <span class='preview'>{html.escape(_truncate(summary.get('error'), 160))}</span>"
+
+    engine_first = html.escape(str(payload.get("selected_first_engine") or "—"))
+    engine_used = html.escape(str(payload.get("engine_used") or "—"))
+    counter_labels = [
+        "fallback_used",
+        "browser_driver_crash_count",
+        "browser_driver_crash_retry_attempt_count",
+        "browser_driver_crash_retry_success_count",
+        "close_failure_after_driver_crash_count",
+        "engine_error_count",
+        "timeout_failure_count",
+        "block_detected_count",
+        "proxy_failure_count",
+        "session_open_count",
+        "session_reuse_count",
+        "session_evict_count",
+        "session_close_failure_count",
+        "layout_changed_hint",
+    ]
+    counters = "; ".join(
+        f"{name}={html.escape(str(payload.get(name, '—')))}" for name in counter_labels
+    )
+    return (
+        f"<strong>Worker status file:</strong> {_badge(str(badge.get('label', 'Unknown')), str(badge.get('color', 'gray')))} "
+        f"state={html.escape(str(summary.get('state') or 'missing'))}<br>"
+        f"<strong>Status path:</strong> <code>{html.escape(str(summary.get('path') or settings.monitor_worker_status_path))}</code><br>"
+        f"<strong>Updated at:</strong> {html.escape(str(summary.get('updated_at') or '—'))}<br>"
+        f"<strong>Age seconds:</strong> {html.escape(age_label)} "
+        f"<strong>Stale after seconds:</strong> {html.escape(str(summary.get('stale_after_seconds')))}<br>"
+        f"<strong>Cycle status:</strong> {cycle_badge} searches_processed={html.escape(str(payload.get('searches_processed', '—')))}<br>"
+        f"<strong>Engines:</strong> selected_first_engine={engine_first}; engine_used={engine_used}<br>"
+        f"<strong>Parser counters:</strong> {counters}"
+        f"{error_note}"
+    )
 
 def _truncate(value: object, limit: int = 120) -> str:
     text = str(value or "")
@@ -345,12 +398,14 @@ def searches(request: Request, db: Session = Depends(get_db)):
     debug_dump_count = "missing"
     if debug_dump_dir.exists() and debug_dump_dir.is_dir():
         debug_dump_count = str(sum(1 for _ in debug_dump_dir.iterdir() if _.is_file()))
+    worker_cycle_status = _render_worker_cycle_status()
     runtime_block = (
         "<section><h2>Worker status</h2>"
         "<p>The worker is a separate long-running process. Admin UI does not start or stop it.</p>"
         f"<p><strong>Suggested command:</strong> <code>python3 -m app.workers.monitor</code><br>"
         f"<strong>Lock path:</strong> <code>{html.escape(lock_path)}</code><br>"
         f"<strong>Lock file:</strong> {'exists' if lock_exists else 'missing'}<br>"
+        f"{worker_cycle_status}<br>"
         f"<strong>Runtime:</strong> alert_channels={html.escape(runtime_alert_channels or '—')}; "
         f"scoring_enabled={html.escape(str(runtime.get('scoring_enabled')))}; "
         f"scrape_preferred_engine={html.escape(str(runtime.get('scrape_preferred_engine')))}; "
