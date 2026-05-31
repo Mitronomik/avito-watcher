@@ -600,6 +600,47 @@ def test_cycle_stats_defaults_include_zero_serp_fallback_counters():
     assert stats["proxy_quarantine_on_failure_count"] == 0
 
 
+def test_extract_avito_listing_urls_matches_plain_listing_links():
+    html = """
+    <html><body>
+      <a href="/sankt-peterburg/kvartiry/test_8085355489">one</a>
+      <a href="/sankt-peterburg/kvartiry/test_8085355490?context=H4sIAAAAAAAA">two</a>
+    </body></html>
+    """
+
+    urls = AvitoParser._extract_avito_listing_urls(html)
+
+    assert urls == {
+        "/sankt-peterburg/kvartiry/test_8085355489",
+        "/sankt-peterburg/kvartiry/test_8085355490?context=H4sIAAAAAAAA",
+    }
+
+
+def test_serp_link_fallback_parses_real_listing_links_without_mocks():
+    parser = AvitoParser()
+    html = """
+    <html><head><title>Авито</title></head><body>
+      <main>
+        <a href="/sankt-peterburg/kvartiry/test_8085355489">one</a>
+        <a href="/sankt-peterburg/kvartiry/test_8085355490?context=H4sIAAAAAAAA">two</a>
+      </main>
+    </body></html>
+    """
+
+    with patch.object(parser, "_fetch_page_html", new=AsyncMock(return_value=html)):
+        cards = asyncio.run(parser.fetch_search_cards("https://www.avito.ru/sankt-peterburg/kvartiry"))
+
+    assert [card.external_id for card in cards] == ["8085355489", "8085355490"]
+    assert [card.raw["source"] for card in cards] == ["serp_listing_links", "serp_listing_links"]
+    stats = parser.cycle_stats()
+    assert stats["serp_state_fallback_attempted"] is True
+    assert stats["serp_state_fallback_succeeded"] is False
+    assert stats["serp_link_fallback_attempted"] is True
+    assert stats["serp_link_fallback_succeeded"] is True
+    assert stats["serp_link_fallback_card_count"] == 2
+    assert stats["layout_changed_hint"] == "listing_links_without_card_markers"
+
+
 def test_serp_link_fallback_increments_own_counters():
     parser = AvitoParser()
     html = "<html><head><title>Авито</title></head><body>fallback</body></html>"
