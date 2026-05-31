@@ -296,8 +296,8 @@ docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile worke
 Verify alert delivery on enabled channels:
 
 - JSONL: new alert line appears in `JSONL_OUTBOX_PATH`.
-- Google Sheets: webhook receives row with listing payload (if enabled).
-- Email: message arrives with listing summary/content (if enabled).
+- Google Sheets: webhook receives row with listing payload (if enabled). For the production Google Sheets + LLM summary contour, use the [Google Sheets alerts with LLM summary runbook](google_sheets_llm_runbook.md).
+- Email: message arrives with listing summary/content (if enabled). Keep email dormant unless a separate rollout explicitly enables it.
 
 ## Admin checks after deploy
 
