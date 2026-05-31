@@ -19,6 +19,90 @@ from app.parsers.browser_engine import (
 )
 
 
+
+def _install_fake_nodriver(monkeypatch, fake_start):
+    fake_uc = ModuleType("nodriver")
+    fake_uc.start = fake_start
+    fake_uc.cdp = SimpleNamespace(
+        page=SimpleNamespace(add_script_to_evaluate_on_new_document=lambda source: ("page.script", source)),
+        fetch=SimpleNamespace(AuthRequired="AuthRequired", enable=lambda **kwargs: ("fetch.enable", kwargs), AuthChallengeResponse=lambda **kwargs: kwargs, continue_with_auth=lambda **kwargs: kwargs),
+    )
+    monkeypatch.setitem(sys.modules, "nodriver", fake_uc)
+
+
+class _FakeNodriverTab:
+    async def send(self, _command):
+        return None
+
+    def add_handler(self, _event_type, _handler):
+        return None
+
+
+class _FakeNodriverBrowser:
+    def __init__(self, tab=None):
+        self.main_tab = tab or _FakeNodriverTab()
+
+    async def get(self, _nav_url):
+        return None
+
+    def stop(self):
+        return None
+
+
+def test_open_nodriver_session_passes_configured_browser_executable(monkeypatch):
+    captured = {}
+
+    async def fake_start(**kwargs):
+        captured.update(kwargs)
+        return _FakeNodriverBrowser()
+
+    _install_fake_nodriver(monkeypatch, fake_start)
+    monkeypatch.setattr("app.parsers.browser_engine.settings.scrape_nodriver_browser_executable_path", "/usr/bin/chromium")
+
+    session = asyncio.run(open_nodriver_session(None))
+
+    assert session is not None
+    assert captured["browser_executable_path"] == "/usr/bin/chromium"
+    assert captured["browser_args"] == ["--lang=ru-RU", "--window-size=1920,1080", "--disable-blink-features=AutomationControlled"]
+
+
+def test_open_nodriver_session_omits_empty_browser_executable(monkeypatch):
+    captured = {}
+
+    async def fake_start(**kwargs):
+        captured.update(kwargs)
+        return _FakeNodriverBrowser()
+
+    _install_fake_nodriver(monkeypatch, fake_start)
+    monkeypatch.setattr("app.parsers.browser_engine.settings.scrape_nodriver_browser_executable_path", "")
+
+    session = asyncio.run(open_nodriver_session(None))
+
+    assert session is not None
+    assert "browser_executable_path" not in captured
+    assert captured["browser_args"] == ["--lang=ru-RU", "--window-size=1920,1080", "--disable-blink-features=AutomationControlled"]
+
+
+def test_open_nodriver_session_redacts_proxy_secret_from_logs(monkeypatch, caplog):
+    class SecretLeakingTab(_FakeNodriverTab):
+        async def send(self, command):
+            if command[0] == "fetch.enable":
+                raise RuntimeError("proxy failed http://user:pass@1.2.3.4:8080")
+            return None
+
+    async def fake_start(**_kwargs):
+        return _FakeNodriverBrowser(SecretLeakingTab())
+
+    _install_fake_nodriver(monkeypatch, fake_start)
+    monkeypatch.setattr("app.parsers.browser_engine.settings.scrape_nodriver_browser_executable_path", "")
+
+    with caplog.at_level(logging.WARNING):
+        session = asyncio.run(open_nodriver_session("http://user:pass@1.2.3.4:8080"))
+
+    assert session is not None
+    assert "http://user:pass@1.2.3.4:8080" not in caplog.text
+    assert "http://user:***@1.2.3.4:8080" in caplog.text
+
 def test_nodriver_proxy_args_no_proxy():
     assert _nodriver_proxy_args(None) == []
 

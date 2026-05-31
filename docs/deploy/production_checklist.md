@@ -182,6 +182,55 @@ asyncio.run(main())
 PY
 ```
 
+## Optional nodriver + Chromium canary smoke
+
+These commands are for an explicit canary contour only. They must be run with
+command-level environment overrides and must not change the production `.env`
+defaults: keep `SCRAPE_PREFERRED_ENGINE=camoufox`,
+`SCRAPE_ALLOWED_ENGINES=camoufox`, and proxy settings as originally intended.
+
+Verify the Chromium executable exists in the production container:
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm app \
+  sh -lc 'which chromium || which chromium-browser || which google-chrome || true'
+```
+
+Run a nodriver dry-run without proxy by overriding the engine and executable path
+for this command only:
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm \
+  -e SCRAPE_PREFERRED_ENGINE=nodriver \
+  -e SCRAPE_ALLOWED_ENGINES=nodriver \
+  -e SCRAPE_NODRIVER_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium \
+  -e PROXY_URLS= \
+  app python3 -m app.cli dry-run-search --url "<test_url>"
+```
+
+Run a nodriver dry-run with a one-off proxy override without editing `.env`:
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm \
+  -e SCRAPE_PREFERRED_ENGINE=nodriver \
+  -e SCRAPE_ALLOWED_ENGINES=nodriver \
+  -e SCRAPE_NODRIVER_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium \
+  -e PROXY_URLS="http://<user>:<pass>@<host>:<port>" \
+  app python3 -m app.cli dry-run-search --url "<test_url>"
+```
+
+Run a one-pass nodriver canary for a known search by overriding the engine and
+executable path for this command only:
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm \
+  -e SCRAPE_PREFERRED_ENGINE=nodriver \
+  -e SCRAPE_ALLOWED_ENGINES=nodriver \
+  -e SCRAPE_NODRIVER_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium \
+  -e PROXY_URLS= \
+  app python3 -m app.cli run-once --search-id <ID>
+```
+
 
 ## Manual run-once smoke
 
