@@ -145,7 +145,7 @@ def read_worker_status(path: str | Path) -> dict[str, Any]:
         return {"state": "missing", "path": str(status_path), "payload": None, "error": ""}
     try:
         payload = json.loads(status_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return {"state": "corrupt", "path": str(status_path), "payload": None, "error": str(exc)}
     if not isinstance(payload, dict):
         return {"state": "corrupt", "path": str(status_path), "payload": None, "error": "status payload is not an object"}

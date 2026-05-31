@@ -71,6 +71,17 @@ def test_worker_status_read_corrupt_returns_corrupt_state(tmp_path):
     assert status["error"]
 
 
+def test_worker_status_read_invalid_utf8_returns_corrupt_state(tmp_path):
+    path = tmp_path / "worker_status.json"
+    path.write_bytes(b"\xff\xfe\x00\x00")
+
+    status = read_worker_status(path)
+
+    assert status["state"] == "corrupt"
+    assert status["payload"] is None
+    assert status["error"]
+
+
 def test_worker_status_summary_fresh_ok(tmp_path):
     status = {
         "state": "exists",
