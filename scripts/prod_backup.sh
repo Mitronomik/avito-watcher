@@ -24,6 +24,8 @@ fail() {
 
 command -v docker >/dev/null 2>&1 || fail "docker is not installed or not on PATH."
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is not available (expected 'docker compose')."
+command -v gzip >/dev/null 2>&1 || fail "gzip is not installed or not on PATH."
+command -v tar >/dev/null 2>&1 || fail "tar is not installed or not on PATH."
 [[ -f "$COMPOSE_FILE" ]] || fail "production compose file not found: $COMPOSE_FILE"
 [[ -f "$ENV_FILE" ]] || fail "production env file not found: $ENV_FILE"
 

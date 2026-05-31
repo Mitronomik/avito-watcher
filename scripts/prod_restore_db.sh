@@ -38,6 +38,10 @@ case "$DUMP_FILE" in
   *) fail "unsupported dump format. Expected .sql or .sql.gz" ;;
 esac
 
+if [[ "$DUMP_FILE" == *.sql.gz ]]; then
+  command -v gzip >/dev/null 2>&1 || fail "gzip is not installed or not on PATH."
+fi
+
 command -v docker >/dev/null 2>&1 || fail "docker is not installed or not on PATH."
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is not available (expected 'docker compose')."
 [[ -f "$COMPOSE_FILE" ]] || fail "production compose file not found: $COMPOSE_FILE"

@@ -52,6 +52,10 @@ Expected files:
 If Docker Compose, `.env`, the production Compose file, or the `postgres` service
 is unavailable, the script exits with a clear error.
 
+`pg_dump` produces a consistent database dump while services are running. If you
+also need the most consistent `data.tar.gz` file archive, you may briefly stop the
+worker and app before backup, then start them again after the backup completes.
+
 ## Verify backup files exist
 
 List the backup directories:
@@ -98,10 +102,11 @@ Do not paste SQL output into tickets or chat if it may contain production data.
 
 The restore script only restores PostgreSQL. It does not restore `data/`.
 
-Stop the worker first so monitoring does not write during the restore:
+Stop the worker and app first so no service writes during the destructive database restore:
 
 ```bash
 docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile worker stop worker
+docker compose --env-file .env -f deploy/docker-compose.prod.yml stop app
 ```
 
 Run the restore with an explicit confirmation variable and dump path:
@@ -116,12 +121,13 @@ The script supports both `.sql.gz` and `.sql` dumps:
 CONFIRM_RESTORE=yes ./scripts/prod_restore_db.sh backups/<YYYYMMDD_HHMMSS>/postgres.sql
 ```
 
-After restore, run the normal production health checks and restart services as
-needed:
+After restore, start the app first, then start the worker and run the normal
+production health checks:
 
 ```bash
-docker compose --env-file .env -f deploy/docker-compose.prod.yml ps
+docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d app
 docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile worker up -d worker
+docker compose --env-file .env -f deploy/docker-compose.prod.yml ps
 ```
 
 ## Restore the DB on a fresh server
