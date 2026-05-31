@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import json
 import os
+from pathlib import Path
 
 from app.workers.status import (
     build_worker_status,
@@ -33,6 +34,28 @@ def test_worker_status_write_creates_valid_json(tmp_path):
     assert data["engine_used"] == "camoufox"
     assert data["browser_driver_crash_count"] == 1
     assert "\n  \"browser_driver_crash_count\"" in path.read_text(encoding="utf-8")
+
+
+def test_worker_status_write_creates_host_readable_file(tmp_path):
+    path = tmp_path / "worker_status.json"
+
+    write_worker_status_atomic(path, {"updated_at": "2026-01-01T12:00:00Z"})
+
+    mode = path.stat().st_mode
+    assert mode & 0o444 == 0o444
+
+
+def test_worker_status_write_ignores_chmod_failure(monkeypatch, tmp_path):
+    path = tmp_path / "worker_status.json"
+
+    def failing_chmod(self, mode):
+        raise OSError("chmod failed")
+
+    monkeypatch.setattr(Path, "chmod", failing_chmod)
+
+    write_worker_status_atomic(path, {"updated_at": "2026-01-01T12:00:00Z"})
+
+    assert path.exists()
 
 
 def test_worker_status_write_is_atomic_or_uses_replace(monkeypatch, tmp_path):
