@@ -15,7 +15,14 @@ from urllib.parse import unquote
 
 from app.parsers.block_signals import looks_like_block_or_captcha
 from app.core.config import settings
-from app.parsers.browser_engine import fetch_with_camoufox, fetch_with_nodriver, open_camoufox_session, open_nodriver_session
+from app.parsers.browser_engine import (
+    BROWSER_DRIVER_CRASH_ERROR_TYPE,
+    fetch_with_camoufox,
+    is_browser_driver_crash_error,
+    fetch_with_nodriver,
+    open_camoufox_session,
+    open_nodriver_session,
+)
 from app.parsers.errors import ParserError, ParserErrorType
 from app.parsers.proxy_manager import ProxyManager
 from app.parsers.schemas import ListingCard
@@ -133,6 +140,10 @@ class _CycleCounters:
     timeout_failure_count: int = 0
     timeout_retry_attempt_count: int = 0
     timeout_retry_success_count: int = 0
+    browser_driver_crash_count: int = 0
+    browser_driver_crash_retry_attempt_count: int = 0
+    browser_driver_crash_retry_success_count: int = 0
+    close_failure_after_driver_crash_count: int = 0
     proxy_success_count: int = 0
     proxy_failure_count: int = 0
     proxy_quarantine_on_failure_count: int = 0
@@ -162,6 +173,10 @@ class _CycleCounters:
             "timeout_failure_count": self.timeout_failure_count,
             "timeout_retry_attempt_count": self.timeout_retry_attempt_count,
             "timeout_retry_success_count": self.timeout_retry_success_count,
+            "browser_driver_crash_count": self.browser_driver_crash_count,
+            "browser_driver_crash_retry_attempt_count": self.browser_driver_crash_retry_attempt_count,
+            "browser_driver_crash_retry_success_count": self.browser_driver_crash_retry_success_count,
+            "close_failure_after_driver_crash_count": self.close_failure_after_driver_crash_count,
             "proxy_success_count": self.proxy_success_count,
             "proxy_failure_count": self.proxy_failure_count,
             "proxy_quarantine_on_failure_count": self.proxy_quarantine_on_failure_count,
@@ -267,7 +282,9 @@ class AvitoParser:
         events = stats.get("quarantine_events") if isinstance(stats, dict) else None
         return events if isinstance(events, int) else None
 
-    async def _evict_engine_session(self, engine: _Engine, proxy_url: str | None) -> None:
+    async def _evict_engine_session(
+        self, engine: _Engine, proxy_url: str | None, *, after_driver_crash: bool = False
+    ) -> None:
         key = (engine, proxy_url)
         session = self._engine_sessions.pop(key, None)
         if session is None:
@@ -277,6 +294,8 @@ class AvitoParser:
             await session.close()
         except Exception as exc:
             self._cycle_counters.session_close_failure_count += 1
+            if after_driver_crash:
+                self._cycle_counters.close_failure_after_driver_crash_count += 1
             logger.warning("avito_parser: failed to close browser session: %s", exc)
 
     async def _try_engine(self, url: str, proxy_url: str | None, engine: _Engine) -> dict:
@@ -284,8 +303,16 @@ class AvitoParser:
         if session is not None:
             self._cycle_counters.session_reuse_count += 1
             result = await session.fetch(url)
-            if not result.get("ok") and result.get("error_type") in {"exception", "timeout"}:
-                await self._evict_engine_session(engine, proxy_url)
+            if not result.get("ok") and result.get("error_type") in {
+                "exception",
+                "timeout",
+                BROWSER_DRIVER_CRASH_ERROR_TYPE,
+            }:
+                await self._evict_engine_session(
+                    engine,
+                    proxy_url,
+                    after_driver_crash=result.get("error_type") == BROWSER_DRIVER_CRASH_ERROR_TYPE,
+                )
             return result
         self._cycle_counters.engine_used = engine.value
         if engine == _Engine.NODRIVER:
@@ -325,8 +352,36 @@ class AvitoParser:
             self._cycle_counters.session_open_count += 1
             self._cycle_counters.engine_used = engine.value
         except Exception as exc:
-            return {"ok": False, "engine": engine.value, "error_type": "exception", "error": str(exc)}
+            error_type = (
+                BROWSER_DRIVER_CRASH_ERROR_TYPE
+                if engine == _Engine.CAMOUFOX and is_browser_driver_crash_error(exc)
+                else "exception"
+            )
+            return {"ok": False, "engine": engine.value, "error_type": error_type, "error": str(exc)}
         return None
+
+    @staticmethod
+    def _is_browser_driver_crash_result(result: dict) -> bool:
+        return result.get("error_type") == BROWSER_DRIVER_CRASH_ERROR_TYPE
+
+    async def _retry_camoufox_once_after_driver_crash(
+        self, url: str, proxy_url: str | None, result: dict
+    ) -> dict:
+        if not (
+            result.get("engine") == _Engine.CAMOUFOX.value
+            and self._is_browser_driver_crash_result(result)
+            and settings.scrape_camoufox_retry_on_driver_crash
+        ):
+            return result
+
+        self._cycle_counters.browser_driver_crash_retry_attempt_count += 1
+        await self._evict_engine_session(_Engine.CAMOUFOX, proxy_url, after_driver_crash=True)
+        setup_error = await self.ensure_engine_session(_Engine.CAMOUFOX, proxy_url)
+        retry_result = setup_error or await self._try_engine(url, proxy_url, _Engine.CAMOUFOX)
+        self._record_engine_result(_Engine.CAMOUFOX, proxy_url, retry_result)
+        if retry_result.get("ok"):
+            self._cycle_counters.browser_driver_crash_retry_success_count += 1
+        return retry_result
 
     async def _fetch_page_html(self, url: str) -> str:
         """Fetch raw HTML using stealth engine with Nodriver→Camoufox fallback.
@@ -356,6 +411,11 @@ class AvitoParser:
         setup_error = await self.ensure_engine_session(start_engine, proxy_url)
         result = setup_error or await self._try_engine(url, proxy_url, start_engine)
         self._record_engine_result(start_engine, proxy_url, result)
+        if self._is_browser_driver_crash_result(result):
+            self._cycle_counters.browser_driver_crash_count += 1
+            result = await self._retry_camoufox_once_after_driver_crash(url, proxy_url, result)
+            if self._is_browser_driver_crash_result(result):
+                self._cycle_counters.browser_driver_crash_count += 1
         if result.get("error_type") == "timeout":
             self._cycle_counters.timeout_failure_count += 1
             if retry_on_timeout:
@@ -391,6 +451,11 @@ class AvitoParser:
             self._cycle_counters.block_detected_count += 1
         else:
             self._cycle_counters.engine_error_count += 1
+        if self._is_browser_driver_crash_result(result):
+            raise ParserError(
+                ParserErrorType.BROWSER_DRIVER_CRASH,
+                f"Camoufox browser driver crashed; error_type={result.get('error_type')}",
+            )
         if proxy_url and self._proxy_manager:
             before_events = self._proxy_quarantine_events()
             self._proxy_manager.report_failure(proxy_url)
@@ -412,6 +477,11 @@ class AvitoParser:
         setup_error2 = await self.ensure_engine_session(fallback, proxy_url)
         result2 = setup_error2 or await self._try_engine(url, proxy_url, fallback)
         self._record_engine_result(fallback, proxy_url, result2)
+        if self._is_browser_driver_crash_result(result2):
+            self._cycle_counters.browser_driver_crash_count += 1
+            result2 = await self._retry_camoufox_once_after_driver_crash(url, proxy_url, result2)
+            if self._is_browser_driver_crash_result(result2):
+                self._cycle_counters.browser_driver_crash_count += 1
         if result2.get("error_type") == "timeout":
             self._cycle_counters.timeout_failure_count += 1
         if result2["ok"]:
@@ -430,8 +500,13 @@ class AvitoParser:
             if before_events is not None and after_events is not None and after_events > before_events:
                 self._cycle_counters.proxy_quarantine_on_failure_count += 1
 
+        final_error_type = (
+            ParserErrorType.BROWSER_DRIVER_CRASH
+            if self._is_browser_driver_crash_result(result2)
+            else ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK
+        )
         raise ParserError(
-            ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK,
+            final_error_type,
             f"All stealth engines failed (nodriver + camoufox); last_error_type={result2.get('error_type')}",
         )
 

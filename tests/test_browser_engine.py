@@ -4,6 +4,7 @@ import sys
 import subprocess
 import logging
 from types import ModuleType, SimpleNamespace
+from unittest.mock import AsyncMock
 
 from app.parsers.block_signals import looks_like_block_or_captcha
 from app.parsers.browser_engine import _STEALTH_INIT_SCRIPT, _is_blocked, _nodriver_proxy_args, _parse_proxy_url, _stop_browser_best_effort
@@ -12,6 +13,7 @@ from app.parsers.browser_engine import (
     _NodriverSession,
     fetch_with_camoufox,
     fetch_with_nodriver,
+    is_browser_driver_crash_error,
     open_camoufox_session,
     open_nodriver_session,
 )
@@ -1466,3 +1468,36 @@ def test_open_camoufox_session_headless_virtual_on_linux_no_geoip_without_proxy(
     assert session is not None
     assert captured["headless"] == "virtual"
     assert "geoip" not in captured
+
+def test_is_browser_driver_crash_error_matches_known_camoufox_playwright_signatures():
+    assert is_browser_driver_crash_error("TypeError: Cannot read properties of undefined (reading 'url')") is True
+    assert is_browser_driver_crash_error("Browser.close: Connection closed while reading from the driver") is True
+    assert is_browser_driver_crash_error("Connection closed while reading from the driver") is True
+    assert is_browser_driver_crash_error("Page.goto: Timeout 30000ms exceeded") is False
+
+
+def test_camoufox_target_driver_crash_classified_as_browser_driver_crash(monkeypatch):
+    class TargetPage:
+        async def add_init_script(self, _script):
+            return None
+
+        async def goto(self, *_args, **_kwargs):
+            raise RuntimeError("TypeError: Cannot read properties of undefined (reading 'url')")
+
+        async def close(self):
+            return None
+
+    class RuntimeBrowser:
+        async def new_page(self):
+            return TargetPage()
+
+    class WarmupPage:
+        async def goto(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr("app.parsers.browser_engine.asyncio.sleep", AsyncMock())
+    session = _CamoufoxSession(browser=SimpleNamespace(), page=WarmupPage(), runtime_browser=RuntimeBrowser())
+    result = asyncio.run(session.fetch("https://www.avito.ru/a"))
+
+    assert result["ok"] is False
+    assert result["error_type"] == "browser_driver_crash"
