@@ -33,3 +33,5 @@ dist/
 build/
 
 .env
+
+backups/
