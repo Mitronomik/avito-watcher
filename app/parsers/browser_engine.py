@@ -17,6 +17,28 @@ from app.parsers.proxy_url import parse_proxy_url
 
 logger = logging.getLogger(__name__)
 
+BROWSER_DRIVER_CRASH_ERROR_TYPE = "browser_driver_crash"
+_BROWSER_DRIVER_CRASH_SIGNATURES = (
+    "Cannot read properties of undefined (reading 'url')",
+    "Connection closed while reading from the driver",
+    "Browser.close: Connection closed while reading from the driver",
+)
+
+
+def is_browser_driver_crash_error(error: object) -> bool:
+    """Return True for known internal Camoufox/Playwright driver crash signatures."""
+    message = str(error or "")
+    return any(signature in message for signature in _BROWSER_DRIVER_CRASH_SIGNATURES)
+
+
+def _browser_driver_crash_result(engine: str, error: object) -> dict:
+    return {
+        "ok": False,
+        "engine": engine,
+        "error_type": BROWSER_DRIVER_CRASH_ERROR_TYPE,
+        "error": str(error),
+    }
+
 # ---------------------------------------------------------------------------
 # JS stealth init-script — patches navigator properties detectable by Avito UBA.
 # Applied before any navigation so the very first request is already patched.
@@ -383,6 +405,9 @@ class _CamoufoxSession:
         except Exception as exc:
             if "Timeout" in str(exc):
                 return _timeout_result("camoufox", "warmup")
+            if is_browser_driver_crash_error(exc):
+                self._broken = True
+                return _browser_driver_crash_result("camoufox", exc)
             return {"ok": False, "engine": "camoufox", "error_type": "exception", "error": str(exc)}
 
     @property
@@ -426,6 +451,9 @@ class _CamoufoxSession:
         except Exception as exc:
             if "Timeout" in str(exc):
                 return _timeout_result("camoufox", "target")
+            if is_browser_driver_crash_error(exc):
+                self._broken = True
+                return _browser_driver_crash_result("camoufox", exc)
             return {"ok": False, "engine": "camoufox", "error_type": "exception", "error": str(exc)}
         finally:
             if target_page is not None:
@@ -590,6 +618,8 @@ async def fetch_with_camoufox(url: str, proxy_url: Optional[str]) -> dict:
 
     except Exception as exc:
         logger.warning("[browser_engine] camoufox exception: %s", exc)
+        if is_browser_driver_crash_error(exc):
+            return _browser_driver_crash_result("camoufox", exc)
         return {"ok": False, "engine": "camoufox", "error_type": "exception", "error": str(exc)}
     finally:
         if session is not None:

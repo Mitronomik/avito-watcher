@@ -1861,3 +1861,132 @@ def test_fetch_item_details_rejects_mailto_seller_profile_url(monkeypatch):
     details = asyncio.run(parser.fetch_item_details("https://www.avito.ru/item_1"))
     assert details["seller_profile_url"] == ""
     assert "seller_profile_url_invalid_ignored" in details["warnings"]
+
+
+class _DriverCrashSession:
+    def __init__(self, *, close_raises: bool = False):
+        self.closed = False
+        self.close_raises = close_raises
+
+    async def fetch(self, _url):
+        return {
+            "ok": False,
+            "engine": "camoufox",
+            "error_type": "browser_driver_crash",
+            "error": "TypeError: Cannot read properties of undefined (reading 'url')",
+        }
+
+    async def close(self):
+        self.closed = True
+        if self.close_raises:
+            raise RuntimeError("Browser.close: Connection closed while reading from the driver")
+
+
+class _OkSession:
+    async def fetch(self, _url):
+        return {"ok": True, "engine": "camoufox", "html": "<html>ok</html>", "cards_count": 1}
+
+    async def close(self):
+        return None
+
+
+class _TimeoutSession:
+    async def fetch(self, _url):
+        return {"ok": False, "engine": "camoufox", "error_type": "timeout", "error": "target navigation timeout"}
+
+    async def close(self):
+        return None
+
+
+def test_camoufox_driver_crash_retries_fresh_session_once_and_success_counts(monkeypatch):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_preferred_engine", "camoufox")
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_allowed_engines", "camoufox")
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_camoufox_retry_on_driver_crash", True)
+    opened = [_DriverCrashSession(close_raises=True), _OkSession()]
+
+    async def fake_open(_proxy_url):
+        return opened.pop(0)
+
+    parser = AvitoParser()
+    monkeypatch.setattr("app.parsers.avito_parser.open_camoufox_session", fake_open)
+
+    async def _run():
+        await parser.begin_cycle()
+        try:
+            return await parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry")
+        finally:
+            await parser.end_cycle()
+
+    html = asyncio.run(_run())
+    stats = parser.cycle_stats()
+
+    assert html == "<html>ok</html>"
+    assert stats["browser_driver_crash_count"] == 1
+    assert stats["browser_driver_crash_retry_attempt_count"] == 1
+    assert stats["browser_driver_crash_retry_success_count"] == 1
+    assert stats["session_evict_count"] == 1
+    assert stats["session_close_failure_count"] == 1
+    assert stats["close_failure_after_driver_crash_count"] == 1
+    assert stats["engine_error_count"] == 0
+    assert stats["block_detected_count"] == 0
+
+
+def test_camoufox_driver_crash_retry_failure_returns_driver_crash_not_block(monkeypatch):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_preferred_engine", "camoufox")
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_allowed_engines", "camoufox")
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_camoufox_retry_on_driver_crash", True)
+    opened = [_DriverCrashSession(), _DriverCrashSession()]
+
+    async def fake_open(_proxy_url):
+        return opened.pop(0)
+
+    parser = AvitoParser()
+    monkeypatch.setattr("app.parsers.avito_parser.open_camoufox_session", fake_open)
+
+    async def _run():
+        await parser.begin_cycle()
+        try:
+            return await parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry")
+        finally:
+            await parser.end_cycle()
+
+    with pytest.raises(ParserError) as exc_info:
+        asyncio.run(_run())
+    stats = parser.cycle_stats()
+
+    assert exc_info.value.error_type == ParserErrorType.BROWSER_DRIVER_CRASH
+    assert exc_info.value.error_type != ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK
+    assert stats["browser_driver_crash_count"] == 2
+    assert stats["browser_driver_crash_retry_attempt_count"] == 1
+    assert stats["browser_driver_crash_retry_success_count"] == 0
+    assert stats["session_evict_count"] == 2
+    assert stats["engine_error_count"] == 1
+    assert stats["block_detected_count"] == 0
+
+
+def test_camoufox_timeout_retry_behavior_unchanged_by_driver_crash_retry(monkeypatch):
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_preferred_engine", "camoufox")
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_allowed_engines", "camoufox")
+    monkeypatch.setattr("app.parsers.avito_parser.settings.scrape_camoufox_retry_on_driver_crash", True)
+
+    async def fake_open(_proxy_url):
+        return _TimeoutSession()
+
+    parser = AvitoParser()
+    monkeypatch.setattr("app.parsers.avito_parser.open_camoufox_session", fake_open)
+
+    async def _run():
+        await parser.begin_cycle()
+        try:
+            return await parser._fetch_page_html("https://www.avito.ru/moskva/kvartiry")
+        finally:
+            await parser.end_cycle()
+
+    with pytest.raises(ParserError) as exc_info:
+        asyncio.run(_run())
+    stats = parser.cycle_stats()
+
+    assert exc_info.value.error_type == ParserErrorType.POSSIBLE_CAPTCHA_OR_BLOCK
+    assert stats["timeout_failure_count"] == 1
+    assert stats["browser_driver_crash_retry_attempt_count"] == 0
+    assert stats["browser_driver_crash_retry_success_count"] == 0

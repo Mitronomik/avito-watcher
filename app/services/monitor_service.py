@@ -1,5 +1,7 @@
 import asyncio
+import importlib.metadata
 import logging
+import platform
 import random
 import time
 from datetime import UTC, datetime, timedelta
@@ -41,6 +43,10 @@ PARSER_DIAGNOSTIC_KEYS = (
     "timeout_failure_count",
     "timeout_retry_attempt_count",
     "timeout_retry_success_count",
+    "browser_driver_crash_count",
+    "browser_driver_crash_retry_attempt_count",
+    "browser_driver_crash_retry_success_count",
+    "close_failure_after_driver_crash_count",
     "proxy_success_count",
     "proxy_failure_count",
     "proxy_quarantine_on_failure_count",
@@ -77,6 +83,13 @@ def _as_keywords(value: object) -> list[str]:
     return []
 
 
+def _optional_package_version(package_name: str) -> str | None:
+    try:
+        return importlib.metadata.version(package_name)
+    except Exception:
+        return None
+
+
 def runtime_diagnostics() -> dict:
     alert_channels = [
         item.strip().lower()
@@ -105,8 +118,12 @@ def runtime_diagnostics() -> dict:
         "llm_max_retries": llm_cfg.max_retries,
         "llm_shadow_mode": settings.llm_shadow_mode,
         "llm_prompt_version": llm_cfg.prompt_version,
+        "python_version": platform.python_version(),
+        "playwright_version": _optional_package_version("playwright"),
+        "camoufox_version": _optional_package_version("camoufox"),
         "scrape_preferred_engine": settings.scrape_preferred_engine,
         "scrape_allowed_engines": settings.scrape_allowed_engines,
+        "scrape_camoufox_retry_on_driver_crash": settings.scrape_camoufox_retry_on_driver_crash,
         "scrape_timeout_retry_once": settings.scrape_timeout_retry_once,
         "scrape_timeout_retry_delay_ms": settings.scrape_timeout_retry_delay_ms,
         "scrape_headless": settings.scrape_headless,
@@ -120,6 +137,7 @@ def runtime_diagnostics() -> dict:
         "scrape_item_page_delay_ms": settings.scrape_item_page_delay_ms,
         "scrape_item_page_jitter_ms": settings.scrape_item_page_jitter_ms,
         "scrape_item_page_limit_per_run": settings.scrape_item_page_limit_per_run,
+        "proxy_urls_set": bool(settings.proxy_urls.strip()),
         "scrape_debug_dump_html": settings.scrape_debug_dump_html,
         "scrape_debug_dump_dir": settings.scrape_debug_dump_dir,
         "scrape_debug_dump_max_bytes": settings.scrape_debug_dump_max_bytes,
@@ -1111,7 +1129,7 @@ class MonitorService:
             if callable(cycle_stats_fn):
                 parser_cycle_stats = cycle_stats_fn()
             logger.info(
-                "monitor_service.cycle_summary searches_processed=%s preferred_engine=%s selected_first_engine=%s fallback_used=%s engine_skip_recent_failure_count=%s sessions_opened=%s sessions_reused=%s fallbacks=%s blocks=%s engine_errors=%s proxy_failures=%s evictions=%s close_failures=%s",
+                "monitor_service.cycle_summary searches_processed=%s preferred_engine=%s selected_first_engine=%s fallback_used=%s engine_skip_recent_failure_count=%s sessions_opened=%s sessions_reused=%s fallbacks=%s blocks=%s engine_errors=%s browser_driver_crashes=%s browser_driver_crash_retry_attempts=%s browser_driver_crash_retry_successes=%s proxy_failures=%s evictions=%s close_failures=%s close_failures_after_driver_crash=%s",
                 searches_processed,
                 parser_cycle_stats.get("preferred_engine"),
                 parser_cycle_stats.get("selected_first_engine"),
@@ -1122,7 +1140,11 @@ class MonitorService:
                 parser_cycle_stats.get("engine_fallback_count", 0),
                 parser_cycle_stats.get("block_detected_count", 0),
                 parser_cycle_stats.get("engine_error_count", 0),
+                parser_cycle_stats.get("browser_driver_crash_count", 0),
+                parser_cycle_stats.get("browser_driver_crash_retry_attempt_count", 0),
+                parser_cycle_stats.get("browser_driver_crash_retry_success_count", 0),
                 parser_cycle_stats.get("proxy_failure_count", 0),
                 parser_cycle_stats.get("session_evict_count", 0),
                 parser_cycle_stats.get("session_close_failure_count", 0),
+                parser_cycle_stats.get("close_failure_after_driver_crash_count", 0),
             )

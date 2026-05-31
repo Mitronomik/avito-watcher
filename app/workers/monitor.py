@@ -9,7 +9,7 @@ from app.parsers.avito_parser import AvitoParser
 from app.parsers.proxy_manager import ProxyManager
 from app.parsers.proxy_url import validate_proxy_urls
 from app.core.config import settings
-from app.services.monitor_service import MonitorService
+from app.services.monitor_service import MonitorService, runtime_diagnostics
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,7 @@ def main() -> None:
     with MonitorWorkerLock(settings.monitor_worker_lock_path):
         init_db()
         parser = _build_parser()
+        logger.info("monitor worker runtime diagnostics: %s", runtime_diagnostics())
         while True:
             try:
                 run_monitor_cycle(parser)
