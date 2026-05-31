@@ -98,6 +98,107 @@ gzip -dc backups/<YYYYMMDD_HHMMSS>/postgres.sql.gz | sed -n '1,40p'
 
 Do not paste SQL output into tickets or chat if it may contain production data.
 
+
+## Verify the latest backup
+
+Find the latest timestamp-like backup directory and inspect its manifest:
+
+```bash
+latest_backup="$(find backups -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | grep -E '^[0-9]{8}_[0-9]{6}$' | sort | tail -n 1)"
+test -n "$latest_backup"
+printf 'Latest backup: backups/%s\n' "$latest_backup"
+cat "backups/$latest_backup/manifest.txt"
+gzip -t "backups/$latest_backup/postgres.sql.gz"
+```
+
+This check verifies the latest backup directory name, confirms the manifest is
+present, and validates that the compressed PostgreSQL dump can be read. If the
+backup includes `data.tar.gz`, list it without extracting production data:
+
+```bash
+tar -tzf "backups/$latest_backup/data.tar.gz"
+```
+
+## Backup retention and pruning
+
+`./scripts/prod_prune_backups.sh` removes old timestamp-like backup directories
+under repository root `backups/` only. It ignores files and non-matching
+directories, only considers names shaped as `YYYYMMDD_HHMMSS`, and always keeps
+the latest timestamp-like backup even when it is older than the retention window.
+
+The retention window defaults to 14 days:
+
+```bash
+DRY_RUN=true ./scripts/prod_prune_backups.sh
+```
+
+To test a different retention window without deleting anything:
+
+```bash
+DRY_RUN=true BACKUP_RETENTION_DAYS=30 ./scripts/prod_prune_backups.sh
+```
+
+Real deletion requires an explicit `DRY_RUN=false` override:
+
+```bash
+DRY_RUN=false BACKUP_RETENTION_DAYS=30 ./scripts/prod_prune_backups.sh
+```
+
+If `backups/` is missing, the prune script exits with an error instead of
+creating or deleting anything. Review the dry-run output before every real prune,
+and never commit `backups/` contents to git.
+
+## Production backup scheduling
+
+A simple daily cron schedule can create one backup and then prune old backups.
+Use the absolute repository path for the production checkout and keep the prune
+step in dry-run mode until the output has been reviewed at least once:
+
+```cron
+# Daily UTC backup at 02:15, then retain 14 days while always keeping the latest backup.
+15 2 * * * cd /opt/avito-watcher && ./scripts/prod_backup.sh >> /var/log/avito-watcher-backup.log 2>&1 && DRY_RUN=false BACKUP_RETENTION_DAYS=14 ./scripts/prod_prune_backups.sh >> /var/log/avito-watcher-backup.log 2>&1
+```
+
+For the first scheduled run, use `DRY_RUN=true` in the prune command and switch
+to `DRY_RUN=false` only after the log lists the expected directories.
+
+A systemd timer is an alternative when the host standardizes on systemd units.
+Example service:
+
+```ini
+# /etc/systemd/system/avito-watcher-backup.service
+[Unit]
+Description=Avito Watcher production backup and retention prune
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/avito-watcher
+ExecStart=/bin/bash -lc './scripts/prod_backup.sh && DRY_RUN=false BACKUP_RETENTION_DAYS=14 ./scripts/prod_prune_backups.sh'
+```
+
+Example timer:
+
+```ini
+# /etc/systemd/system/avito-watcher-backup.timer
+[Unit]
+Description=Run Avito Watcher production backup daily
+
+[Timer]
+OnCalendar=*-*-* 02:15:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable it with:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now avito-watcher-backup.timer
+systemctl list-timers avito-watcher-backup.timer
+```
+
 ## Restore the DB on the same server
 
 The restore script only restores PostgreSQL. It does not restore `data/`.
