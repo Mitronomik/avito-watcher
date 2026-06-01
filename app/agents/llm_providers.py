@@ -106,6 +106,7 @@ def build_llm_prompt_payload(card: ListingCard) -> dict:
         "rooms": card.rooms,
         "address": card.address,
         "published_label": card.published_label,
+        "published_at": card.published_at.isoformat() if card.published_at else None,
         "url": card.url,
         "item_page": {
             "description": _truncate(item_page.get("description", ""), 2000),
@@ -123,9 +124,20 @@ def build_llm_prompt_payload(card: ListingCard) -> dict:
 def build_llm_user_prompt(card: ListingCard, prompt_version: str) -> str:
     payload = build_llm_prompt_payload(card)
     return (
-        f"Версия промпта: {prompt_version}. Оцени объявление недвижимости. "
+        f"Версия промпта: {prompt_version}. Оцени объявление коммерческой недвижимости для аренды. "
         "Верни строго JSON {\"score\": int|null, \"summary\": str, \"tags\": [str]} без markdown. "
-        "Ограничения: summary <= 700 символов, tags <= 10. Данные:\n"
+        "Не меняй имена полей и не добавляй новые поля. Ограничения: summary <= 700 символов, tags <= 10. "
+        "Сделай summary как decision-oriented mini-analysis, а не пересказ: "
+        "1) короткий verdict: strong / medium / weak; "
+        "2) почему объект может быть интересен; "
+        "3) основные риски; "
+        "4) что проверить перед звонком; "
+        "5) подходящие типы арендаторов/бизнесов. "
+        "Если published_at старый или неясный, явно отметь риск stale publication. "
+        "Если цена/площадь выглядят неоднозначно или противоречиво, явно отметь ambiguity; "
+        "пример: субаренда 16-38 м² внутри помещения 92 м². "
+        "Шкала score: 80-100 strong lead; 60-79 worth checking; "
+        "30-59 weak/unclear; 0-29 likely low priority or mismatch. Данные:\n"
         f"{json.dumps(payload, ensure_ascii=False)}"
     )
 

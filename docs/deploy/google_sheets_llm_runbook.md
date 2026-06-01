@@ -55,6 +55,30 @@ LLM fields behave as follows:
 - `summary`, `score`, and `tags` are populated only when scoring succeeds and `LLM_SHADOW_MODE=false`.
 - `tags` may arrive as an array; Apps Script should serialize it to a comma-separated string for the sheet cell.
 
+## Recommended freshness filters for commercial rent
+
+When enabling a new alert channel such as `google_sheets`, existing listings may be pending for that channel even though they are not fresh publications. For commercial real estate rent monitoring, prefer an explicit freshness policy in `SearchJob.filters_json`:
+
+```json
+{
+  "min_area_m2": 40,
+  "max_area_m2": 150,
+  "max_price": 200000,
+  "require_published_at": true,
+  "max_age_hours": 72,
+  "missing_published_at_policy": "reject",
+  "source_sort": "date",
+  "exclude_keywords": ["кладовка", "паркинг", "машиноместо", "гараж"]
+}
+```
+
+Operator notes:
+
+- First baseline initialization is intentionally silent and does not send alerts.
+- `max_age_hours` limits alerts to listings with parsed publication time inside the freshness window.
+- `missing_published_at_policy=reject` is safest when freshness matters; use `allow` or `allow_when_date_sorted` only after accepting the stale-publication risk.
+- If `missing_published_at_policy=allow_when_date_sorted` is used, the source Avito URL should be sorted by publication date and `source_sort` should be set to `date`.
+
 ## Payload contract
 
 The Google Sheets webhook receives a JSON object with these fields:

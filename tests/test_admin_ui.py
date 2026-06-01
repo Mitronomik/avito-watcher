@@ -994,3 +994,13 @@ def test_admin_worker_status_block_renders_crash_retry_counters(monkeypatch, tmp
     assert "session_evict_count=10" in page
     assert "session_close_failure_count=11" in page
     assert "layout_changed_hint=False" in page
+
+
+def test_new_form_includes_freshness_operator_hint(monkeypatch):
+    client, _ = make_client(monkeypatch)
+    page = client.get("/admin/searches/new").text
+    assert "first run initializes baseline and does not alert" in page
+    assert "Use max_age_hours to avoid old publications" in page
+    assert "Use missing_published_at_policy carefully" in page
+    assert "If using allow_when_date_sorted" in page
+    assert "source URL is sorted by date" in page
