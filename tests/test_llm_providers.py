@@ -46,19 +46,21 @@ def test_normalize_clamps_and_bounds():
 async def test_ollama_provider_parses_json(monkeypatch):
     calls = []
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda timeout: _Client({"message": {"content": json.dumps({"score": 88, "summary": "ok", "tags": ["a"]})}}, calls))
-    cfg = LLMRuntimeConfig("ollama", "http://x", "m", "", 10, 0, 0.0, "v1")
+    cfg = LLMRuntimeConfig("ollama", "http://x", "m", "", 10, 0, 0.0, "v1", prompt_profile="flat_rent")
     out = await OllamaProvider(cfg).score(_card())
     assert out["status"] == "success"
     assert out["score"] == 88
+    assert "Профиль промпта: flat_rent" in calls[0][1]["json"]["messages"][1]["content"]
 
 
 @pytest.mark.asyncio
 async def test_openai_compatible_authorization_header_optional(monkeypatch):
     calls = []
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda timeout: _Client({"choices": [{"message": {"content": '{"score": 10, "summary": "s", "tags": []}'}}]}, calls))
-    cfg = LLMRuntimeConfig("openai_compatible", "http://x", "m", "secret", 10, 0, 0.0, "v1")
+    cfg = LLMRuntimeConfig("openai_compatible", "http://x", "m", "secret", 10, 0, 0.0, "v1", prompt_profile="flat_sale")
     await OpenAICompatibleProvider(cfg).score(_card())
     assert calls[0][1]["headers"]["Authorization"] == "Bearer secret"
+    assert "Профиль промпта: flat_sale" in calls[0][1]["json"]["messages"][1]["content"]
 
     calls.clear()
     cfg2 = LLMRuntimeConfig("openai_compatible", "http://x", "m", "", 10, 0, 0.0, "v1")
@@ -66,21 +68,58 @@ async def test_openai_compatible_authorization_header_optional(monkeypatch):
     assert "Authorization" not in calls[0][1]["headers"]
 
 
-def test_prompt_requests_decision_oriented_commercial_summary():
-    prompt = providers.build_llm_user_prompt(_card(), "v-decision")
+def test_commercial_rent_prompt_contains_profile_specific_instructions():
+    prompt = providers.build_llm_user_prompt(_card(), "v-decision", "commercial_rent")
+    assert "Профиль промпта: commercial_rent" in prompt
     assert "decision-oriented mini-analysis" in prompt
     assert "verdict: strong / medium / weak" in prompt
-    assert "почему объект может быть интересен" in prompt
-    assert "основные риски" in prompt
-    assert "что проверить перед звонком" in prompt
-    assert "подходящие типы арендаторов/бизнесов" in prompt
-    assert "stale publication" in prompt
-    assert "ambiguity" in prompt
+    assert "business/rent lead quality" in prompt
+    assert "tenant fit" in prompt
+    assert "вход/вывеска/signage" in prompt
+    assert "sublease ambiguity" in prompt
     assert "субаренда 16-38 м² внутри помещения 92 м²" in prompt
+    assert "stale publication" in prompt
     assert "80-100 strong lead" in prompt
     assert "60-79 worth checking" in prompt
     assert "30-59 weak/unclear" in prompt
     assert "0-29 likely low priority or mismatch" in prompt
+
+
+def test_flat_sale_prompt_uses_purchase_wording_without_commercial_sublease_terms():
+    prompt = providers.build_llm_user_prompt(_card(), "v-decision", "flat_sale")
+    assert "Профиль промпта: flat_sale" in prompt
+    assert "purchase suitability" in prompt
+    assert "покупки квартиры" in prompt
+    assert "цена и ликвидность" in prompt
+    assert "buyer fit" in prompt
+    assert "business/rent lead quality" not in prompt
+    assert "sublease ambiguity" not in prompt
+    assert "субаренда 16-38 м²" not in prompt
+
+
+def test_flat_rent_prompt_contains_rental_housing_wording():
+    prompt = providers.build_llm_user_prompt(_card(), "v-decision", "flat_rent")
+    assert "Профиль промпта: flat_rent" in prompt
+    assert "rental housing suitability" in prompt
+    assert "аренды жилья" in prompt
+    assert "monthly cost" in prompt
+    assert "furniture/техника" in prompt
+    assert "tenant restrictions" in prompt
+    assert "commute/транспорт" in prompt
+
+
+def test_unknown_prompt_profile_falls_back_to_generic_real_estate():
+    prompt = providers.build_llm_user_prompt(_card(), "v-decision", "unknown_profile")
+    assert "Профиль промпта: generic_real_estate" in prompt
+    assert "cautious general real estate mini-analysis" in prompt
+    assert "business/rent lead quality" not in prompt
+    assert "sublease ambiguity" not in prompt
+
+
+def test_resolve_llm_runtime_config_normalizes_unknown_prompt_profile(monkeypatch):
+    monkeypatch.setattr(providers.settings, "llm_prompt_profile", "not_a_profile")
+    cfg = providers.resolve_llm_runtime_config()
+    assert cfg.prompt_profile == "generic_real_estate"
 
 
 def test_prompt_payload_includes_published_at_for_staleness_analysis():

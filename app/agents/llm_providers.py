@@ -10,6 +10,37 @@ from app.parsers.schemas import ListingCard
 logger = logging.getLogger(__name__)
 
 ProviderName = str
+PromptProfile = str
+
+PROMPT_PROFILE_COMMERCIAL_RENT = "commercial_rent"
+PROMPT_PROFILE_FLAT_SALE = "flat_sale"
+PROMPT_PROFILE_FLAT_RENT = "flat_rent"
+PROMPT_PROFILE_GENERIC_REAL_ESTATE = "generic_real_estate"
+PROMPT_PROFILE_INSTRUCTIONS = {
+    PROMPT_PROFILE_COMMERCIAL_RENT: (
+        "Профиль: commercial_rent. Оцени business/rent lead quality для коммерческой аренды: "
+        "tenant fit, вход/вывеска/signage, поток клиентов, ограничения помещения и условия аренды. "
+        "Отмечай sublease ambiguity, если цена/площадь выглядят неоднозначно; "
+        "пример: субаренда 16-38 м² внутри помещения 92 м². "
+        "Если published_at старый или неясный, явно отметь риск stale publication."
+    ),
+    PROMPT_PROFILE_FLAT_SALE: (
+        "Профиль: flat_sale. Оцени purchase suitability для покупки квартиры: "
+        "цена и ликвидность, локация, дом/год/тип здания, состояние/ремонт, юридические или планировочные риски, "
+        "buyer fit для жизни или инвестиций. Если published_at старый или неясный, явно отметь риск stale publication."
+    ),
+    PROMPT_PROFILE_FLAT_RENT: (
+        "Профиль: flat_rent. Оцени rental housing suitability для аренды жилья: "
+        "полная monthly cost, состояние и furniture/техника, tenant restrictions, commute/транспорт, район и бытовые риски. "
+        "Если published_at старый или неясный, явно отметь риск stale publication."
+    ),
+    PROMPT_PROFILE_GENERIC_REAL_ESTATE: (
+        "Профиль: generic_real_estate. Дай cautious general real estate mini-analysis: "
+        "потенциальная пригодность, цена относительно видимых данных, локация, состояние, ключевые риски, "
+        "что проверить перед контактом и для кого объект может подойти. "
+        "Если published_at старый или неясный, явно отметь риск stale publication."
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -22,6 +53,7 @@ class LLMRuntimeConfig:
     max_retries: int
     retry_delay_sec: float
     prompt_version: str
+    prompt_profile: PromptProfile = PROMPT_PROFILE_COMMERCIAL_RENT
 
 
 def resolve_llm_runtime_config() -> LLMRuntimeConfig:
@@ -40,12 +72,20 @@ def resolve_llm_runtime_config() -> LLMRuntimeConfig:
         max_retries=max(int(settings.llm_max_retries), 0),
         retry_delay_sec=max(float(settings.llm_retry_delay_sec), 0.0),
         prompt_version=settings.llm_prompt_version,
+        prompt_profile=normalize_prompt_profile(settings.llm_prompt_profile),
     )
 
 
 def _truncate(value: object, limit: int) -> str:
     text = "" if value is None else str(value)
     return text[:limit]
+
+
+def normalize_prompt_profile(prompt_profile: object) -> PromptProfile:
+    profile = str(prompt_profile or "").strip()
+    if profile in PROMPT_PROFILE_INSTRUCTIONS:
+        return profile
+    return PROMPT_PROFILE_GENERIC_REAL_ESTATE
 
 
 def _sanitize_tags(value: object) -> list[str]:
@@ -121,10 +161,17 @@ def build_llm_prompt_payload(card: ListingCard) -> dict:
     }
 
 
-def build_llm_user_prompt(card: ListingCard, prompt_version: str) -> str:
+def build_llm_user_prompt(
+    card: ListingCard,
+    prompt_version: str,
+    prompt_profile: PromptProfile = PROMPT_PROFILE_COMMERCIAL_RENT,
+) -> str:
     payload = build_llm_prompt_payload(card)
+    resolved_profile = normalize_prompt_profile(prompt_profile)
+    profile_instructions = PROMPT_PROFILE_INSTRUCTIONS[resolved_profile]
     return (
-        f"Версия промпта: {prompt_version}. Оцени объявление коммерческой недвижимости для аренды. "
+        f"Версия промпта: {prompt_version}. Профиль промпта: {resolved_profile}. "
+        "Оцени объявление недвижимости. "
         "Верни строго JSON {\"score\": int|null, \"summary\": str, \"tags\": [str]} без markdown. "
         "Не меняй имена полей и не добавляй новые поля. Ограничения: summary <= 700 символов, tags <= 10. "
         "Сделай summary как decision-oriented mini-analysis, а не пересказ: "
@@ -132,10 +179,8 @@ def build_llm_user_prompt(card: ListingCard, prompt_version: str) -> str:
         "2) почему объект может быть интересен; "
         "3) основные риски; "
         "4) что проверить перед звонком; "
-        "5) подходящие типы арендаторов/бизнесов. "
-        "Если published_at старый или неясный, явно отметь риск stale publication. "
-        "Если цена/площадь выглядят неоднозначно или противоречиво, явно отметь ambiguity; "
-        "пример: субаренда 16-38 м² внутри помещения 92 м². "
+        "5) кому/для какого сценария объект подходит. "
+        f"{profile_instructions} "
         "Шкала score: 80-100 strong lead; 60-79 worth checking; "
         "30-59 weak/unclear; 0-29 likely low priority or mismatch. Данные:\n"
         f"{json.dumps(payload, ensure_ascii=False)}"
@@ -163,7 +208,7 @@ class OllamaProvider(BaseProvider):
     name = "ollama"
 
     async def score(self, card: ListingCard) -> dict:
-        prompt = build_llm_user_prompt(card, self.config.prompt_version)
+        prompt = build_llm_user_prompt(card, self.config.prompt_version, self.config.prompt_profile)
         async with httpx.AsyncClient(timeout=self.config.timeout_sec) as client:
             response = await client.post(
                 f"{self.config.base_url}/api/chat",
@@ -186,7 +231,7 @@ class OpenAICompatibleProvider(BaseProvider):
     name = "openai_compatible"
 
     async def score(self, card: ListingCard) -> dict:
-        prompt = build_llm_user_prompt(card, self.config.prompt_version)
+        prompt = build_llm_user_prompt(card, self.config.prompt_version, self.config.prompt_profile)
         headers = {}
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"

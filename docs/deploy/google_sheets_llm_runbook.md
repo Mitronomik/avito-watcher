@@ -55,6 +55,14 @@ LLM fields behave as follows:
 - `summary`, `score`, and `tags` are populated only when scoring succeeds and `LLM_SHADOW_MODE=false`.
 - `tags` may arrive as an array; Apps Script should serialize it to a comma-separated string for the sheet cell.
 
+For the current commercial rent production contour, use the commercial-rent LLM prompt profile:
+
+```text
+LLM_PROMPT_PROFILE=commercial_rent
+```
+
+Supported prompt profiles are `commercial_rent`, `flat_sale`, `flat_rent`, and `generic_real_estate`. Keep `commercial_rent` for commercial lease monitoring; use a different profile only when the same scoring path is intentionally reused for another real estate category.
+
 ## Recommended freshness filters for commercial rent
 
 When enabling a new alert channel such as `google_sheets`, existing listings may be pending for that channel even though they are not fresh publications. For commercial real estate rent monitoring, prefer an explicit freshness policy in `SearchJob.filters_json`:
@@ -296,6 +304,7 @@ docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm \
   -e LLM_PROVIDER=openai_compatible \
   -e LLM_BASE_URL=https://api.deepseek.com \
   -e LLM_MODEL=<model> \
+  -e LLM_PROMPT_PROFILE=commercial_rent \
   -e LLM_API_KEY \
   app python3 -m app.cli run-once --search-id <ID>
 ```
@@ -322,6 +331,7 @@ docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm \
   -e LLM_PROVIDER=openai_compatible \
   -e LLM_BASE_URL=https://api.deepseek.com \
   -e LLM_MODEL=<model> \
+  -e LLM_PROMPT_PROFILE=commercial_rent \
   -e LLM_API_KEY \
   app python3 -m app.cli run-once --search-id <ID>
 ```

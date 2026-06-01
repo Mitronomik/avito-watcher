@@ -1,5 +1,7 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Literal
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -21,6 +23,12 @@ class Settings(BaseSettings):
     llm_retry_delay_sec: float = 1.0
     llm_shadow_mode: bool = True
     llm_prompt_version: str = "listing-summary-v1"
+    llm_prompt_profile: Literal[
+        "commercial_rent",
+        "flat_sale",
+        "flat_rent",
+        "generic_real_estate",
+    ] = "commercial_rent"
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     api_key: str = ""
@@ -71,6 +79,15 @@ class Settings(BaseSettings):
     monitor_worker_stale_after_seconds: int = 180
     # Comma-separated proxy URLs: http://user:pass@host:port,http://...
     # Set via PROXY_URLS env var. Used by AvitoParser via _build_parser().
+
+    @field_validator("llm_prompt_profile", mode="before")
+    @classmethod
+    def _validate_llm_prompt_profile(cls, value: object) -> object:
+        allowed = {"commercial_rent", "flat_sale", "flat_rent", "generic_real_estate"}
+        profile = str(value or "").strip()
+        if profile in allowed:
+            return profile
+        return "generic_real_estate"
 
 
 settings = Settings()
