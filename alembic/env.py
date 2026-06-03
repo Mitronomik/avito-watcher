@@ -7,6 +7,7 @@ from app.models.search_job import SearchJob
 from app.models.listing import Listing
 from app.models.listing_snapshot import ListingSnapshot
 from app.models.alert_sent import AlertSent
+from app.models.listing_analysis import ListingAnalysis
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)
