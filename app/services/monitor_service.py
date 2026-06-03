@@ -780,16 +780,7 @@ class MonitorService:
 
             if existing:
                 old_price = existing.price
-                existing.last_seen_at = now
-                existing.url = card.url or existing.url
-                existing.title = card.title or existing.title
-                existing.address = card.address or existing.address
-                existing.area_m2 = card.area_m2
-                existing.rooms = card.rooms or existing.rooms
-                if card.published_label:
-                    existing.published_label = card.published_label
-                if card.published_at is not None:
-                    existing.published_at = card.published_at
+                listing_repo.update_listing_from_card(existing, card, now)
 
                 if not baseline_run and old_price != card.price:
                     existing.price = card.price
@@ -840,7 +831,7 @@ class MonitorService:
                 continue
 
             if baseline_run:
-                listing_repo.create_listing(
+                listing, was_created = listing_repo.create_listing_safe(
                     external_id=card.external_id,
                     url=card.url,
                     title=card.title,
@@ -853,7 +844,12 @@ class MonitorService:
                     first_seen_at=now,
                     last_seen_at=now,
                 )
-                created += 1
+                if was_created:
+                    created += 1
+                    existing_by_external_id[card.external_id] = listing
+                else:
+                    listing_repo.update_listing_from_card(listing, card, now)
+                    existing_by_external_id[card.external_id] = listing
                 continue
 
             rule_failures = explain_rule_filter_failures(card, filters)
@@ -905,7 +901,7 @@ class MonitorService:
                     )
                 continue
 
-            listing_repo.create_listing(
+            listing, was_created = listing_repo.create_listing_safe(
                 external_id=card.external_id,
                 url=card.url,
                 title=card.title,
@@ -918,7 +914,53 @@ class MonitorService:
                 first_seen_at=now,
                 last_seen_at=now,
             )
+            if not was_created:
+                old_price = listing.price
+                listing_repo.update_listing_from_card(listing, card, now)
+                if old_price != card.price:
+                    listing.price = card.price
+                    listing_repo.create_snapshot(
+                        external_id=card.external_id,
+                        title=card.title,
+                        price=card.price,
+                        published_label=card.published_label,
+                        published_at=card.published_at,
+                        payload_json=card.raw,
+                        screenshot_path="",
+                        observed_at=now,
+                    )
+                    price_changed += 1
+                retry_context = self._retry_context_from_snapshot(db, card, search_name)
+                if retry_context is not None:
+                    message, payload = retry_context
+                    delivery = await self._deliver_pending_alerts(alert_repo, card, message, payload)
+                    for channel in delivery["attempted"]:
+                        delivery_attempted_by_channel[channel] = (
+                            delivery_attempted_by_channel.get(channel, 0) + 1
+                        )
+                    for channel in delivery["successful"]:
+                        delivery_success_by_channel[channel] = (
+                            delivery_success_by_channel.get(channel, 0) + 1
+                        )
+                    for channel in delivery["skipped"]:
+                        delivery_skipped_by_channel[channel] = (
+                            delivery_skipped_by_channel.get(channel, 0) + 1
+                        )
+                    for channel in delivery["failed"]:
+                        delivery_failed_by_channel[channel] = (
+                            delivery_failed_by_channel.get(channel, 0) + 1
+                        )
+                    for channel in delivery["unknown"]:
+                        delivery_unknown_by_channel[channel] = (
+                            delivery_unknown_by_channel.get(channel, 0) + 1
+                        )
+                    if delivery["successful"]:
+                        alerted += 1
+                existing_by_external_id[card.external_id] = listing
+                continue
+
             created += 1
+            existing_by_external_id[card.external_id] = listing
 
             if settings.scoring_enabled:
                 scored += 1
