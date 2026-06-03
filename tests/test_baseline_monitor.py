@@ -315,8 +315,9 @@ def test_second_run_with_one_new_listing_sends_one_alert(db_session):
     assert notifier.payloads[0]["search_name"] == search.name
 
 
-def test_max_price_filters_out_expensive_new_listing(db_session):
+def test_max_price_filters_out_expensive_new_listing(monkeypatch, db_session):
     search = make_search(db_session, filters_json={"max_price": 100.0})
+    patch_session_local(monkeypatch, db_session)
     scorer = FakeScorer()
     notifier = FakeNotifier()
     service = MonitorService(
@@ -328,7 +329,7 @@ def test_max_price_filters_out_expensive_new_listing(db_session):
     )
 
     run(service, db_session, search)
-    result = run(service, db_session, search)
+    result = service.run_once(search.id)
 
     assert result["created"] == 0
     assert result["filtered"] == 1
@@ -2388,3 +2389,185 @@ def test_scorer_exception_uses_provider_aware_model_metadata(db_session, monkeyp
     llm = snapshot.payload_json["llm_score"]
     assert llm["provider"] == "openai_compatible"
     assert llm["model"] == ""
+
+
+def test_two_active_searches_with_same_external_id_do_not_duplicate_alerts(db_session):
+    first_search = make_search(db_session, name="first")
+    second_search = make_search(db_session, name="second")
+    first_search.baseline_initialized = True
+    second_search.baseline_initialized = True
+    db_session.commit()
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("shared")], [card("shared")]]),
+        scorer=FakeScorer(),
+        notifier=notifier,
+    )
+
+    first = run(service, db_session, first_search)
+    second = run(service, db_session, second_search)
+
+    assert first["created"] == 1
+    assert first["alerted"] == 1
+    assert second["created"] == 0
+    assert second["alerted"] == 0
+    assert scalar_count(db_session, Listing) == 1
+    assert scalar_count(db_session, AlertSent) == 1
+    assert len(notifier.messages) == 1
+
+
+def test_run_once_duplicate_external_id_after_stale_precheck_is_treated_as_existing(
+    db_session, monkeypatch
+):
+    from app.repositories.listing_repository import ListingRepository
+
+    search = make_search(db_session)
+    search.baseline_initialized = True
+    patch_session_local(monkeypatch, db_session)
+    existing = Listing(
+        external_id="race",
+        url="https://www.avito.ru/old_race",
+        title="Old title",
+        price=100,
+        address="Old address",
+        area_m2=10,
+        rooms="1",
+        published_label="old label",
+        first_seen_at=datetime(2026, 1, 1),
+        last_seen_at=datetime(2026, 1, 1),
+    )
+    db_session.add(existing)
+    db_session.commit()
+
+    original_get = ListingRepository.get_by_external_id
+    calls = {"count": 0}
+
+    def stale_first_get(self, external_id: str):
+        calls["count"] += 1
+        if external_id == "race" and calls["count"] == 1:
+            return None
+        return original_get(self, external_id)
+
+    monkeypatch.setattr(ListingRepository, "get_by_external_id", stale_first_get)
+    seen_at = datetime(2026, 1, 2, 12, 0, 0)
+    service = MonitorService(
+        parser=FakeParser(
+            [
+                [
+                    card(
+                        "race",
+                        title="Fresh title",
+                        address="Fresh address",
+                        area_m2=20,
+                        published_label="fresh label",
+                        published_at=datetime(2026, 1, 2, 10, 0, 0),
+                    )
+                ]
+            ]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+        now_func=lambda: seen_at,
+    )
+
+    result = service.run_once(search.id)
+
+    assert result["created"] == 0
+    assert result["alerted"] == 0
+    assert scalar_count(db_session, Listing) == 1
+    refreshed = db_session.scalar(select(Listing).where(Listing.external_id == "race"))
+    assert refreshed.last_seen_at == seen_at
+    assert refreshed.url == "https://www.avito.ru/item_race"
+    assert refreshed.title == "Fresh title"
+    assert refreshed.address == "Fresh address"
+    assert refreshed.area_m2 == 20
+    assert refreshed.published_label == "fresh label"
+    assert refreshed.published_at == datetime(2026, 1, 2, 10, 0, 0)
+
+
+def test_duplicate_external_id_race_keeps_alert_channel_dedupe(db_session, monkeypatch):
+    from app.repositories.alert_repository import AlertRepository
+    from app.repositories.listing_repository import ListingRepository
+
+    search = make_search(db_session)
+    search.baseline_initialized = True
+    existing = Listing(
+        external_id="dedupe-race",
+        url="https://www.avito.ru/old_dedupe-race",
+        title="Old title",
+        price=100,
+        first_seen_at=datetime(2026, 1, 1),
+        last_seen_at=datetime(2026, 1, 1),
+    )
+    db_session.add(existing)
+    db_session.flush()
+    db_session.add(
+        ListingSnapshot(
+            external_id="dedupe-race",
+            title="Old title",
+            price=100,
+            published_label="",
+            payload_json={
+                "llm_score": {
+                    "score": 100,
+                    "summary": "already scored",
+                    "tags": [],
+                    "status": "success",
+                }
+            },
+            screenshot_path="",
+            observed_at=datetime(2026, 1, 1),
+        )
+    )
+    AlertRepository(db_session).create(
+        listing_external_id="dedupe-race",
+        dedupe_key="telegram:new:dedupe-race",
+        channel="telegram",
+    )
+    db_session.commit()
+
+    original_get = ListingRepository.get_by_external_id
+    calls = {"count": 0}
+
+    def stale_first_get(self, external_id: str):
+        calls["count"] += 1
+        if external_id == "dedupe-race" and calls["count"] == 1:
+            return None
+        return original_get(self, external_id)
+
+    monkeypatch.setattr(ListingRepository, "get_by_external_id", stale_first_get)
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("dedupe-race")]]),
+        scorer=FakeScorer(),
+        notifier=notifier,
+    )
+
+    result = run(service, db_session, search)
+
+    assert result["created"] == 0
+    assert result["alerted"] == 0
+    assert scalar_count(db_session, Listing) == 1
+    assert scalar_count(db_session, AlertSent) == 1
+    assert notifier.messages == []
+
+
+def test_baseline_duplicate_external_id_remains_silent(db_session):
+    search = make_search(db_session)
+    notifier = FakeNotifier()
+    scorer = FakeScorer()
+    service = MonitorService(
+        parser=FakeParser([[card("baseline-dupe"), card("baseline-dupe")]]),
+        scorer=scorer,
+        notifier=notifier,
+    )
+
+    result = run(service, db_session, search)
+
+    assert result["baseline_run"] is True
+    assert result["created"] == 1
+    assert result["alerted"] == 0
+    assert scalar_count(db_session, Listing) == 1
+    assert scalar_count(db_session, AlertSent) == 0
+    assert notifier.messages == []
+    assert scorer.cards == []
