@@ -694,7 +694,7 @@ _FLAT_RENT_RISK_DESCRIPTIONS = {
 _FLAT_RENT_BASE_QUESTIONS = [
     "Уточнить итоговый ежемесячный платеж.",
     "Уточнить, включены ли коммунальные платежи и счетчики.",
-    "Уточнить размер залога и условия возврата.",
+    "Уточнить размер залога, условия удержания и возврата.",
     "Уточнить комиссию.",
     "Уточнить срок аренды и возможность долгосрочного договора.",
     "Уточнить состав мебели и техники.",
@@ -1368,8 +1368,6 @@ def _flat_rent_questions_for(*, flags: list[str], hints: dict) -> list[str]:
         questions.append("Уточнить, возможен ли долгосрочный договор вместо краткосрочной аренды.")
     if not hints["has_utilities_hint"]:
         questions.append("Уточнить отдельно КУ, счетчики, интернет и сезонные платежи.")
-    if not hints["has_deposit_hint"]:
-        questions.append("Уточнить сумму залога, условия удержания и возврата.")
     if not (hints["has_commission_hint"] or hints["has_no_commission_hint"]):
         questions.append("Уточнить, есть ли комиссия агенту и в каком размере.")
     return list(dict.fromkeys(questions))
@@ -1419,7 +1417,7 @@ def _flat_rent_report_md(
             f"* Этаж: {floor}",
             f"* Свежесть: {facts['freshness_status']}",
             f"* Мебель/техника: мебель={_fmt_bool(hints['has_furniture_hint'])}, техника={_fmt_bool(hints['has_appliances_hint'])}",
-            f"* Залог/комиссия/КУ: залог={_fmt_bool(hints['has_deposit_hint'])}, комиссия={_fmt_bool(hints['has_commission_hint'])}, без комиссии={_fmt_bool(hints['has_no_commission_hint'])}, КУ={_fmt_bool(hints['has_utilities_hint'])}",
+            f"* Залог/комиссия/КУ: залог={_fmt_hint_found(hints['has_deposit_hint'])}, комиссия={_fmt_flat_rent_commission_hint(hints)}, КУ={_fmt_hint_found(hints['has_utilities_hint'])}",
             "",
             "## Что хорошо",
             "",
@@ -1478,6 +1476,18 @@ def _flat_rent_suitable_for(*, facts: dict) -> str:
     if hints["has_long_term_hint"]:
         return "долгосрочная аренда"
     return "неизвестно"
+
+
+def _fmt_flat_rent_commission_hint(hints: dict) -> str:
+    if hints["has_no_commission_hint"]:
+        return "без комиссии указано"
+    if hints["has_commission_hint"]:
+        return "найдена"
+    return "не найдена"
+
+
+def _fmt_hint_found(value: bool) -> str:
+    return "найдено" if value else "не найдено"
 
 
 def _fmt_bool(value: bool) -> str:

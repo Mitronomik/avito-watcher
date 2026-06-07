@@ -1154,6 +1154,31 @@ def test_flat_rent_report_contains_russian_sections():
     assert "## Что уточнить перед звонком" in report
 
 
+def test_flat_rent_report_renders_missing_deposit_hint_as_unknown():
+    report = _flat_rent_result(title="1-к квартира 40 м² 8/15 эт.").report_md
+
+    assert "залог=нет" not in report
+    assert "залог=не найдено" in report
+
+
+def test_flat_rent_report_renders_no_commission_and_utilities_hints():
+    report = _flat_rent_result(
+        title="1-к квартира 40 м² 8/15 эт. без комиссии",
+        description="Коммунальные платежи и счётчики оплачиваются отдельно",
+    ).report_md
+
+    assert "комиссия=без комиссии указано" in report
+    assert "КУ=найдено" in report
+
+
+def test_flat_rent_deposit_question_is_not_duplicated():
+    result = _flat_rent_result(title="1-к квартира 40 м² 8/15 эт.")
+    deposit_question = "Уточнить размер залога, условия удержания и возврата."
+
+    assert result.questions_json["items"].count(deposit_question) == 1
+    assert result.report_md.count(deposit_question) == 1
+
+
 def test_get_analysis_provider_supports_flat_rent():
     provider = get_analysis_provider("flat_rent")
 
