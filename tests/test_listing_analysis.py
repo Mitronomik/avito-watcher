@@ -1,11 +1,17 @@
 import json
 from argparse import Namespace
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from app import cli
-from app.analysis.provider import ListingAnalysisResult
+from app.analysis.provider import (
+    CommercialRentDeterministicAnalysisProvider,
+    ListingAnalysisResult,
+    _verdict,
+    get_analysis_provider,
+)
 from app.analysis.service import ListingAnalysisService
 from app.models.alert_sent import AlertSent
 from app.models.listing import Listing
@@ -146,7 +152,9 @@ class CustomSuccessProvider:
 def test_failed_analysis_records_error(db_session):
     _listing(db_session)
 
-    analysis = ListingAnalysisService(db_session, provider=FailingProvider()).analyze_listing("ext-1")
+    analysis = ListingAnalysisService(
+        db_session, provider=FailingProvider()
+    ).analyze_listing("ext-1")
 
     assert analysis.status == "failed"
     assert analysis.error_type == "RuntimeError"
@@ -157,7 +165,9 @@ def test_cli_analyze_listing_works(db_session, monkeypatch, capsys):
     _listing(db_session)
     _snapshot(db_session)
     db_session.commit()
-    SessionLocal = sessionmaker(bind=db_session.get_bind(), autoflush=False, autocommit=False)
+    SessionLocal = sessionmaker(
+        bind=db_session.get_bind(), autoflush=False, autocommit=False
+    )
     monkeypatch.setattr(cli, "init_db", lambda: None)
     monkeypatch.setattr(cli, "SessionLocal", SessionLocal)
 
@@ -175,7 +185,9 @@ def test_cli_analyze_alerted_listings_works_with_limit(db_session, monkeypatch, 
         _listing(db_session, external_id=external_id)
         _alert(db_session, external_id=external_id)
     db_session.commit()
-    SessionLocal = sessionmaker(bind=db_session.get_bind(), autoflush=False, autocommit=False)
+    SessionLocal = sessionmaker(
+        bind=db_session.get_bind(), autoflush=False, autocommit=False
+    )
     monkeypatch.setattr(cli, "init_db", lambda: None)
     monkeypatch.setattr(cli, "SessionLocal", SessionLocal)
 
@@ -193,6 +205,207 @@ def test_alerted_listing_query_does_not_require_alert_created_at(db_session):
     _listing(db_session)
     _alert(db_session)
 
-    listings = ListingAnalysisRepository(db_session).list_alerted_listings_without_analysis(limit=20)
+    listings = ListingAnalysisRepository(
+        db_session
+    ).list_alerted_listings_without_analysis(limit=20)
 
     assert [listing.external_id for listing in listings] == ["ext-1"]
+
+
+def _commercial_result(**kwargs):
+    now = datetime.now(UTC)
+    description = kwargs.pop("description", "")
+    listing = Listing(
+        external_id=kwargs.pop("external_id", "comm-1"),
+        url=kwargs.pop("url", "https://www.avito.ru/item/comm-1"),
+        title=kwargs.pop("title", "Офис свободного назначения"),
+        price=kwargs.pop("price", 120_000),
+        address=kwargs.pop("address", "Санкт-Петербург, Невский проспект"),
+        area_m2=kwargs.pop("area_m2", 60.0),
+        published_label=kwargs.pop("published_label", "сегодня"),
+        published_at=kwargs.pop("published_at", now - timedelta(hours=2)),
+        **kwargs,
+    )
+    snapshot = ListingSnapshot(
+        id=1,
+        external_id=listing.external_id,
+        title=listing.title,
+        price=listing.price,
+        published_label=listing.published_label,
+        published_at=listing.published_at,
+        payload_json={"description": description},
+    )
+    return CommercialRentDeterministicAnalysisProvider().analyze(
+        listing=listing, snapshot=snapshot, input_hash="hash"
+    )
+
+
+def test_get_analysis_provider_supports_default_and_commercial_rent():
+    default_provider = get_analysis_provider("default")
+    commercial_provider = get_analysis_provider("commercial_rent")
+
+    assert default_provider.profile == "default"
+    assert commercial_provider.profile == "commercial_rent"
+    assert commercial_provider.analysis_version == "commercial-rent-v0"
+    assert commercial_provider.model_provider == "deterministic"
+    assert commercial_provider.model_name == "commercial-rent-rules-v0"
+
+
+def test_get_analysis_provider_unknown_profile_fails_safely():
+    try:
+        get_analysis_provider("unknown")
+    except ValueError as exc:
+        assert "unsupported analysis profile" in str(exc)
+    else:
+        raise AssertionError("unknown analysis profile must fail")
+
+
+def test_commercial_rent_calculates_price_per_m2():
+    result = _commercial_result(price=120_000, area_m2=60)
+
+    assert result.facts_json["price_per_m2"] == 2000
+
+
+def test_commercial_rent_freshness_statuses():
+    now = datetime.now(UTC)
+
+    assert (
+        _commercial_result(published_at=now - timedelta(hours=1)).facts_json[
+            "freshness_status"
+        ]
+        == "fresh"
+    )
+    assert (
+        _commercial_result(published_at=now - timedelta(hours=48)).facts_json[
+            "freshness_status"
+        ]
+        == "recent"
+    )
+    assert (
+        _commercial_result(published_at=now - timedelta(hours=96)).facts_json[
+            "freshness_status"
+        ]
+        == "stale"
+    )
+    assert (
+        _commercial_result(published_at=None).facts_json["freshness_status"]
+        == "unknown"
+    )
+
+
+def test_commercial_rent_target_fit_logic():
+    good = _commercial_result(price=120_000, area_m2=60)
+    too_large = _commercial_result(price=250_000, area_m2=200)
+
+    assert good.facts_json["target_fit"]["area_fit"] is True
+    assert good.facts_json["target_fit"]["price_fit"] is True
+    assert good.facts_json["target_fit"]["freshness_fit"] is True
+    assert good.facts_json["target_fit"]["overall"] == "good"
+    assert too_large.facts_json["target_fit"]["area_fit"] is False
+    assert too_large.facts_json["target_fit"]["price_fit"] is False
+    assert too_large.facts_json["target_fit"]["overall"] == "partial"
+
+
+def test_commercial_rent_parking_storage_garage_risk_flags():
+    result = _commercial_result(title="Гараж и машиноместо рядом с офисом")
+
+    assert "parking_storage_garage_keyword" in result.risks_json["flags"]
+
+
+def test_commercial_rent_sublease_partial_area_risk_flags():
+    result = _commercial_result(
+        description="Субаренда, часть помещения, отдельное рабочее место"
+    )
+
+    assert "sublease_or_partial_area_ambiguity" in result.risks_json["flags"]
+
+
+def test_commercial_rent_warehouse_or_production_risk_for_service_use():
+    warehouse = _commercial_result(title="Склад 60 м²")
+    production = _commercial_result(title="Производство 60 м²")
+
+    assert "warehouse_or_production_for_service_use" in warehouse.risks_json["flags"]
+    assert "warehouse_or_production_for_service_use" in production.risks_json["flags"]
+
+
+def test_commercial_rent_score_is_clamped_to_0_and_100():
+    low = _commercial_result(
+        title="Склад гараж субаренда часть помещения",
+        price=1_000_000,
+        area_m2=500,
+        published_at=datetime.now(UTC) - timedelta(days=30),
+    )
+
+    assert low.score == 0
+    assert 0 <= _commercial_result().score <= 100
+
+
+def test_commercial_rent_verdict_thresholds():
+    assert _verdict(score=75, flags=[]) == "strong"
+    assert _verdict(score=55, flags=[]) == "medium"
+    assert _verdict(score=35, flags=[]) == "weak"
+    assert _verdict(score=34, flags=[]) == "review"
+    assert _verdict(score=80, flags=["missing_price"]) == "review"
+
+
+def test_commercial_rent_report_contains_russian_sections():
+    report = _commercial_result().report_md
+
+    assert "## Вердикт" in report
+    assert "## Факты" in report
+    assert "## Риски" in report
+    assert "## Что уточнить перед звонком" in report
+
+
+def test_cli_analyze_listing_works_with_commercial_rent_profile(
+    db_session, monkeypatch, capsys
+):
+    _listing(
+        db_session,
+        external_id="comm-cli-1",
+        title="Офис 60 м²",
+        price=120_000,
+        area_m2=60,
+    )
+    _snapshot(db_session, external_id="comm-cli-1", title="Офис 60 м²", price=120_000)
+    db_session.commit()
+    SessionLocal = sessionmaker(
+        bind=db_session.get_bind(), autoflush=False, autocommit=False
+    )
+    monkeypatch.setattr(cli, "init_db", lambda: None)
+    monkeypatch.setattr(cli, "SessionLocal", SessionLocal)
+
+    cli.cmd_analyze_listing(
+        Namespace(external_id="comm-cli-1", profile="commercial_rent")
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is True
+    assert output["analysis"]["profile"] == "commercial_rent"
+    assert output["analysis"]["analysis_version"] == "commercial-rent-v0"
+
+
+def test_cli_analyze_alerted_listings_works_with_commercial_rent_profile(
+    db_session, monkeypatch, capsys
+):
+    _listing(
+        db_session,
+        external_id="comm-alert-1",
+        title="Офис 60 м²",
+        price=120_000,
+        area_m2=60,
+    )
+    _alert(db_session, external_id="comm-alert-1")
+    db_session.commit()
+    SessionLocal = sessionmaker(
+        bind=db_session.get_bind(), autoflush=False, autocommit=False
+    )
+    monkeypatch.setattr(cli, "init_db", lambda: None)
+    monkeypatch.setattr(cli, "SessionLocal", SessionLocal)
+
+    cli.cmd_analyze_alerted_listings(Namespace(limit=20, profile="commercial_rent"))
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is True
+    assert output["count"] == 1
+    assert output["analyses"][0]["profile"] == "commercial_rent"

@@ -70,12 +70,16 @@ class ListingAnalysisService:
 
     def analyze_alerted_listings(self, limit: int) -> list[ListingAnalysis]:
         analyses: list[ListingAnalysis] = []
-        for listing in self.analysis_repo.list_alerted_listings_without_analysis(limit):
+        for listing in self.analysis_repo.list_alerted_listings_without_analysis(
+            limit, profile=self.provider.profile
+        ):
             analyses.append(self._analyze_existing_listing(listing))
         return analyses
 
     def _analyze_existing_listing(self, listing: Listing) -> ListingAnalysis:
-        snapshot = self.analysis_repo.get_latest_snapshot_for_listing(listing.external_id)
+        snapshot = self.analysis_repo.get_latest_snapshot_for_listing(
+            listing.external_id
+        )
         input_hash = calculate_input_hash(listing, snapshot)
         analysis = self.analysis_repo.create_or_update_analysis(
             listing_external_id=listing.external_id,

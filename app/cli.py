@@ -8,6 +8,7 @@ import tomllib
 import uvicorn
 from pathlib import Path
 from urllib.parse import urlparse
+from app.analysis.provider import get_analysis_provider
 from app.analysis.service import ListingAnalysisService
 from app.bot.telegram_commands import build_telegram_application
 from app.parsers.avito_parser import AvitoParser
@@ -93,8 +94,12 @@ def cmd_seed_search(args) -> None:
             poll_interval_sec=args.interval,
         )
         db.commit()
-        print(json.dumps({"id": item.id, "name": item.name, "url": item.source_url}, ensure_ascii=False))
-
+        print(
+            json.dumps(
+                {"id": item.id, "name": item.name, "url": item.source_url},
+                ensure_ascii=False,
+            )
+        )
 
 
 PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,120}$")
@@ -140,7 +145,11 @@ def _load_search_profile(path: str) -> dict:
         raise ValueError("url must be a valid avito.ru URL")
 
     poll_interval_sec = profile.get("poll_interval_sec")
-    if poll_interval_sec is not None and (not isinstance(poll_interval_sec, int) or isinstance(poll_interval_sec, bool) or poll_interval_sec <= 0):
+    if poll_interval_sec is not None and (
+        not isinstance(poll_interval_sec, int)
+        or isinstance(poll_interval_sec, bool)
+        or poll_interval_sec <= 0
+    ):
         raise ValueError("poll_interval_sec must be a positive integer")
 
     is_active = profile.get("is_active")
@@ -169,7 +178,15 @@ def _load_search_profile(path: str) -> dict:
 
 def cmd_upsert_search_profile(args) -> None:
     if args.activate and args.deactivate:
-        print(json.dumps(_validation_error("--activate and --deactivate cannot be used together"), ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                _validation_error(
+                    "--activate and --deactivate cannot be used together"
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return
 
     try:
@@ -183,7 +200,9 @@ def cmd_upsert_search_profile(args) -> None:
         repo = SearchRepository(db)
         existing = repo.get_by_name(profile["name"])
 
-        target_is_active = profile["is_active"] if profile["is_active"] is not None else True
+        target_is_active = (
+            profile["is_active"] if profile["is_active"] is not None else True
+        )
         if args.activate:
             target_is_active = True
         if args.deactivate:
@@ -289,8 +308,6 @@ def cmd_run_telegram_bot(args) -> None:
     application.run_polling()
 
 
-
-
 def _analysis_to_json(analysis) -> dict:
     return {
         "id": analysis.id,
@@ -310,7 +327,9 @@ def _analysis_to_json(analysis) -> dict:
 def cmd_analyze_listing(args) -> None:
     init_db()
     with SessionLocal() as db:
-        service = ListingAnalysisService(db)
+        service = ListingAnalysisService(
+            db, provider=get_analysis_provider(getattr(args, "profile", "default"))
+        )
         try:
             analysis = service.analyze_listing(args.external_id)
         except Exception as exc:
@@ -323,14 +342,19 @@ def cmd_analyze_listing(args) -> None:
             }
         else:
             db.commit()
-            result = {"ok": analysis.status == "success", "analysis": _analysis_to_json(analysis)}
+            result = {
+                "ok": analysis.status == "success",
+                "analysis": _analysis_to_json(analysis),
+            }
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def cmd_analyze_alerted_listings(args) -> None:
     init_db()
     with SessionLocal() as db:
-        service = ListingAnalysisService(db)
+        service = ListingAnalysisService(
+            db, provider=get_analysis_provider(getattr(args, "profile", "default"))
+        )
         analyses = service.analyze_alerted_listings(args.limit)
         db.commit()
         result = {
@@ -348,6 +372,7 @@ def cmd_admin_server(args) -> None:
     app = create_app(admin_ui_enabled=True)
     uvicorn.run(app, host=args.host, port=args.port)
 
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="avito-watcher")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -358,7 +383,10 @@ def build_parser() -> argparse.ArgumentParser:
     seed.add_argument("--interval", type=int, default=180)
     seed.set_defaults(func=cmd_seed_search)
 
-    upsert_profile = sub.add_parser("upsert-search-profile", help="Upsert a search job from TOML profile (technical import/export for DevOps)")
+    upsert_profile = sub.add_parser(
+        "upsert-search-profile",
+        help="Upsert a search job from TOML profile (technical import/export for DevOps)",
+    )
     upsert_profile.add_argument("--file", required=True)
     upsert_profile.add_argument("--reset-baseline", action="store_true")
     upsert_profile.add_argument("--activate", action="store_true")
@@ -373,7 +401,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_all = sub.add_parser("run-all", help="Run all configured searches")
     run_all.set_defaults(func=cmd_run_all)
 
-    dry_run = sub.add_parser("dry-run-search", help="Fetch and print Avito search parser diagnostics without side effects")
+    dry_run = sub.add_parser(
+        "dry-run-search",
+        help="Fetch and print Avito search parser diagnostics without side effects",
+    )
     dry_run.add_argument("--url", required=True)
     dry_run.set_defaults(func=cmd_dry_run_search)
 
@@ -385,12 +416,19 @@ def build_parser() -> argparse.ArgumentParser:
     admin_server.add_argument("--port", type=int, default=8000)
     admin_server.set_defaults(func=cmd_admin_server)
 
-    analyze_listing = sub.add_parser("analyze-listing", help="Analyze one already parsed listing locally")
+    analyze_listing = sub.add_parser(
+        "analyze-listing", help="Analyze one already parsed listing locally"
+    )
     analyze_listing.add_argument("--external-id", required=True)
+    analyze_listing.add_argument("--profile", default="default")
     analyze_listing.set_defaults(func=cmd_analyze_listing)
 
-    analyze_alerted = sub.add_parser("analyze-alerted-listings", help="Analyze alerted listings without prior analysis locally")
+    analyze_alerted = sub.add_parser(
+        "analyze-alerted-listings",
+        help="Analyze alerted listings without prior analysis locally",
+    )
     analyze_alerted.add_argument("--limit", type=int, default=20)
+    analyze_alerted.add_argument("--profile", default="default")
     analyze_alerted.set_defaults(func=cmd_analyze_alerted_listings)
 
     return parser

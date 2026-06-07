@@ -20,12 +20,18 @@ class ListingAnalysisRepository:
     def get_latest_for_listing(
         self, external_id: str, profile: str | None = None
     ) -> ListingAnalysis | None:
-        stmt = select(ListingAnalysis).where(ListingAnalysis.listing_external_id == external_id)
+        stmt = select(ListingAnalysis).where(
+            ListingAnalysis.listing_external_id == external_id
+        )
         if profile is not None:
             stmt = stmt.where(ListingAnalysis.profile == profile)
-        return self.db.scalar(stmt.order_by(ListingAnalysis.created_at.desc(), ListingAnalysis.id.desc()))
+        return self.db.scalar(
+            stmt.order_by(ListingAnalysis.created_at.desc(), ListingAnalysis.id.desc())
+        )
 
-    def get_latest_snapshot_for_listing(self, external_id: str) -> ListingSnapshot | None:
+    def get_latest_snapshot_for_listing(
+        self, external_id: str
+    ) -> ListingSnapshot | None:
         return self.db.scalar(
             select(ListingSnapshot)
             .where(ListingSnapshot.external_id == external_id)
@@ -92,7 +98,9 @@ class ListingAnalysisRepository:
         self.db.flush()
         return existing
 
-    def list_alerted_listings_without_analysis(self, limit: int) -> list[Listing]:
+    def list_alerted_listings_without_analysis(
+        self, limit: int, profile: str | None = None
+    ) -> list[Listing]:
         if limit <= 0:
             return []
 
@@ -105,6 +113,10 @@ class ListingAnalysisRepository:
             .subquery()
         )
         analyzed_external_ids = select(ListingAnalysis.listing_external_id).distinct()
+        if profile is not None:
+            analyzed_external_ids = analyzed_external_ids.where(
+                ListingAnalysis.profile == profile
+            )
         stmt = (
             select(Listing)
             .join(alerted, alerted.c.external_id == Listing.external_id)
