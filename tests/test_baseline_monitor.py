@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from app.models.alert_sent import AlertSent
 from app.models.listing import Listing
 from app.models.listing_snapshot import ListingSnapshot
+from app.models.listing_search_match import ListingSearchMatch
 from app.parsers.schemas import ListingCard
 from app.repositories.search_repository import SearchRepository
 from app.services.monitor_service import MonitorService, runtime_diagnostics
@@ -2571,3 +2572,23 @@ def test_baseline_duplicate_external_id_remains_silent(db_session):
     assert scalar_count(db_session, AlertSent) == 0
     assert notifier.messages == []
     assert scorer.cards == []
+
+
+def test_monitor_service_records_search_match_without_changing_alert_delivery(db_session):
+    search = make_search(db_session)
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("match-monitor")]]),
+        scorer=FakeScorer(),
+        notifier=notifier,
+    )
+
+    result = run(service, db_session, search)
+
+    assert result["baseline_run"] is True
+    assert result["alerted"] == 0
+    assert notifier.messages == []
+    match = db_session.scalar(select(ListingSearchMatch))
+    assert match.search_job_id == search.id
+    assert match.listing_external_id == "match-monitor"
+    assert match.last_snapshot_id is None

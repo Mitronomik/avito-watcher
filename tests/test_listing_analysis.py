@@ -12,13 +12,16 @@ from app.analysis.provider import (
     _verdict,
     get_analysis_provider,
 )
-from app.analysis.service import ListingAnalysisService
+from app.analysis.service import ListingAnalysisService, resolve_search_analysis_profile
 from app.models.alert_sent import AlertSent
 from app.models.listing import Listing
 from app.models.listing_analysis import ListingAnalysis
 from app.models.listing_snapshot import ListingSnapshot
+from app.models.listing_search_match import ListingSearchMatch
 from app.repositories.alert_repository import AlertRepository
 from app.repositories.listing_analysis_repository import ListingAnalysisRepository
+from app.repositories.listing_search_match_repository import ListingSearchMatchRepository
+from app.repositories.search_repository import SearchRepository
 
 
 def _listing(db_session, external_id: str = "ext-1", **kwargs) -> Listing:
@@ -415,3 +418,155 @@ def test_cli_analyze_alerted_listings_works_with_commercial_rent_profile(
     assert output["ok"] is True
     assert output["count"] == 1
     assert output["analyses"][0]["profile"] == "commercial_rent"
+
+
+
+def _search(db_session, name="search-1", filters_json=None):
+    search = SearchRepository(db_session).create(
+        name=name,
+        source_url=f"https://www.avito.ru/{name}",
+        filters_json=filters_json or {},
+    )
+    db_session.flush()
+    return search
+
+
+def test_listing_search_match_upsert_creates_row(db_session):
+    search = _search(db_session)
+    seen_at = datetime(2026, 6, 1, 12, 0, 0)
+
+    match = ListingSearchMatchRepository(db_session).upsert_match(
+        search_job_id=search.id,
+        listing_external_id="match-1",
+        snapshot_id=10,
+        seen_at=seen_at,
+    )
+
+    assert match.id is not None
+    assert match.search_job_id == search.id
+    assert match.listing_external_id == "match-1"
+    assert match.first_seen_at == seen_at
+    assert match.last_seen_at == seen_at
+    assert match.last_snapshot_id == 10
+
+
+def test_listing_search_match_repeated_upsert_updates_without_duplicates(db_session):
+    search = _search(db_session)
+    repo = ListingSearchMatchRepository(db_session)
+    first_seen = datetime(2026, 6, 1, 12, 0, 0)
+    second_seen = datetime(2026, 6, 1, 13, 0, 0)
+
+    first = repo.upsert_match(search.id, "match-1", snapshot_id=10, seen_at=first_seen)
+    second = repo.upsert_match(search.id, "match-1", snapshot_id=11, seen_at=second_seen)
+
+    assert second.id == first.id
+    assert second.first_seen_at == first_seen
+    assert second.last_seen_at == second_seen
+    assert second.last_snapshot_id == 11
+    rows = db_session.scalars(select(ListingSearchMatch)).all()
+    assert len(rows) == 1
+
+
+def test_search_job_analysis_profile_resolution_uses_filters_json():
+    search = type("Search", (), {"filters_json": {"analysis_profile": "commercial_rent"}})()
+
+    assert resolve_search_analysis_profile(search) == "commercial_rent"
+
+
+def test_search_job_analysis_profile_resolution_falls_back_to_default():
+    search = type("Search", (), {"filters_json": {}})()
+
+    assert resolve_search_analysis_profile(search) == "default"
+
+
+def test_analyze_search_matches_analyzes_only_requested_search_id(db_session):
+    commercial_search = _search(
+        db_session,
+        name="commercial",
+        filters_json={"analysis_profile": "commercial_rent"},
+    )
+    apartment_search = _search(db_session, name="apartments")
+    _listing(
+        db_session,
+        external_id="office-1",
+        title="Офис 60 м²",
+        price=120_000,
+        area_m2=60,
+    )
+    _listing(
+        db_session,
+        external_id="apt-1",
+        title="Квартира 40 м²",
+        price=8_000_000,
+        area_m2=40,
+    )
+    match_repo = ListingSearchMatchRepository(db_session)
+    match_repo.upsert_match(commercial_search.id, "office-1")
+    match_repo.upsert_match(apartment_search.id, "apt-1")
+
+    service = ListingAnalysisService(
+        db_session,
+        provider=get_analysis_provider(resolve_search_analysis_profile(commercial_search)),
+    )
+    analyses = service.analyze_search_matches(commercial_search.id, limit=20)
+
+    assert len(analyses) == 1
+    assert analyses[0].listing_external_id == "office-1"
+    assert analyses[0].profile == "commercial_rent"
+    assert analyses[0].context_key == f"search:{commercial_search.id}"
+    assert analyses[0].search_job_id == commercial_search.id
+    assert db_session.scalar(
+        select(ListingAnalysis).where(ListingAnalysis.listing_external_id == "apt-1")
+    ) is None
+
+
+def test_cli_analyze_search_matches_uses_search_profile(db_session, monkeypatch, capsys):
+    search = _search(
+        db_session,
+        name="comm-cli-search",
+        filters_json={"analysis_profile": "commercial_rent"},
+    )
+    _listing(
+        db_session,
+        external_id="comm-search-cli-1",
+        title="Офис 60 м²",
+        price=120_000,
+        area_m2=60,
+    )
+    ListingSearchMatchRepository(db_session).upsert_match(
+        search.id, "comm-search-cli-1"
+    )
+    db_session.commit()
+    SessionLocal = sessionmaker(
+        bind=db_session.get_bind(), autoflush=False, autocommit=False
+    )
+    monkeypatch.setattr(cli, "init_db", lambda: None)
+    monkeypatch.setattr(cli, "SessionLocal", SessionLocal)
+
+    cli.cmd_analyze_search_matches(Namespace(search_id=search.id, limit=20))
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is True
+    assert output["search_id"] == search.id
+    assert output["profile"] == "commercial_rent"
+    assert output["count"] == 1
+    assert output["analyses"][0]["context_key"] == f"search:{search.id}"
+
+
+def test_global_and_search_context_idempotency_are_separate(db_session):
+    search = _search(db_session)
+    _listing(db_session, external_id="ctx-1")
+    _alert(db_session, external_id="ctx-1")
+    ListingSearchMatchRepository(db_session).upsert_match(search.id, "ctx-1")
+
+    service = ListingAnalysisService(db_session)
+    global_analysis = service.analyze_alerted_listings(limit=20)[0]
+    search_analysis = service.analyze_search_matches(search.id, limit=20)[0]
+    rerun = service.analyze_search_matches(search.id, limit=20)
+
+    assert global_analysis.context_key == "global"
+    assert search_analysis.context_key == f"search:{search.id}"
+    assert global_analysis.id != search_analysis.id
+    assert rerun == []
+    rows = db_session.scalars(select(ListingAnalysis)).all()
+    assert len(rows) == 2

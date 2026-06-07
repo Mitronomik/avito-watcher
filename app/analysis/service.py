@@ -8,8 +8,10 @@ from app.analysis.provider import AnalysisProvider, DeterministicAnalysisProvide
 from app.models.listing import Listing
 from app.models.listing_analysis import ListingAnalysis
 from app.models.listing_snapshot import ListingSnapshot
+from app.models.search_job import SearchJob
 from app.repositories.listing_analysis_repository import ListingAnalysisRepository
 from app.repositories.listing_repository import ListingRepository
+from app.repositories.listing_search_match_repository import ListingSearchMatchRepository
 
 
 def _dt(value: datetime | None) -> str | None:
@@ -71,12 +73,35 @@ class ListingAnalysisService:
     def analyze_alerted_listings(self, limit: int) -> list[ListingAnalysis]:
         analyses: list[ListingAnalysis] = []
         for listing in self.analysis_repo.list_alerted_listings_without_analysis(
-            limit, profile=self.provider.profile
+            limit, profile=self.provider.profile, context_key="global"
         ):
             analyses.append(self._analyze_existing_listing(listing))
         return analyses
 
-    def _analyze_existing_listing(self, listing: Listing) -> ListingAnalysis:
+    def analyze_search_matches(self, search_job_id: int, limit: int) -> list[ListingAnalysis]:
+        context_key = f"search:{search_job_id}"
+        match_repo = ListingSearchMatchRepository(self.db)
+        analyses: list[ListingAnalysis] = []
+        for match in match_repo.list_matches_without_analysis(
+            search_job_id=search_job_id, profile=self.provider.profile, limit=limit
+        ):
+            listing = self.listing_repo.get_by_external_id(match.listing_external_id)
+            if listing is None:
+                continue
+            analyses.append(
+                self._analyze_existing_listing(
+                    listing, search_job_id=search_job_id, context_key=context_key
+                )
+            )
+        return analyses
+
+    def _analyze_existing_listing(
+        self,
+        listing: Listing,
+        *,
+        search_job_id: int | None = None,
+        context_key: str = "global",
+    ) -> ListingAnalysis:
         snapshot = self.analysis_repo.get_latest_snapshot_for_listing(
             listing.external_id
         )
@@ -88,6 +113,8 @@ class ListingAnalysisService:
             status="pending",
             analysis_version=self.provider.analysis_version,
             input_hash=input_hash,
+            search_job_id=search_job_id,
+            context_key=context_key,
             model_provider=self.provider.model_provider,
             model_name=self.provider.model_name,
         )
@@ -117,3 +144,11 @@ class ListingAnalysisService:
             model_name=result.model_name,
         )
         return analysis
+
+
+def resolve_search_analysis_profile(search: SearchJob) -> str:
+    filters = search.filters_json if isinstance(search.filters_json, dict) else {}
+    profile = filters.get("analysis_profile")
+    if isinstance(profile, str) and profile.strip():
+        return profile.strip()
+    return "default"

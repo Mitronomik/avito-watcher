@@ -55,3 +55,10 @@ class ListingRepository:
         self.db.add(snapshot)
         self.db.flush()
         return snapshot
+
+    def get_latest_snapshot_for_listing(self, external_id: str) -> ListingSnapshot | None:
+        return self.db.scalar(
+            select(ListingSnapshot)
+            .where(ListingSnapshot.external_id == external_id)
+            .order_by(ListingSnapshot.observed_at.desc(), ListingSnapshot.id.desc())
+        )
