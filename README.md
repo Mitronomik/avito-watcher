@@ -171,8 +171,8 @@ Search profiles loaded with `python -m app.cli upsert-search-profile --file <pat
 Documented `analysis_profile` values:
 
 - `default` — generic deterministic local provider.
-- `commercial_rent` — currently available deterministic commercial-rent provider.
-- `flat_sale` — planned future profile; provider is not implemented yet.
+- `commercial_rent` — implemented deterministic commercial-rent provider.
+- `flat_sale` — implemented deterministic apartment-purchase provider v0. It uses only already parsed listing/snapshot fields and simple v0 assumptions; it does not call LLMs or external APIs.
 - `flat_rent` — planned future profile; provider is not implemented yet.
 
 Commercial rent example:
@@ -188,7 +188,7 @@ missing_published_at_policy = "reject"
 source_sort = "date"
 ```
 
-Flat sale future example:
+Flat sale deterministic v0 example:
 
 ```toml
 [filters]
@@ -218,6 +218,7 @@ Run deterministic search-aware analysis for one search with a small initial limi
 
 ```bash
 python3 -m app.cli analyze-search-matches --search-id <id> --limit 5
+python3 -m app.cli analyze-search-matches --search-id <flat_sale_search_id> --limit 5
 ```
 
 Inspect recent results in the database:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import re
 from typing import Any, Protocol
 
 from app.models.listing import Listing
@@ -345,11 +346,279 @@ class CommercialRentDeterministicAnalysisProvider:
         return max(0, min(100, score))
 
 
+_FLAT_TYPE_KEYWORDS = (
+    ("studio", ("квартира-студия", "студия")),
+    ("one_room", ("1-к", "1 к", "1-комн", "1 комнат", "однокомнат")),
+    ("two_room", ("2-к", "2 к", "2-комн", "2 комнат", "двухкомнат")),
+    ("three_room", ("3-к", "3 к", "3-комн", "3 комнат", "трехкомнат", "трёхкомнат")),
+    ("multi_room", ("4-к", "4 к", "4-комн", "4 комнат", "многокомнат")),
+)
+
+_FLAT_FLOOR_RE = re.compile(r"(?<!\d)(\d{1,2})\s*/\s*(\d{1,2})\s*эт", re.IGNORECASE)
+
+_FLAT_RISK_DESCRIPTIONS = {
+    "missing_price": "Не указана цена квартиры.",
+    "missing_area": "Не указана площадь квартиры.",
+    "missing_address": "Не указан адрес или понятная локация.",
+    "missing_published_at": "Не удалось определить дату публикации.",
+    "stale_publication": "Публикация старше целевого окна свежести v0.",
+    "over_budget": "Цена выше целевого бюджета v0.",
+    "area_too_small": "Площадь меньше целевого диапазона v0.",
+    "area_too_large": "Площадь больше целевого диапазона v0.",
+    "first_floor": "Первый этаж требует дополнительной проверки.",
+    "last_floor": "Последний этаж требует дополнительной проверки.",
+    "unknown_floor": "Этаж не удалось определить из заголовка.",
+    "unknown_flat_type": "Тип квартиры не удалось определить из текста объявления.",
+    "no_snapshot": "Нет сохранённого снапшота объявления.",
+    "suspicious_low_price": "Цена за м² ниже простого порога v0; нужна ручная проверка.",
+    "expensive_price_per_m2": "Цена за м² выше простого порога v0.",
+}
+
+_FLAT_ALWAYS_QUESTIONS = [
+    "Уточнить точный корпус/адрес и срок сдачи, если это новостройка.",
+    "Уточнить отделку, состояние и что входит в цену.",
+    "Уточнить форму собственности и готовность документов.",
+    "Уточнить обременения, ипотеку, маткапитал, альтернативную сделку.",
+    "Уточнить вид из окон, шум, этажность и лифты.",
+    "Уточнить платежи, УК, коммунальные расходы.",
+    "Уточнить причину продажи и торг.",
+]
+
+
+class FlatSaleDeterministicAnalysisProvider:
+    profile = "flat_sale"
+    analysis_version = "flat-sale-v0"
+    model_provider = "deterministic"
+    model_name = "flat-sale-rules-v0"
+
+    target_min_area_m2 = 25.0
+    target_max_area_m2 = 90.0
+    target_max_price = 15_000_000.0
+    target_freshness_hours = 72.0
+    suspicious_low_price_per_m2 = 100_000.0
+    expensive_price_per_m2 = 350_000.0
+
+    def analyze(
+        self, *, listing: Listing, snapshot: ListingSnapshot | None, input_hash: str
+    ) -> ListingAnalysisResult:
+        del input_hash
+        title = listing.title or (snapshot.title if snapshot is not None else "")
+        price = (
+            listing.price
+            if listing.price is not None
+            else (snapshot.price if snapshot is not None else None)
+        )
+        area_m2 = listing.area_m2
+        address = listing.address or ""
+        published_label = listing.published_label or (
+            snapshot.published_label if snapshot is not None else ""
+        )
+        published_at = listing.published_at or (
+            snapshot.published_at if snapshot is not None else None
+        )
+        published_at_utc = _as_utc(published_at)
+        freshness_status = _freshness_status(published_at_utc)
+        price_per_m2 = (
+            round(price / area_m2, 2)
+            if _positive(price) and _positive(area_m2)
+            else None
+        )
+        floor_info = _parse_flat_floor(title)
+        detected_flat_type = _detect_flat_type(listing, snapshot)
+        target_fit = self._target_fit(
+            price=price, area_m2=area_m2, freshness_status=freshness_status
+        )
+        facts = {
+            "external_id": listing.external_id,
+            "title": title,
+            "url": listing.url,
+            "price": price,
+            "area_m2": area_m2,
+            "price_per_m2": price_per_m2,
+            "address": address,
+            "published_label": published_label,
+            "published_at": published_at_utc.isoformat()
+            if published_at_utc is not None
+            else None,
+            "freshness_status": freshness_status,
+            "has_snapshot": snapshot is not None,
+            "snapshot_id": snapshot.id if snapshot is not None else None,
+            "detected_flat_type": detected_flat_type,
+            "floor_info": floor_info,
+            "target_fit": target_fit,
+        }
+        flags = self._risk_flags(
+            price=price,
+            area_m2=area_m2,
+            address=address,
+            published_at=published_at_utc,
+            freshness_status=freshness_status,
+            detected_flat_type=detected_flat_type,
+            floor_info=floor_info,
+            price_per_m2=price_per_m2,
+            has_snapshot=snapshot is not None,
+        )
+        risks = {
+            "flags": flags,
+            "items": [
+                {"flag": flag, "description": _FLAT_RISK_DESCRIPTIONS[flag]}
+                for flag in flags
+            ],
+            "assumptions": {
+                "suspicious_low_price_per_m2": self.suspicious_low_price_per_m2,
+                "expensive_price_per_m2": self.expensive_price_per_m2,
+                "note": "Пороги flat-sale-v0 являются простыми допущениями, а не рыночной оценкой.",
+            },
+        }
+        questions = {"items": _flat_questions_for(flags=flags)}
+        score = self._score(facts=facts, flags=flags)
+        verdict = _verdict(score=score, flags=flags)
+
+        return ListingAnalysisResult(
+            score=score,
+            verdict=verdict,
+            facts_json=facts,
+            risks_json=risks,
+            questions_json=questions,
+            report_md=_flat_report_md(
+                external_id=listing.external_id,
+                score=score,
+                verdict=verdict,
+                facts=facts,
+                risks=risks,
+                questions=questions,
+            ),
+            model_provider=self.model_provider,
+            model_name=self.model_name,
+        )
+
+    def _target_fit(
+        self, *, price: float | None, area_m2: float | None, freshness_status: str
+    ) -> dict:
+        area_fit = (
+            None
+            if area_m2 is None
+            else self.target_min_area_m2 <= area_m2 <= self.target_max_area_m2
+        )
+        price_fit = None if price is None else price <= self.target_max_price
+        freshness_fit = (
+            None
+            if freshness_status == "unknown"
+            else freshness_status in {"fresh", "recent"}
+        )
+        known = [
+            value for value in (area_fit, price_fit, freshness_fit) if value is not None
+        ]
+        if not known:
+            overall = "unknown"
+        elif all(known) and len(known) == 3:
+            overall = "good"
+        elif any(known):
+            overall = "partial"
+        else:
+            overall = "poor"
+        return {
+            "area_fit": area_fit,
+            "price_fit": price_fit,
+            "freshness_fit": freshness_fit,
+            "overall": overall,
+            "target_min_area_m2": self.target_min_area_m2,
+            "target_max_area_m2": self.target_max_area_m2,
+            "target_max_price": self.target_max_price,
+            "target_freshness_hours": self.target_freshness_hours,
+        }
+
+    def _risk_flags(
+        self,
+        *,
+        price: float | None,
+        area_m2: float | None,
+        address: str,
+        published_at: datetime | None,
+        freshness_status: str,
+        detected_flat_type: str,
+        floor_info: dict,
+        price_per_m2: float | None,
+        has_snapshot: bool,
+    ) -> list[str]:
+        flags: list[str] = []
+        if price is None:
+            flags.append("missing_price")
+        if area_m2 is None:
+            flags.append("missing_area")
+        if not address:
+            flags.append("missing_address")
+        if published_at is None:
+            flags.append("missing_published_at")
+        if freshness_status == "stale":
+            flags.append("stale_publication")
+        if price is not None and price > self.target_max_price:
+            flags.append("over_budget")
+        if area_m2 is not None and area_m2 < self.target_min_area_m2:
+            flags.append("area_too_small")
+        if area_m2 is not None and area_m2 > self.target_max_area_m2:
+            flags.append("area_too_large")
+        if floor_info["is_first_floor"] is True:
+            flags.append("first_floor")
+        if floor_info["is_last_floor"] is True:
+            flags.append("last_floor")
+        if floor_info["floor"] is None:
+            flags.append("unknown_floor")
+        if detected_flat_type == "unknown":
+            flags.append("unknown_flat_type")
+        if not has_snapshot:
+            flags.append("no_snapshot")
+        if price_per_m2 is not None and price_per_m2 < self.suspicious_low_price_per_m2:
+            flags.append("suspicious_low_price")
+        if price_per_m2 is not None and price_per_m2 > self.expensive_price_per_m2:
+            flags.append("expensive_price_per_m2")
+        return flags
+
+    def _score(self, *, facts: dict, flags: list[str]) -> int:
+        target_fit = facts["target_fit"]
+        score = 50
+        if facts["freshness_status"] in {"fresh", "recent"}:
+            score += 10
+        if target_fit["price_fit"] is True:
+            score += 10
+        if target_fit["area_fit"] is True:
+            score += 10
+        if facts["address"]:
+            score += 5
+        if facts["has_snapshot"]:
+            score += 5
+        if facts["detected_flat_type"] != "unknown":
+            score += 5
+        if "missing_published_at" in flags:
+            score -= 10
+        if "stale_publication" in flags:
+            score -= 15
+        if "over_budget" in flags:
+            score -= 15
+        if "area_too_small" in flags or "area_too_large" in flags:
+            score -= 10
+        if "first_floor" in flags:
+            score -= 8
+        if "last_floor" in flags:
+            score -= 6
+        if "unknown_floor" in flags:
+            score -= 5
+        if "unknown_flat_type" in flags:
+            score -= 5
+        if "no_snapshot" in flags:
+            score -= 10
+        if "expensive_price_per_m2" in flags:
+            score -= 10
+        return max(0, min(100, score))
+
+
 def get_analysis_provider(profile: str) -> AnalysisProvider:
     if profile == "default":
         return DeterministicAnalysisProvider()
     if profile == "commercial_rent":
         return CommercialRentDeterministicAnalysisProvider()
+    if profile == "flat_sale":
+        return FlatSaleDeterministicAnalysisProvider()
     raise ValueError(f"unsupported analysis profile: {profile}")
 
 
@@ -547,6 +816,154 @@ def _suitable_for(commercial_type: str) -> str:
         return "склад"
     if commercial_type == "production":
         return "производство"
+    return "неизвестно"
+
+
+
+def _detect_flat_type(listing: Listing, snapshot: ListingSnapshot | None) -> str:
+    text = _analysis_text(listing, snapshot)
+    for flat_type, keywords in _FLAT_TYPE_KEYWORDS:
+        if _has_any(text, keywords):
+            return flat_type
+    return "unknown"
+
+
+def _parse_flat_floor(title: str) -> dict:
+    match = _FLAT_FLOOR_RE.search(title or "")
+    if match is None:
+        return {
+            "floor": None,
+            "total_floors": None,
+            "is_first_floor": None,
+            "is_last_floor": None,
+        }
+    floor = int(match.group(1))
+    total_floors = int(match.group(2))
+    if floor <= 0 or total_floors <= 0 or floor > total_floors:
+        return {
+            "floor": None,
+            "total_floors": None,
+            "is_first_floor": None,
+            "is_last_floor": None,
+        }
+    return {
+        "floor": floor,
+        "total_floors": total_floors,
+        "is_first_floor": floor == 1,
+        "is_last_floor": floor == total_floors,
+    }
+
+
+def _flat_questions_for(*, flags: list[str]) -> list[str]:
+    questions: list[str] = []
+    if "missing_address" in flags:
+        questions.append("Уточнить точный корпус/адрес и срок сдачи, если это новостройка.")
+    questions.extend(_FLAT_ALWAYS_QUESTIONS)
+    if "first_floor" in flags:
+        questions.append(
+            "Для первого этажа: уточнить уровень окон, проходной трафик, безопасность, коммерческие помещения рядом."
+        )
+    if "last_floor" in flags:
+        questions.append("Для последнего этажа: уточнить крышу/техэтаж/шум оборудования.")
+    if "unknown_floor" in flags:
+        questions.append("Уточнить этаж, общее количество этажей, лифт и расположение квартиры.")
+    if "missing_price" in flags or "over_budget" in flags:
+        questions.append("Уточнить финальную цену, торг и дополнительные расходы сделки.")
+    if "missing_area" in flags or "area_too_small" in flags or "area_too_large" in flags:
+        questions.append("Уточнить точную площадь, планировку и долю полезной площади.")
+    return list(dict.fromkeys(questions))
+
+
+def _flat_report_md(
+    *,
+    external_id: str,
+    score: int,
+    verdict: str,
+    facts: dict,
+    risks: dict,
+    questions: dict,
+) -> str:
+    risk_lines = [item["description"] for item in risks["items"]] or [
+        "Критичных детерминированных рисков не найдено."
+    ]
+    good_lines = _flat_good_lines(facts=facts, risks=risks)
+    floor_info = facts["floor_info"]
+    floor = (
+        f"{floor_info['floor']}/{floor_info['total_floors']}"
+        if floor_info["floor"] is not None
+        else "не указан"
+    )
+    return "\n".join(
+        [
+            f"# Анализ квартиры {external_id}",
+            "",
+            "## Вердикт",
+            "",
+            f"{verdict}, score {score}/100.",
+            "",
+            "## Кратко",
+            "",
+            _flat_summary(facts=facts, score=score, verdict=verdict),
+            "",
+            "## Факты",
+            "",
+            f"* Тип квартиры: {facts['detected_flat_type']}",
+            f"* Цена: {_fmt_money(facts['price'])}",
+            f"* Площадь: {_fmt_area(facts['area_m2'])}",
+            f"* Цена за м²: {_fmt_money(facts['price_per_m2'])}",
+            f"* Адрес: {facts['address'] or 'не указан'}",
+            f"* Этаж: {floor}",
+            f"* Свежесть: {facts['freshness_status']}",
+            "",
+            "## Что хорошо",
+            "",
+            *[f"* {line}" for line in good_lines],
+            "",
+            "## Риски",
+            "",
+            *[f"* {line}" for line in risk_lines],
+            "",
+            "## Что уточнить перед звонком",
+            "",
+            *[f"* {item}" for item in questions["items"]],
+            "",
+            "## Подходит для",
+            "",
+            f"* {_flat_suitable_for(facts=facts)}",
+        ]
+    )
+
+
+def _flat_summary(*, facts: dict, score: int, verdict: str) -> str:
+    title = facts["title"] or "Квартира без названия"
+    return f"{title}. Детерминированный профиль flat-sale-v0 оценил объявление как {verdict} ({score}/100) на основе уже сохранённых данных объявления. Пороги цены за м² — простые допущения v0, а не рыночная оценка."
+
+
+def _flat_good_lines(*, facts: dict, risks: dict) -> list[str]:
+    flags = set(risks["flags"])
+    lines: list[str] = []
+    if facts["freshness_status"] in {"fresh", "recent"}:
+        lines.append("Объявление попадает в целевое окно свежести 72 часа.")
+    if facts["target_fit"]["price_fit"] is True:
+        lines.append("Цена не выше целевого бюджета v0.")
+    if facts["target_fit"]["area_fit"] is True:
+        lines.append("Площадь в целевом диапазоне v0.")
+    if facts["detected_flat_type"] != "unknown":
+        lines.append("Тип квартиры удалось определить из текста объявления.")
+    if not lines and flags:
+        lines.append("Плюсы требуют ручной проверки из-за неполных или рискованных данных.")
+    return lines or ["Базовые факты заполнены, явных v0-рисков нет."]
+
+
+def _flat_suitable_for(*, facts: dict) -> str:
+    flat_type = facts["detected_flat_type"]
+    area_m2 = facts["area_m2"]
+    if flat_type in {"studio", "one_room"}:
+        return "первое жильё / инвестиция / аренда"
+    if flat_type in {"two_room", "three_room", "multi_room"} or (
+        area_m2 is not None and area_m2 >= 55
+    ):
+        return "семья / первое жильё"
     return "неизвестно"
 
 
