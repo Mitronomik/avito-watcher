@@ -33,6 +33,177 @@ class AnalysisProvider(Protocol):
         """Analyze already parsed listing data without external calls."""
 
 
+@dataclass(frozen=True)
+class CommonSanityResult:
+    flags: list[str]
+    score_cap: int | None
+    verdict_cap: str | None
+    facts: dict
+
+
+_AREA_RE = re.compile(
+    r"(?<!\d)(\d{1,4}(?:[,.]\d{1,2})?)\s*"
+    r"(?:м\s*(?:2|²)|кв\.?\s*м\.?|кв\s+метр(?:а|ов)?|квадратн(?:ых|ые)\s+метр(?:а|ов)?)",
+    re.IGNORECASE,
+)
+_AREA_CONTEXT_RE = re.compile(
+    r"(?<![а-яё])площадь\D{0,20}(\d{1,4}(?:[,.]\d{1,2})?)\s*метр(?:а|ов)?",
+    re.IGNORECASE,
+)
+
+COMMERCIAL_RENT_HIGH_PRICE_PER_M2 = 5_000.0
+FLAT_SALE_EXPENSIVE_PRICE_PER_M2 = 350_000.0
+FLAT_RENT_EXPENSIVE_RENT_PER_M2 = 3_000.0
+
+_PARKING_AMENITY_RE = re.compile(
+    r"(?<![а-яё])"
+    r"(?:есть|удобная|удобный|рядом|гостевая|наземная|бесплатная)"
+    r"\s+парковк",
+    re.IGNORECASE,
+)
+_PARKING_OBJECT_RE = re.compile(
+    r"(?<![а-яё])(?:место\s+в\s+паркинге|парковочное\s+место)(?![а-яё])",
+    re.IGNORECASE,
+)
+_STORAGE_OBJECT_RE = re.compile(
+    r"(?<![а-яё])(?:кладовка|кладовая|машиноместо|машино-место|гараж)(?![а-яё])",
+    re.IGNORECASE,
+)
+
+
+def apply_common_sanity_guards(
+    *,
+    profile: str,
+    title: str | None,
+    text: str,
+    price: float | None,
+    area_m2: float | None,
+    price_per_m2: float | None,
+    published_at: datetime | None,
+    freshness_status: str,
+) -> CommonSanityResult:
+    del published_at
+    flags: list[str] = []
+    score_cap: int | None = None
+    verdict_cap: str | None = None
+    title_area_m2 = _extract_area_m2(title or "")
+    facts: dict[str, Any] = {"flags": flags}
+    if title_area_m2 is not None:
+        facts["title_area_m2"] = title_area_m2
+
+    if profile in {"commercial_rent", "flat_rent"} and (
+        price is not None and price <= 5_000 and area_m2 is not None and area_m2 >= 10
+    ):
+        flags.append("suspicious_total_price")
+        score_cap = _min_cap(score_cap, 70)
+        verdict_cap = _strongest_verdict_cap(verdict_cap, "review")
+
+    if profile == "commercial_rent" and (
+        price_per_m2 is not None and price_per_m2 < 300
+    ):
+        flags.append("suspicious_low_price_per_m2")
+        score_cap = _min_cap(score_cap, 70)
+        verdict_cap = _strongest_verdict_cap(verdict_cap, "review")
+
+    high_price_per_m2 = {
+        "commercial_rent": COMMERCIAL_RENT_HIGH_PRICE_PER_M2,
+        "flat_rent": FLAT_RENT_EXPENSIVE_RENT_PER_M2,
+        "flat_sale": FLAT_SALE_EXPENSIVE_PRICE_PER_M2,
+    }.get(profile)
+    if (
+        high_price_per_m2 is not None
+        and price_per_m2 is not None
+        and price_per_m2 > high_price_per_m2
+    ):
+        flags.append("suspicious_high_price_per_m2")
+        facts["high_price_per_m2_threshold"] = high_price_per_m2
+        score_cap = _min_cap(score_cap, 70)
+        verdict_cap = _strongest_verdict_cap(verdict_cap, "medium")
+
+    if area_m2 is None:
+        flags.append("missing_area_sanity_cap")
+        score_cap = _min_cap(score_cap, 70)
+        verdict_cap = _strongest_verdict_cap(verdict_cap, "review")
+
+    if freshness_status == "stale":
+        flags.append("stale_publication_sanity_cap")
+        score_cap = _min_cap(score_cap, 70)
+        verdict_cap = _strongest_verdict_cap(verdict_cap, "review")
+
+    if (
+        title_area_m2 is not None
+        and area_m2 is not None
+        and _material_area_mismatch(title_area_m2, area_m2)
+    ):
+        flags.append("area_parser_mismatch")
+        facts["parsed_area_m2"] = area_m2
+        facts["area_abs_diff_m2"] = round(abs(title_area_m2 - area_m2), 2)
+        facts["area_rel_diff"] = round(
+            abs(title_area_m2 - area_m2) / max(title_area_m2, area_m2), 4
+        )
+        score_cap = _min_cap(score_cap, 65)
+        verdict_cap = _strongest_verdict_cap(verdict_cap, "review")
+
+    if _is_storage_parking_garage_object(" ".join([title or "", text])):
+        flags.append("storage_parking_garage_object")
+        score_cap = _min_cap(score_cap, 60)
+        verdict_cap = _strongest_verdict_cap(verdict_cap, "review")
+
+    facts["score_cap"] = score_cap
+    facts["verdict_cap"] = verdict_cap
+    return CommonSanityResult(
+        flags=flags, score_cap=score_cap, verdict_cap=verdict_cap, facts=facts
+    )
+
+
+def _extract_area_m2(text: str) -> float | None:
+    match = _AREA_RE.search(text) or _AREA_CONTEXT_RE.search(text)
+    if match is None:
+        return None
+    return float(match.group(1).replace(",", "."))
+
+
+def _material_area_mismatch(title_area_m2: float, parsed_area_m2: float) -> bool:
+    abs_diff = abs(title_area_m2 - parsed_area_m2)
+    rel_diff = abs_diff / max(title_area_m2, parsed_area_m2)
+    return abs_diff >= 10 and rel_diff >= 0.25
+
+
+def _is_storage_parking_garage_object(text: str) -> bool:
+    normalized = text.casefold()
+    if _STORAGE_OBJECT_RE.search(normalized):
+        return True
+    if "парковк" in normalized and _PARKING_AMENITY_RE.search(normalized):
+        normalized = _PARKING_AMENITY_RE.sub(" ", normalized)
+    return _PARKING_OBJECT_RE.search(normalized) is not None
+
+
+def _min_cap(current: int | None, new: int) -> int:
+    return new if current is None else min(current, new)
+
+
+def _strongest_verdict_cap(current: str | None, new: str) -> str:
+    order = {"review": 0, "weak": 1, "medium": 2, "strong": 3}
+    if current is None or order[new] < order[current]:
+        return new
+    return current
+
+
+def _apply_verdict_cap(verdict: str, verdict_cap: str | None) -> str:
+    if verdict_cap is None:
+        return verdict
+    order = {"review": 0, "weak": 1, "medium": 2, "strong": 3}
+    if order[verdict] > order[verdict_cap]:
+        return verdict_cap
+    return verdict
+
+
+def _extend_flags(flags: list[str], new_flags: list[str]) -> None:
+    for flag in new_flags:
+        if flag not in flags:
+            flags.append(flag)
+
+
 class DeterministicAnalysisProvider:
     profile = "default"
     analysis_version = "mock-v1"
@@ -112,6 +283,13 @@ _RISK_DESCRIPTIONS = {
     "sublease_or_partial_area_ambiguity": "В тексте есть признаки субаренды, части площади или рабочего места внутри помещения.",
     "ambiguous_price_area": "Недостаточно данных, чтобы проверить ставку за м².",
     "no_snapshot": "Нет сохранённого снапшота объявления.",
+    "suspicious_total_price": "Общая цена выглядит слишком низкой для аренды и площади; возможна ошибка парсинга или цена за часть объекта.",
+    "suspicious_low_price_per_m2": "Ставка за м² подозрительно низкая; нужна ручная проверка цены и площади.",
+    "suspicious_high_price_per_m2": "Ставка за м² подозрительно высокая для профиля; нужна ручная проверка цены и площади.",
+    "missing_area_sanity_cap": "Без площади детерминированный скоринг не должен давать сильный вердикт.",
+    "stale_publication_sanity_cap": "Старое объявление не должно получать сильный вердикт без ручной проверки.",
+    "area_parser_mismatch": "Площадь в заголовке заметно отличается от распарсенной площади объявления.",
+    "storage_parking_garage_object": "Есть признаки, что объект является кладовкой, машиноместом, паркингом или гаражом.",
 }
 
 _ALWAYS_QUESTIONS = [
@@ -181,6 +359,7 @@ class CommercialRentDeterministicAnalysisProvider:
             "target_fit": target_fit,
         }
 
+        text = _analysis_text(listing, snapshot)
         flags = self._risk_flags(
             price=price,
             area_m2=area_m2,
@@ -188,9 +367,21 @@ class CommercialRentDeterministicAnalysisProvider:
             published_at=published_at_utc,
             freshness_status=freshness_status,
             detected_type=detected_type,
-            text=_analysis_text(listing, snapshot),
+            text=text,
             has_snapshot=snapshot is not None,
         )
+        sanity = apply_common_sanity_guards(
+            profile=self.profile,
+            title=listing.title,
+            text=text,
+            price=price,
+            area_m2=area_m2,
+            price_per_m2=price_per_m2,
+            published_at=published_at_utc,
+            freshness_status=freshness_status,
+        )
+        _extend_flags(flags, sanity.flags)
+        facts["sanity"] = sanity.facts
         risks = {
             "flags": flags,
             "items": [
@@ -200,7 +391,10 @@ class CommercialRentDeterministicAnalysisProvider:
         }
         questions = {"items": _questions_for(flags=flags, facts=facts)}
         score = self._score(facts=facts, flags=flags)
+        if sanity.score_cap is not None:
+            score = min(score, sanity.score_cap)
         verdict = _verdict(score=score, flags=flags)
+        verdict = _apply_verdict_cap(verdict, sanity.verdict_cap)
 
         return ListingAnalysisResult(
             score=score,
@@ -406,6 +600,13 @@ _FLAT_RISK_DESCRIPTIONS = {
     "no_snapshot": "Нет сохранённого снапшота объявления.",
     "suspicious_low_price": "Цена за м² ниже простого порога v0; нужна ручная проверка.",
     "expensive_price_per_m2": "Цена за м² выше простого порога v0.",
+    "suspicious_total_price": "Общая цена выглядит слишком низкой для аренды и площади; возможна ошибка парсинга или цена за часть объекта.",
+    "suspicious_low_price_per_m2": "Ставка за м² подозрительно низкая; нужна ручная проверка цены и площади.",
+    "suspicious_high_price_per_m2": "Ставка за м² подозрительно высокая для профиля; нужна ручная проверка цены и площади.",
+    "missing_area_sanity_cap": "Без площади детерминированный скоринг не должен давать сильный вердикт.",
+    "stale_publication_sanity_cap": "Старое объявление не должно получать сильный вердикт без ручной проверки.",
+    "area_parser_mismatch": "Площадь в заголовке заметно отличается от распарсенной площади объявления.",
+    "storage_parking_garage_object": "Есть признаки, что объект является кладовкой, машиноместом, паркингом или гаражом.",
 }
 
 _FLAT_ALWAYS_QUESTIONS = [
@@ -430,7 +631,7 @@ class FlatSaleDeterministicAnalysisProvider:
     target_max_price = 15_000_000.0
     target_freshness_hours = 72.0
     suspicious_low_price_per_m2 = 100_000.0
-    expensive_price_per_m2 = 350_000.0
+    expensive_price_per_m2 = FLAT_SALE_EXPENSIVE_PRICE_PER_M2
 
     def analyze(
         self, *, listing: Listing, snapshot: ListingSnapshot | None, input_hash: str
@@ -492,6 +693,18 @@ class FlatSaleDeterministicAnalysisProvider:
             price_per_m2=price_per_m2,
             has_snapshot=snapshot is not None,
         )
+        sanity = apply_common_sanity_guards(
+            profile=self.profile,
+            title=title,
+            text=_analysis_text(listing, snapshot),
+            price=price,
+            area_m2=area_m2,
+            price_per_m2=price_per_m2,
+            published_at=published_at_utc,
+            freshness_status=freshness_status,
+        )
+        _extend_flags(flags, sanity.flags)
+        facts["sanity"] = sanity.facts
         risks = {
             "flags": flags,
             "items": [
@@ -506,7 +719,10 @@ class FlatSaleDeterministicAnalysisProvider:
         }
         questions = {"items": _flat_questions_for(flags=flags)}
         score = self._score(facts=facts, flags=flags)
+        if sanity.score_cap is not None:
+            score = min(score, sanity.score_cap)
         verdict = _flat_verdict(score=score)
+        verdict = _apply_verdict_cap(verdict, sanity.verdict_cap)
 
         return ListingAnalysisResult(
             score=score,
@@ -689,6 +905,13 @@ _FLAT_RENT_RISK_DESCRIPTIONS = {
     "commission_unknown": "Не найден явный hint про комиссию или её отсутствие.",
     "utilities_unknown": "Не найден явный hint про коммунальные платежи или счётчики.",
     "furniture_unknown": "Не найден явный hint про мебель.",
+    "suspicious_total_price": "Общая цена выглядит слишком низкой для аренды и площади; возможна ошибка парсинга или цена за часть объекта.",
+    "suspicious_low_price_per_m2": "Ставка за м² подозрительно низкая; нужна ручная проверка цены и площади.",
+    "suspicious_high_price_per_m2": "Ставка за м² подозрительно высокая для профиля; нужна ручная проверка цены и площади.",
+    "missing_area_sanity_cap": "Без площади детерминированный скоринг не должен давать сильный вердикт.",
+    "stale_publication_sanity_cap": "Старое объявление не должно получать сильный вердикт без ручной проверки.",
+    "area_parser_mismatch": "Площадь в заголовке заметно отличается от распарсенной площади объявления.",
+    "storage_parking_garage_object": "Есть признаки, что объект является кладовкой, машиноместом, паркингом или гаражом.",
 }
 
 _FLAT_RENT_BASE_QUESTIONS = [
@@ -715,7 +938,7 @@ class FlatRentDeterministicAnalysisProvider:
     target_max_monthly_rent = 100_000.0
     target_freshness_hours = 72.0
     suspicious_low_rent_per_m2 = 600.0
-    expensive_rent_per_m2 = 3_000.0
+    expensive_rent_per_m2 = FLAT_RENT_EXPENSIVE_RENT_PER_M2
 
     def analyze(
         self, *, listing: Listing, snapshot: ListingSnapshot | None, input_hash: str
@@ -780,6 +1003,18 @@ class FlatRentDeterministicAnalysisProvider:
             has_snapshot=snapshot is not None,
             rental_terms_hints=rental_terms_hints,
         )
+        sanity = apply_common_sanity_guards(
+            profile=self.profile,
+            title=title,
+            text=_analysis_text(listing, snapshot),
+            price=price,
+            area_m2=area_m2,
+            price_per_m2=rent_per_m2,
+            published_at=published_at_utc,
+            freshness_status=freshness_status,
+        )
+        _extend_flags(flags, sanity.flags)
+        facts["sanity"] = sanity.facts
         risks = {
             "flags": flags,
             "items": [
@@ -798,7 +1033,10 @@ class FlatRentDeterministicAnalysisProvider:
         }
         questions = {"items": _flat_rent_questions_for(flags=flags, hints=rental_terms_hints)}
         score = self._score(facts=facts, flags=flags)
+        if sanity.score_cap is not None:
+            score = min(score, sanity.score_cap)
         verdict = _flat_verdict(score=score)
+        verdict = _apply_verdict_cap(verdict, sanity.verdict_cap)
 
         return ListingAnalysisResult(
             score=score,
