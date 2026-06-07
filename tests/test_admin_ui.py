@@ -1150,6 +1150,20 @@ def test_listing_analyses_filter_by_profile(monkeypatch):
     assert "name='profile' value='flat_sale'" in page
 
 
+def test_listing_analyses_empty_search_job_id_is_ignored(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    create_listing_analysis(Session, listing_external_id='empty-job-10-ext', search_job_id=10, input_hash='hash-empty-10')
+    create_listing_analysis(Session, listing_external_id='empty-job-11-ext', search_job_id=11, input_hash='hash-empty-11')
+
+    response = client.get('/admin/listing-analyses?search_job_id=')
+
+    assert response.status_code == 200
+    page = response.text
+    assert 'empty-job-10-ext' in page
+    assert 'empty-job-11-ext' in page
+    assert "name='search_job_id' type='number' value=''" in page
+
+
 def test_listing_analyses_filter_by_search_job_id(monkeypatch):
     client, Session = make_client(monkeypatch)
     create_listing_analysis(Session, listing_external_id='job-10-ext', search_job_id=10, input_hash='hash-10')
@@ -1160,6 +1174,21 @@ def test_listing_analyses_filter_by_search_job_id(monkeypatch):
     assert 'job-10-ext' in page
     assert 'job-11-ext' not in page
     assert "name='search_job_id' type='number' value='10'" in page
+
+
+def test_listing_analyses_invalid_search_job_id_shows_warning_and_ignores_filter(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    create_listing_analysis(Session, listing_external_id='invalid-job-10-ext', search_job_id=10, input_hash='hash-invalid-10')
+    create_listing_analysis(Session, listing_external_id='invalid-job-11-ext', search_job_id=11, input_hash='hash-invalid-11')
+
+    response = client.get('/admin/listing-analyses?search_job_id=abc')
+
+    assert response.status_code == 200
+    page = response.text
+    assert 'Ignored invalid search_job_id filter: abc. Please enter an integer.' in page
+    assert 'invalid-job-10-ext' in page
+    assert 'invalid-job-11-ext' in page
+    assert "name='search_job_id' type='number' value='abc'" in page
 
 
 def test_listing_analyses_failed_analysis_displays_error(monkeypatch):

@@ -485,7 +485,7 @@ def listing_analyses(
     profile: str | None = Query(default=None),
     status_filter: str | None = Query(default=None, alias='status'),
     verdict: str | None = Query(default=None),
-    search_job_id: int | None = Query(default=None),
+    search_job_id: str | None = Query(default=None),
     listing_external_id: str | None = Query(default=None),
     limit: int = Query(default=100),
 ):
@@ -495,6 +495,17 @@ def listing_analyses(
     normalized_status = (status_filter or '').strip() or None
     normalized_verdict = (verdict or '').strip() or None
     normalized_listing_external_id = (listing_external_id or '').strip() or None
+    search_job_id_value = (search_job_id or '').strip()
+    normalized_search_job_id: int | None = None
+    warning = ''
+    if search_job_id_value:
+        try:
+            normalized_search_job_id = int(search_job_id_value)
+        except ValueError:
+            warning = (
+                "<div class='note'>Ignored invalid search_job_id filter: "
+                f"{html.escape(search_job_id_value)}. Please enter an integer.</div>"
+            )
 
     stmt = select(ListingAnalysis, Listing).outerjoin(
         Listing,
@@ -506,8 +517,8 @@ def listing_analyses(
         stmt = stmt.where(ListingAnalysis.status == normalized_status)
     if normalized_verdict:
         stmt = stmt.where(ListingAnalysis.verdict == normalized_verdict)
-    if search_job_id is not None:
-        stmt = stmt.where(ListingAnalysis.search_job_id == search_job_id)
+    if normalized_search_job_id is not None:
+        stmt = stmt.where(ListingAnalysis.search_job_id == normalized_search_job_id)
     if normalized_listing_external_id:
         stmt = stmt.where(ListingAnalysis.listing_external_id == normalized_listing_external_id)
 
@@ -563,10 +574,10 @@ def listing_analyses(
         f"<div class='row'><label>profile<input name='profile' value='{_html_attr(normalized_profile or '')}'></label></div>"
         f"<div class='row'><label>status<input name='status' value='{_html_attr(normalized_status or '')}'></label></div>"
         f"<div class='row'><label>verdict<input name='verdict' value='{_html_attr(normalized_verdict or '')}'></label></div>"
-        f"<div class='row'><label>search_job_id<input name='search_job_id' type='number' value='{_html_attr(search_job_id or '')}'></label></div>"
+        f"<div class='row'><label>search_job_id<input name='search_job_id' type='number' value='{_html_attr(search_job_id_value)}'></label></div>"
         f"<div class='row'><label>listing_external_id<input name='listing_external_id' value='{_html_attr(normalized_listing_external_id or '')}'></label></div>"
         f"<div class='row'><label>limit<input name='limit' type='number' min='1' max='500' value='{_html_attr(effective_limit)}'></label></div>"
-        f"<button type='submit'>Apply</button></form>{empty}{table}"
+        f"<button type='submit'>Apply</button></form>{warning}{empty}{table}"
     )
     return _render_page('Listing analyses', body)
 
