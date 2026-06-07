@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from app.analysis.service import ListingAnalysisService
 from app.models.alert_sent import AlertSent
 from app.models.listing import Listing
+from app.models.listing_analysis import ListingAnalysis
 from app.models.listing_snapshot import ListingSnapshot
 from app.models.listing_search_match import ListingSearchMatch
 from app.parsers.schemas import ListingCard
@@ -2974,3 +2975,306 @@ def test_analyze_search_matches_does_not_see_removed_stale_match(
             ListingSearchMatch.listing_external_id == "existing-filtered-analysis",
         )
     ) is None
+
+
+def _enable_monitor_analysis(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.monitor_service.settings.deterministic_analysis_on_monitor", True
+    )
+
+
+def _analysis_rows(db_session):
+    return db_session.scalars(
+        select(ListingAnalysis).order_by(ListingAnalysis.id.asc())
+    ).all()
+
+
+def test_monitor_deterministic_analysis_disabled_by_default_creates_no_analysis(db_session):
+    search = make_search(db_session, filters_json={"analysis_profile": "commercial_rent"})
+    search.baseline_initialized = True
+    db_session.commit()
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("disabled-analysis", price=50.0, area_m2=60.0)]]),
+        scorer=FakeScorer(),
+        notifier=notifier,
+    )
+
+    result = run(service, db_session, search)
+
+    assert db_session.scalar(
+        select(Listing).where(Listing.external_id == "disabled-analysis")
+    ) is not None
+    assert db_session.scalar(
+        select(ListingSnapshot).where(ListingSnapshot.external_id == "disabled-analysis")
+    ) is not None
+    assert notifier.messages
+    assert scalar_count(db_session, ListingAnalysis) == 0
+    assert result["deterministic_analysis_skipped"] == 1
+    assert result["deterministic_analysis_attempted"] == 0
+
+
+def test_monitor_deterministic_analysis_skips_without_analysis_profile(
+    db_session, monkeypatch
+):
+    _enable_monitor_analysis(monkeypatch)
+    search = make_search(db_session, filters_json={"max_age_hours": 24})
+    search.baseline_initialized = True
+    db_session.commit()
+    service = MonitorService(
+        parser=FakeParser([[card("no-profile-analysis", price=50.0, area_m2=60.0)]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    result = run(service, db_session, search)
+
+    assert scalar_count(db_session, ListingAnalysis) == 0
+    assert result["deterministic_analysis_skipped"] == 1
+    assert result["deterministic_analysis_attempted"] == 0
+
+
+def test_monitor_creates_analysis_for_new_accepted_listing(db_session, monkeypatch):
+    _enable_monitor_analysis(monkeypatch)
+    search = make_search(
+        db_session,
+        filters_json={"analysis_profile": "commercial_rent", "max_age_hours": 24},
+    )
+    search.baseline_initialized = True
+    db_session.commit()
+    service = MonitorService(
+        parser=FakeParser([[card("new-analysis", price=50.0, area_m2=60.0)]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    result = run(service, db_session, search)
+
+    analyses = _analysis_rows(db_session)
+    assert result["deterministic_analysis_attempted"] == 1
+    assert result["deterministic_analysis_succeeded"] == 1
+    assert len(analyses) == 1
+    analysis = analyses[0]
+    assert analysis.profile == "commercial_rent"
+    assert analysis.context_key == f"search:{search.id}"
+    assert analysis.search_job_id == search.id
+    assert analysis.status == "success"
+    assert analysis.facts_json["analysis_config"]["max_age_hours"] == 24
+
+
+def test_monitor_baseline_can_create_analysis_without_alert(db_session, monkeypatch):
+    _enable_monitor_analysis(monkeypatch)
+    search = make_search(db_session, filters_json={"analysis_profile": "commercial_rent"})
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("baseline-analysis", price=50.0, area_m2=60.0)]]),
+        scorer=FakeScorer(),
+        notifier=notifier,
+    )
+
+    result = run(service, db_session, search)
+
+    assert db_session.scalar(
+        select(Listing).where(Listing.external_id == "baseline-analysis")
+    ) is not None
+    assert db_session.scalar(select(ListingSearchMatch)) is not None
+    assert scalar_count(db_session, ListingAnalysis) == 1
+    assert scalar_count(db_session, AlertSent) == 0
+    assert result["alerted"] == 0
+    assert notifier.messages == []
+
+
+def test_monitor_existing_listing_passing_filters_creates_analysis(
+    db_session, monkeypatch
+):
+    _enable_monitor_analysis(monkeypatch)
+    search = make_search(
+        db_session,
+        filters_json={"analysis_profile": "commercial_rent", "max_price": 100.0},
+    )
+    search.baseline_initialized = True
+    _add_existing_listing_with_retry_snapshot(db_session, "existing-analysis", price=50.0)
+    service = MonitorService(
+        parser=FakeParser(
+            [
+                [card("existing-analysis", price=50.0, area_m2=60.0)],
+                [card("existing-analysis", price=50.0, area_m2=60.0)],
+            ]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    first_result = run(service, db_session, search)
+    first_analyses = _analysis_rows(db_session)
+    second_result = run(service, db_session, search)
+
+    assert db_session.scalar(
+        select(ListingSearchMatch).where(
+            ListingSearchMatch.search_job_id == search.id,
+            ListingSearchMatch.listing_external_id == "existing-analysis",
+        )
+    ) is not None
+    analyses = _analysis_rows(db_session)
+    assert first_result["deterministic_analysis_attempted"] == 1
+    assert first_result["deterministic_analysis_succeeded"] == 1
+    assert second_result["deterministic_analysis_attempted"] == 0
+    assert second_result["deterministic_analysis_reused"] == 1
+    assert second_result["deterministic_analysis_succeeded"] == 0
+    assert len(first_analyses) == 1
+    assert len(analyses) == 1
+    assert analyses[0].id == first_analyses[0].id
+    assert analyses[0].status == "success"
+
+
+def test_monitor_existing_listing_failing_filters_creates_no_analysis(
+    db_session, monkeypatch
+):
+    _enable_monitor_analysis(monkeypatch)
+    search = make_search(
+        db_session,
+        filters_json={
+            "analysis_profile": "commercial_rent",
+            "max_price": 100.0,
+        },
+    )
+    search.baseline_initialized = True
+    _add_existing_listing_with_retry_snapshot(db_session, "existing-analysis-filtered", price=50.0)
+    db_session.commit()
+    service = MonitorService(
+        parser=FakeParser([[card("existing-analysis-filtered", price=150.0, area_m2=60.0)]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_rules"] == 1
+    assert db_session.scalar(
+        select(ListingSearchMatch).where(
+            ListingSearchMatch.search_job_id == search.id,
+            ListingSearchMatch.listing_external_id == "existing-analysis-filtered",
+        )
+    ) is None
+    assert scalar_count(db_session, ListingAnalysis) == 0
+
+
+def test_monitor_price_change_analysis_uses_new_snapshot(db_session, monkeypatch):
+    _enable_monitor_analysis(monkeypatch)
+    now = datetime(2026, 5, 17, 12, 0, 0)
+    search = make_search(db_session, filters_json={"analysis_profile": "commercial_rent"})
+    search.baseline_initialized = True
+    old_snapshot = _add_existing_listing_with_retry_snapshot(
+        db_session,
+        "price-analysis",
+        price=100.0,
+        observed_at=now - timedelta(hours=1),
+    )
+    db_session.add(
+        ListingSearchMatch(
+            search_job_id=search.id,
+            listing_external_id="price-analysis",
+            last_snapshot_id=old_snapshot.id,
+        )
+    )
+    db_session.commit()
+    service = MonitorService(
+        parser=FakeParser([[card("price-analysis", price=150.0, area_m2=60.0)]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+        now_func=lambda: now,
+    )
+
+    run(service, db_session, search)
+
+    snapshots = db_session.scalars(
+        select(ListingSnapshot)
+        .where(ListingSnapshot.external_id == "price-analysis")
+        .order_by(ListingSnapshot.id.asc())
+    ).all()
+    match = db_session.scalar(
+        select(ListingSearchMatch).where(
+            ListingSearchMatch.search_job_id == search.id,
+            ListingSearchMatch.listing_external_id == "price-analysis",
+        )
+    )
+    analysis = db_session.scalar(
+        select(ListingAnalysis).where(ListingAnalysis.context_key == f"search:{search.id}")
+    )
+    assert len(snapshots) == 2
+    assert match.last_snapshot_id == snapshots[-1].id
+    assert analysis.snapshot_id == snapshots[-1].id
+
+
+def test_monitor_analysis_config_change_creates_new_analysis_and_stales_old(
+    db_session, monkeypatch
+):
+    _enable_monitor_analysis(monkeypatch)
+    search = make_search(
+        db_session,
+        filters_json={"analysis_profile": "commercial_rent", "max_age_hours": 72},
+    )
+    search.baseline_initialized = True
+    db_session.commit()
+    service = MonitorService(
+        parser=FakeParser(
+            [
+                [card("config-analysis", price=50.0, area_m2=60.0)],
+                [card("config-analysis", price=50.0, area_m2=60.0)],
+            ]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    run(service, db_session, search)
+    first = _analysis_rows(db_session)[0]
+    search.filters_json = {"analysis_profile": "commercial_rent", "max_age_hours": 24}
+    db_session.commit()
+    run(service, db_session, search)
+
+    analyses = _analysis_rows(db_session)
+    assert len(analyses) == 2
+    old, new = analyses
+    assert old.id == first.id
+    assert old.status == "stale"
+    assert new.status == "success"
+    assert old.input_hash != new.input_hash
+
+
+def test_monitor_analysis_failure_does_not_block_alert_delivery(
+    db_session, monkeypatch
+):
+    _enable_monitor_analysis(monkeypatch)
+
+    class FailingProvider:
+        profile = "commercial_rent"
+        analysis_version = "failing-v1"
+        model_provider = "deterministic"
+        model_name = "failing"
+
+        def analyze(self, **_kwargs):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "app.services.monitor_service.get_analysis_provider",
+        lambda _profile: FailingProvider(),
+    )
+    search = make_search(db_session, filters_json={"analysis_profile": "commercial_rent"})
+    search.baseline_initialized = True
+    db_session.commit()
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("failed-analysis", price=50.0, area_m2=60.0)]]),
+        scorer=FakeScorer(),
+        notifier=notifier,
+    )
+
+    result = run(service, db_session, search)
+
+    assert result["deterministic_analysis_attempted"] == 1
+    assert result["deterministic_analysis_failed"] == 1
+    assert result["alerted"] == 1
+    assert notifier.messages
+    analysis = db_session.scalar(select(ListingAnalysis))
+    assert analysis.status == "failed"

@@ -133,6 +133,44 @@ class ListingAnalysisService:
             )
         return analyses
 
+    def analyze_search_listing(
+        self, search_job_id: int, external_id: str
+    ) -> ListingAnalysis | None:
+        search = self.search_repo.get(search_job_id)
+        if search is None:
+            return None
+        listing = self.listing_repo.get_by_external_id(external_id)
+        if listing is None:
+            return None
+        return self._analyze_existing_listing(
+            listing,
+            search_job_id=search_job_id,
+            context_key=f"search:{search_job_id}",
+            config=self._config_for_search(search_job_id),
+        )
+
+    def get_current_search_listing_analysis(
+        self, search_job_id: int, external_id: str
+    ) -> ListingAnalysis | None:
+        search = self.search_repo.get(search_job_id)
+        if search is None:
+            return None
+        listing = self.listing_repo.get_by_external_id(external_id)
+        if listing is None:
+            return None
+        context_key = f"search:{search_job_id}"
+        config = self._config_for_search(search_job_id)
+        input_hash = self._calculate_current_input_hash(
+            listing=listing, context_key=context_key, config=config
+        )
+        return self.analysis_repo.get_by_input_hash(
+            listing_external_id=listing.external_id,
+            profile=self.provider.profile,
+            analysis_version=self.provider.analysis_version,
+            input_hash=input_hash,
+            context_key=context_key,
+        )
+
     def list_search_matches_needing_analysis(
         self, search_job_id: int, limit: int
     ) -> list:
