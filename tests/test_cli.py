@@ -243,6 +243,22 @@ def test_check_analysis_profiles_reports_commercial_rent_without_warning():
     assert item["warning"] is None
 
 
+def test_check_analysis_profiles_reports_flat_rent_without_warning():
+    item = cli._search_analysis_profile_diagnostic(
+        _search_for_diagnostics(
+            source_url="https://www.avito.ru/spb/kvartiry/",
+            filters_json={
+                "analysis_profile": "flat_rent",
+                "asset_type": "flat",
+                "deal_type": "rent",
+            },
+        )
+    )
+
+    assert item["analysis_profile"] == "flat_rent"
+    assert item["warning"] is None
+
+
 def test_check_analysis_profiles_reports_unknown_profile_warning():
     item = cli._search_analysis_profile_diagnostic(
         _search_for_diagnostics(filters_json={"analysis_profile": "villa_sale"})
