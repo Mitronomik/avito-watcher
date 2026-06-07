@@ -43,6 +43,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db.base import Base
+from app.models.agent_task import AgentTask  # noqa: F401
 from app.models.alert_sent import AlertSent  # noqa: F401
 from app.models.listing_analysis import ListingAnalysis  # noqa: F401
 from app.models.listing_search_match import ListingSearchMatch  # noqa: F401
