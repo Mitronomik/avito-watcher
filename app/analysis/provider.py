@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import re
 from typing import Any, Protocol
 
+from app.analysis.config import AnalysisConfig
 from app.models.listing import Listing
 from app.models.listing_snapshot import ListingSnapshot
 
@@ -28,7 +30,12 @@ class AnalysisProvider(Protocol):
     model_name: str | None
 
     def analyze(
-        self, *, listing: Listing, snapshot: ListingSnapshot | None, input_hash: str
+        self,
+        *,
+        listing: Listing,
+        snapshot: ListingSnapshot | None,
+        input_hash: str,
+        config: AnalysisConfig | None = None,
     ) -> ListingAnalysisResult:
         """Analyze already parsed listing data without external calls."""
 
@@ -81,6 +88,9 @@ def apply_common_sanity_guards(
     price_per_m2: float | None,
     published_at: datetime | None,
     freshness_status: str,
+    suspicious_total_price: float | None = 5_000.0,
+    suspicious_low_price_per_m2: float | None = None,
+    max_price_per_m2: float | None = None,
 ) -> CommonSanityResult:
     del published_at
     flags: list[str] = []
@@ -92,24 +102,33 @@ def apply_common_sanity_guards(
         facts["title_area_m2"] = title_area_m2
 
     if profile in {"commercial_rent", "flat_rent"} and (
-        price is not None and price <= 5_000 and area_m2 is not None and area_m2 >= 10
+        suspicious_total_price is not None
+        and price is not None
+        and price <= suspicious_total_price
+        and area_m2 is not None
+        and area_m2 >= 10
     ):
         flags.append("suspicious_total_price")
         score_cap = _min_cap(score_cap, 70)
         verdict_cap = _strongest_verdict_cap(verdict_cap, "review")
 
-    if profile == "commercial_rent" and (
-        price_per_m2 is not None and price_per_m2 < 300
+    if (
+        profile == "commercial_rent"
+        and suspicious_low_price_per_m2 is not None
+        and price_per_m2 is not None
+        and price_per_m2 < suspicious_low_price_per_m2
     ):
         flags.append("suspicious_low_price_per_m2")
         score_cap = _min_cap(score_cap, 70)
         verdict_cap = _strongest_verdict_cap(verdict_cap, "review")
 
-    high_price_per_m2 = {
-        "commercial_rent": COMMERCIAL_RENT_HIGH_PRICE_PER_M2,
-        "flat_rent": FLAT_RENT_EXPENSIVE_RENT_PER_M2,
-        "flat_sale": FLAT_SALE_EXPENSIVE_PRICE_PER_M2,
-    }.get(profile)
+    high_price_per_m2 = max_price_per_m2
+    if high_price_per_m2 is None:
+        high_price_per_m2 = {
+            "commercial_rent": COMMERCIAL_RENT_HIGH_PRICE_PER_M2,
+            "flat_rent": FLAT_RENT_EXPENSIVE_RENT_PER_M2,
+            "flat_sale": FLAT_SALE_EXPENSIVE_PRICE_PER_M2,
+        }.get(profile)
     if (
         high_price_per_m2 is not None
         and price_per_m2 is not None
@@ -211,8 +230,14 @@ class DeterministicAnalysisProvider:
     model_name = "deterministic-local"
 
     def analyze(
-        self, *, listing: Listing, snapshot: ListingSnapshot | None, input_hash: str
+        self,
+        *,
+        listing: Listing,
+        snapshot: ListingSnapshot | None,
+        input_hash: str,
+        config: AnalysisConfig | None = None,
     ) -> ListingAnalysisResult:
+        config = _provider_config(self.profile, config)
         facts = {
             "external_id": listing.external_id,
             "title": listing.title,
@@ -224,6 +249,7 @@ class DeterministicAnalysisProvider:
             "has_snapshot": snapshot is not None,
             "snapshot_id": snapshot.id if snapshot is not None else None,
         }
+        _add_analysis_config_facts(facts, config)
         risks: dict[str, list[str]] = {"flags": []}
         questions: dict[str, list[str]] = {"items": []}
 
@@ -312,9 +338,16 @@ class CommercialRentDeterministicAnalysisProvider:
     target_freshness_hours = 72.0
 
     def analyze(
-        self, *, listing: Listing, snapshot: ListingSnapshot | None, input_hash: str
+        self,
+        *,
+        listing: Listing,
+        snapshot: ListingSnapshot | None,
+        input_hash: str,
+        config: AnalysisConfig | None = None,
     ) -> ListingAnalysisResult:
         del input_hash
+        config = _provider_config(self.profile, config)
+        rules = _configured_provider(self, config)
         price = (
             listing.price
             if listing.price is not None
@@ -329,7 +362,9 @@ class CommercialRentDeterministicAnalysisProvider:
             snapshot.published_at if snapshot is not None else None
         )
         published_at_utc = _as_utc(published_at)
-        freshness_status = _freshness_status(published_at_utc)
+        freshness_status = _freshness_status(
+            published_at_utc, max_age_hours=config.max_age_hours
+        )
         detected_type = _detect_commercial_type(listing, snapshot)
         price_per_m2 = (
             round(price / area_m2, 2)
@@ -337,7 +372,7 @@ class CommercialRentDeterministicAnalysisProvider:
             else None
         )
 
-        target_fit = self._target_fit(
+        target_fit = rules._target_fit(
             price=price, area_m2=area_m2, freshness_status=freshness_status
         )
         facts = {
@@ -358,9 +393,10 @@ class CommercialRentDeterministicAnalysisProvider:
             "freshness_status": freshness_status,
             "target_fit": target_fit,
         }
+        _add_analysis_config_facts(facts, config)
 
         text = _analysis_text(listing, snapshot)
-        flags = self._risk_flags(
+        flags = rules._risk_flags(
             price=price,
             area_m2=area_m2,
             address=address,
@@ -379,6 +415,9 @@ class CommercialRentDeterministicAnalysisProvider:
             price_per_m2=price_per_m2,
             published_at=published_at_utc,
             freshness_status=freshness_status,
+            suspicious_total_price=config.suspicious_total_price,
+            suspicious_low_price_per_m2=config.suspicious_low_price_per_m2,
+            max_price_per_m2=config.max_price_per_m2,
         )
         _extend_flags(flags, sanity.flags)
         facts["sanity"] = sanity.facts
@@ -390,7 +429,7 @@ class CommercialRentDeterministicAnalysisProvider:
             ],
         }
         questions = {"items": _questions_for(flags=flags, facts=facts)}
-        score = self._score(facts=facts, flags=flags)
+        score = rules._score(facts=facts, flags=flags)
         if sanity.score_cap is not None:
             score = min(score, sanity.score_cap)
         verdict = _verdict(score=score, flags=flags)
@@ -634,9 +673,16 @@ class FlatSaleDeterministicAnalysisProvider:
     expensive_price_per_m2 = FLAT_SALE_EXPENSIVE_PRICE_PER_M2
 
     def analyze(
-        self, *, listing: Listing, snapshot: ListingSnapshot | None, input_hash: str
+        self,
+        *,
+        listing: Listing,
+        snapshot: ListingSnapshot | None,
+        input_hash: str,
+        config: AnalysisConfig | None = None,
     ) -> ListingAnalysisResult:
         del input_hash
+        config = _provider_config(self.profile, config)
+        rules = _configured_provider(self, config)
         title = listing.title or (snapshot.title if snapshot is not None else "")
         price = (
             listing.price
@@ -652,7 +698,9 @@ class FlatSaleDeterministicAnalysisProvider:
             snapshot.published_at if snapshot is not None else None
         )
         published_at_utc = _as_utc(published_at)
-        freshness_status = _freshness_status(published_at_utc)
+        freshness_status = _freshness_status(
+            published_at_utc, max_age_hours=config.max_age_hours
+        )
         price_per_m2 = (
             round(price / area_m2, 2)
             if _positive(price) and _positive(area_m2)
@@ -660,7 +708,7 @@ class FlatSaleDeterministicAnalysisProvider:
         )
         floor_info = _parse_flat_floor(title)
         detected_flat_type = _detect_flat_type(listing, snapshot)
-        target_fit = self._target_fit(
+        target_fit = rules._target_fit(
             price=price, area_m2=area_m2, freshness_status=freshness_status
         )
         facts = {
@@ -682,7 +730,8 @@ class FlatSaleDeterministicAnalysisProvider:
             "floor_info": floor_info,
             "target_fit": target_fit,
         }
-        flags = self._risk_flags(
+        _add_analysis_config_facts(facts, config)
+        flags = rules._risk_flags(
             price=price,
             area_m2=area_m2,
             address=address,
@@ -702,6 +751,9 @@ class FlatSaleDeterministicAnalysisProvider:
             price_per_m2=price_per_m2,
             published_at=published_at_utc,
             freshness_status=freshness_status,
+            suspicious_total_price=config.suspicious_total_price,
+            suspicious_low_price_per_m2=config.suspicious_low_price_per_m2,
+            max_price_per_m2=config.max_price_per_m2,
         )
         _extend_flags(flags, sanity.flags)
         facts["sanity"] = sanity.facts
@@ -712,13 +764,13 @@ class FlatSaleDeterministicAnalysisProvider:
                 for flag in flags
             ],
             "assumptions": {
-                "suspicious_low_price_per_m2": self.suspicious_low_price_per_m2,
-                "expensive_price_per_m2": self.expensive_price_per_m2,
+                "suspicious_low_price_per_m2": rules.suspicious_low_price_per_m2,
+                "expensive_price_per_m2": rules.expensive_price_per_m2,
                 "note": "Пороги flat-sale-v0 являются простыми допущениями, а не рыночной оценкой.",
             },
         }
         questions = {"items": _flat_questions_for(flags=flags)}
-        score = self._score(facts=facts, flags=flags)
+        score = rules._score(facts=facts, flags=flags)
         if sanity.score_cap is not None:
             score = min(score, sanity.score_cap)
         verdict = _flat_verdict(score=score)
@@ -941,9 +993,16 @@ class FlatRentDeterministicAnalysisProvider:
     expensive_rent_per_m2 = FLAT_RENT_EXPENSIVE_RENT_PER_M2
 
     def analyze(
-        self, *, listing: Listing, snapshot: ListingSnapshot | None, input_hash: str
+        self,
+        *,
+        listing: Listing,
+        snapshot: ListingSnapshot | None,
+        input_hash: str,
+        config: AnalysisConfig | None = None,
     ) -> ListingAnalysisResult:
         del input_hash
+        config = _provider_config(self.profile, config)
+        rules = _configured_provider(self, config)
         title = listing.title or (snapshot.title if snapshot is not None else "")
         price = (
             listing.price
@@ -959,7 +1018,9 @@ class FlatRentDeterministicAnalysisProvider:
             snapshot.published_at if snapshot is not None else None
         )
         published_at_utc = _as_utc(published_at)
-        freshness_status = _freshness_status(published_at_utc)
+        freshness_status = _freshness_status(
+            published_at_utc, max_age_hours=config.max_age_hours
+        )
         rent_per_m2 = (
             round(price / area_m2, 2)
             if _positive(price) and _positive(area_m2)
@@ -968,7 +1029,7 @@ class FlatRentDeterministicAnalysisProvider:
         floor_info = _parse_flat_floor(title)
         detected_flat_type = _detect_flat_type(listing, snapshot)
         rental_terms_hints = _flat_rent_terms_hints(listing, snapshot)
-        target_fit = self._target_fit(
+        target_fit = rules._target_fit(
             price=price, area_m2=area_m2, freshness_status=freshness_status
         )
         facts = {
@@ -991,7 +1052,8 @@ class FlatRentDeterministicAnalysisProvider:
             "rental_terms_hints": rental_terms_hints,
             "target_fit": target_fit,
         }
-        flags = self._risk_flags(
+        _add_analysis_config_facts(facts, config)
+        flags = rules._risk_flags(
             price=price,
             area_m2=area_m2,
             address=address,
@@ -1012,6 +1074,9 @@ class FlatRentDeterministicAnalysisProvider:
             price_per_m2=rent_per_m2,
             published_at=published_at_utc,
             freshness_status=freshness_status,
+            suspicious_total_price=config.suspicious_total_price,
+            suspicious_low_price_per_m2=config.suspicious_low_price_per_m2,
+            max_price_per_m2=config.max_price_per_m2,
         )
         _extend_flags(flags, sanity.flags)
         facts["sanity"] = sanity.facts
@@ -1022,17 +1087,17 @@ class FlatRentDeterministicAnalysisProvider:
                 for flag in flags
             ],
             "assumptions": {
-                "target_min_area_m2": self.target_min_area_m2,
-                "target_max_area_m2": self.target_max_area_m2,
-                "target_max_monthly_rent": self.target_max_monthly_rent,
-                "target_freshness_hours": self.target_freshness_hours,
-                "suspicious_low_rent_per_m2": self.suspicious_low_rent_per_m2,
-                "expensive_rent_per_m2": self.expensive_rent_per_m2,
+                "target_min_area_m2": rules.target_min_area_m2,
+                "target_max_area_m2": rules.target_max_area_m2,
+                "target_max_monthly_rent": rules.target_max_monthly_rent,
+                "target_freshness_hours": rules.target_freshness_hours,
+                "suspicious_low_rent_per_m2": rules.suspicious_low_rent_per_m2,
+                "expensive_rent_per_m2": rules.expensive_rent_per_m2,
                 "note": "Пороги flat-rent-v0 являются простыми допущениями, а не рыночной оценкой.",
             },
         }
         questions = {"items": _flat_rent_questions_for(flags=flags, hints=rental_terms_hints)}
-        score = self._score(facts=facts, flags=flags)
+        score = rules._score(facts=facts, flags=flags)
         if sanity.score_cap is not None:
             score = min(score, sanity.score_cap)
         verdict = _flat_verdict(score=score)
@@ -1200,6 +1265,44 @@ class FlatRentDeterministicAnalysisProvider:
             score -= 5
         return max(0, min(100, score))
 
+
+def _provider_config(profile: str, config: AnalysisConfig | None) -> AnalysisConfig:
+    return config or AnalysisConfig.from_search_filters(profile=profile)
+
+
+def _configured_provider(provider: Any, config: AnalysisConfig) -> Any:
+    configured = copy(provider)
+    _apply_analysis_config(configured, config)
+    return configured
+
+
+def _apply_analysis_config(provider: Any, config: AnalysisConfig) -> None:
+    if config.min_area_m2 is not None:
+        provider.target_min_area_m2 = config.min_area_m2
+    if config.max_area_m2 is not None:
+        provider.target_max_area_m2 = config.max_area_m2
+    if config.max_price is not None:
+        if hasattr(provider, "target_max_monthly_rent"):
+            provider.target_max_monthly_rent = config.max_price
+        else:
+            provider.target_max_price = config.max_price
+    provider.target_freshness_hours = config.max_age_hours
+    if config.suspicious_low_price_per_m2 is not None:
+        if hasattr(provider, "suspicious_low_rent_per_m2"):
+            provider.suspicious_low_rent_per_m2 = config.suspicious_low_price_per_m2
+        else:
+            provider.suspicious_low_price_per_m2 = config.suspicious_low_price_per_m2
+    if config.max_price_per_m2 is not None:
+        if hasattr(provider, "expensive_rent_per_m2"):
+            provider.expensive_rent_per_m2 = config.max_price_per_m2
+        else:
+            provider.expensive_price_per_m2 = config.max_price_per_m2
+
+
+def _add_analysis_config_facts(facts: dict, config: AnalysisConfig) -> None:
+    facts["analysis_config"] = config.facts_metadata()
+
+
 def get_analysis_provider(profile: str) -> AnalysisProvider:
     if profile == "default":
         return DeterministicAnalysisProvider()
@@ -1224,15 +1327,17 @@ def _as_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(UTC)
 
 
-def _freshness_status(published_at: datetime | None) -> str:
+def _freshness_status(
+    published_at: datetime | None, *, max_age_hours: float = 72.0
+) -> str:
     if published_at is None:
         return "unknown"
     age_hours = (datetime.now(UTC) - published_at).total_seconds() / 3600
+    if age_hours > max_age_hours:
+        return "stale"
     if age_hours <= 24:
         return "fresh"
-    if age_hours <= 72:
-        return "recent"
-    return "stale"
+    return "recent"
 
 
 def _analysis_text(listing: Listing, snapshot: ListingSnapshot | None) -> str:

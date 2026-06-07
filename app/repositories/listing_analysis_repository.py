@@ -43,6 +43,25 @@ class ListingAnalysisRepository:
             .order_by(ListingSnapshot.observed_at.desc(), ListingSnapshot.id.desc())
         )
 
+    def get_by_input_hash(
+        self,
+        *,
+        listing_external_id: str,
+        profile: str,
+        analysis_version: str,
+        input_hash: str,
+        context_key: str,
+    ) -> ListingAnalysis | None:
+        return self.db.scalar(
+            select(ListingAnalysis).where(
+                ListingAnalysis.listing_external_id == listing_external_id,
+                ListingAnalysis.profile == profile,
+                ListingAnalysis.analysis_version == analysis_version,
+                ListingAnalysis.input_hash == input_hash,
+                ListingAnalysis.context_key == context_key,
+            )
+        )
+
     def create_or_update_analysis(
         self,
         *,

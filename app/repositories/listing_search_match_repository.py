@@ -4,7 +4,6 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models.listing_analysis import ListingAnalysis
 from app.models.listing_search_match import ListingSearchMatch
 
 
@@ -62,29 +61,11 @@ class ListingSearchMatchRepository:
         self.db.flush()
         return match
 
-    def list_matches_without_analysis(
-        self, search_job_id: int, profile: str, analysis_version: str, limit: int
-    ) -> list[ListingSearchMatch]:
-        if limit <= 0:
-            return []
-        context_key = f"search:{search_job_id}"
-        analyzed_external_ids = (
-            select(ListingAnalysis.listing_external_id)
-            .where(
-                ListingAnalysis.profile == profile,
-                ListingAnalysis.analysis_version == analysis_version,
-                ListingAnalysis.context_key == context_key,
-            )
-            .distinct()
-        )
+    def list_matches_for_search(self, search_job_id: int) -> list[ListingSearchMatch]:
         stmt = (
             select(ListingSearchMatch)
-            .where(
-                ListingSearchMatch.search_job_id == search_job_id,
-                ListingSearchMatch.listing_external_id.not_in(analyzed_external_ids),
-            )
+            .where(ListingSearchMatch.search_job_id == search_job_id)
             .order_by(ListingSearchMatch.first_seen_at.asc(), ListingSearchMatch.id.asc())
-            .limit(limit)
         )
         return list(self.db.scalars(stmt).all())
 

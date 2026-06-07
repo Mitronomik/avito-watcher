@@ -17,7 +17,6 @@ from app.parsers.proxy_manager import ProxyManager
 from app.parsers.proxy_url import validate_proxy_urls
 from app.db.init_db import init_db
 from app.db.session import SessionLocal
-from app.repositories.listing_search_match_repository import ListingSearchMatchRepository
 from app.repositories.search_repository import SearchRepository
 from app.services.monitor_service import MonitorService, runtime_diagnostics
 
@@ -462,11 +461,8 @@ def _skipped_search_result(search, profile: str | None, skip_reason: str) -> dic
 
 
 def _pending_search_matches(db, search, provider, limit: int) -> list:
-    return ListingSearchMatchRepository(db).list_matches_without_analysis(
-        search_job_id=search.id,
-        profile=provider.profile,
-        analysis_version=provider.analysis_version,
-        limit=limit,
+    return ListingAnalysisService(db, provider=provider).list_search_matches_needing_analysis(
+        search_job_id=search.id, limit=limit
     )
 
 
