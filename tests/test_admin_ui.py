@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.db.base import Base
 from app.main import create_app
 from app.models.listing import Listing
+from app.models.listing_analysis import ListingAnalysis
 from app.models.search_job import SearchJob
 from app.parsers.errors import ParserError, ParserErrorType
 
@@ -70,6 +71,34 @@ def create_listing(Session, **kwargs):
         s.commit()
         s.refresh(listing)
         return listing.id
+
+
+
+def create_listing_analysis(Session, **kwargs):
+    with Session() as s:
+        analysis = ListingAnalysis(
+            listing_external_id=kwargs.get('listing_external_id', 'ext-default'),
+            search_job_id=kwargs.get('search_job_id'),
+            context_key=kwargs.get('context_key', 'global'),
+            profile=kwargs.get('profile', 'default'),
+            status=kwargs.get('status', 'success'),
+            analysis_version=kwargs.get('analysis_version', 'det-v1'),
+            input_hash=kwargs.get('input_hash', f"hash-{kwargs.get('listing_external_id', 'ext-default')}-{kwargs.get('profile', 'default')}"),
+            score=kwargs.get('score'),
+            verdict=kwargs.get('verdict'),
+            facts_json=kwargs.get('facts_json', {}),
+            risks_json=kwargs.get('risks_json', {}),
+            questions_json=kwargs.get('questions_json', {}),
+            report_md=kwargs.get('report_md', ''),
+            error_type=kwargs.get('error_type'),
+            error_message=kwargs.get('error_message'),
+            created_at=kwargs.get('created_at', datetime(2026, 1, 1, 0, 0, 0)),
+            updated_at=kwargs.get('updated_at', datetime(2026, 1, 1, 0, 0, 0)),
+        )
+        s.add(analysis)
+        s.commit()
+        s.refresh(analysis)
+        return analysis.id
 
 
 def test_list_and_new(monkeypatch):
@@ -1025,3 +1054,178 @@ def test_admin_worker_status_block_renders_crash_retry_counters(monkeypatch, tmp
     assert "session_evict_count=10" in page
     assert "session_close_failure_count=11" in page
     assert "layout_changed_hint=False" in page
+
+
+
+def test_listing_analyses_page_renders_table_and_listing_link(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    create_listing(
+        Session,
+        external_id='analysis-ext',
+        title='Analysis listing',
+        price=123456.0,
+        area_m2=42.5,
+        address='Analysis street',
+        url='https://www.avito.ru/analysis-ext',
+    )
+    create_listing_analysis(
+        Session,
+        listing_external_id='analysis-ext',
+        search_job_id=7,
+        context_key='search:7',
+        profile='flat_rent',
+        status='success',
+        analysis_version='det-flat-rent-v1',
+        score=0.82,
+        verdict='interesting',
+        report_md='## Report\nLooks good',
+        facts_json={'rooms': 2},
+        risks_json={'risk': 'low'},
+        questions_json={'ask': 'documents'},
+    )
+
+    page = client.get('/admin/listing-analyses').text
+
+    for heading in (
+        '<th>id</th>',
+        '<th>search_job_id</th>',
+        '<th>context_key</th>',
+        '<th>listing_external_id</th>',
+        '<th>profile</th>',
+        '<th>analysis_version</th>',
+        '<th>status</th>',
+        '<th>score</th>',
+        '<th>verdict</th>',
+        '<th>created_at</th>',
+        '<th>updated_at</th>',
+    ):
+        assert heading in page
+    assert 'flat_rent' in page
+    assert 'success' in page
+    assert '0.82' in page
+    assert 'interesting' in page
+    assert 'Analysis listing' in page
+    assert '123456.0' in page
+    assert '42.5' in page
+    assert 'Analysis street' in page
+    assert 'https://www.avito.ru/analysis-ext' in page
+    assert "target='_blank'" in page
+    assert "rel='noopener noreferrer'" in page
+
+
+def test_listing_analyses_report_detail_pre_blocks(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    create_listing_analysis(
+        Session,
+        listing_external_id='detail-ext',
+        report_md='### Detailed report\nLine & more',
+        facts_json={'price': 100},
+        risks_json={'flood': False},
+        questions_json={'seller': ['why selling?']},
+    )
+
+    page = client.get('/admin/listing-analyses').text
+
+    assert '<details>' in page
+    assert '<h4>report_md</h4><pre>### Detailed report' in page
+    assert 'Line &amp; more' in page
+    assert '<h4>facts_json</h4><pre>' in page
+    assert '&quot;price&quot;: 100' in page
+    assert '<h4>risks_json</h4><pre>' in page
+    assert '&quot;flood&quot;: false' in page
+    assert '<h4>questions_json</h4><pre>' in page
+    assert 'why selling?' in page
+
+
+def test_listing_analyses_filter_by_profile(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    create_listing_analysis(Session, listing_external_id='flat-ext', profile='flat_sale', input_hash='hash-flat')
+    create_listing_analysis(Session, listing_external_id='rent-ext', profile='flat_rent', input_hash='hash-rent')
+
+    page = client.get('/admin/listing-analyses?profile=flat_sale').text
+
+    assert 'flat-ext' in page
+    assert 'flat_sale' in page
+    assert 'rent-ext' not in page
+    assert "name='profile' value='flat_sale'" in page
+
+
+def test_listing_analyses_empty_search_job_id_is_ignored(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    create_listing_analysis(Session, listing_external_id='empty-job-10-ext', search_job_id=10, input_hash='hash-empty-10')
+    create_listing_analysis(Session, listing_external_id='empty-job-11-ext', search_job_id=11, input_hash='hash-empty-11')
+
+    response = client.get('/admin/listing-analyses?search_job_id=')
+
+    assert response.status_code == 200
+    page = response.text
+    assert 'empty-job-10-ext' in page
+    assert 'empty-job-11-ext' in page
+    assert "name='search_job_id' type='number' value=''" in page
+
+
+def test_listing_analyses_filter_by_search_job_id(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    create_listing_analysis(Session, listing_external_id='job-10-ext', search_job_id=10, input_hash='hash-10')
+    create_listing_analysis(Session, listing_external_id='job-11-ext', search_job_id=11, input_hash='hash-11')
+
+    page = client.get('/admin/listing-analyses?search_job_id=10').text
+
+    assert 'job-10-ext' in page
+    assert 'job-11-ext' not in page
+    assert "name='search_job_id' type='number' value='10'" in page
+
+
+def test_listing_analyses_invalid_search_job_id_shows_warning_and_ignores_filter(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    create_listing_analysis(Session, listing_external_id='invalid-job-10-ext', search_job_id=10, input_hash='hash-invalid-10')
+    create_listing_analysis(Session, listing_external_id='invalid-job-11-ext', search_job_id=11, input_hash='hash-invalid-11')
+
+    response = client.get('/admin/listing-analyses?search_job_id=abc')
+
+    assert response.status_code == 200
+    page = response.text
+    assert 'Ignored invalid search_job_id filter: abc. Please enter an integer.' in page
+    assert 'invalid-job-10-ext' in page
+    assert 'invalid-job-11-ext' in page
+    assert "name='search_job_id' type='number' value='abc'" in page
+
+
+def test_listing_analyses_failed_analysis_displays_error(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    create_listing_analysis(
+        Session,
+        listing_external_id='failed-ext',
+        status='failed',
+        score=None,
+        verdict=None,
+        error_type='ProviderError',
+        error_message='deterministic provider failed safely',
+    )
+
+    page = client.get('/admin/listing-analyses').text
+
+    assert 'failed-ext' in page
+    assert 'failed' in page
+    assert 'ProviderError' in page
+    assert 'deterministic provider failed safely' in page
+
+
+def test_listing_analyses_page_is_read_only_and_has_no_runtime_side_effects(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    create_listing_analysis(Session, listing_external_id='safe-ext')
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError('admin listing analyses page must not start parser, worker, or notifier flows')
+
+    monkeypatch.setattr('app.admin._build_parser', fail_if_called)
+    monkeypatch.setattr('app.admin.MonitorService.run_once', fail_if_called)
+
+    page = client.get('/admin/listing-analyses').text
+
+    assert 'safe-ext' in page
+    assert "method='post'" not in page
+    assert '>delete<' not in page.lower()
+    assert '>edit<' not in page.lower()
+    assert '>run once<' not in page.lower()
+    assert 'does not execute, edit, delete, or re-run analyses' in page
