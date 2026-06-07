@@ -1211,3 +1211,248 @@ def test_analyze_search_matches_uses_flat_rent_profile(db_session):
     assert analyses[0].profile == "flat_rent"
     assert analyses[0].analysis_version == "flat-rent-v0"
     assert analyses[0].facts_json["detected_flat_type"] == "one_room"
+
+
+def _prepare_cli_db(monkeypatch, db_session):
+    db_session.commit()
+    SessionLocal = sessionmaker(
+        bind=db_session.get_bind(), autoflush=False, autocommit=False
+    )
+    monkeypatch.setattr(cli, "init_db", lambda: None)
+    monkeypatch.setattr(cli, "SessionLocal", SessionLocal)
+
+
+def _run_analyze_all(capsys, **kwargs):
+    args = Namespace(
+        limit_per_search=kwargs.get("limit_per_search", 5),
+        include_inactive=kwargs.get("include_inactive", False),
+        profile=kwargs.get("profile", ""),
+        dry_run=kwargs.get("dry_run", False),
+    )
+    cli.cmd_analyze_all_active_searches(args)
+    return json.loads(capsys.readouterr().out)
+
+
+def _search_result(output, search_id):
+    return next(item for item in output["results"] if item["search_id"] == search_id)
+
+
+def test_cli_analyze_all_active_searches_processes_only_active_by_default(
+    db_session, monkeypatch, capsys
+):
+    active = _search(db_session, name="active-all", filters_json={"analysis_profile": "flat_sale"})
+    inactive = _search(
+        db_session, name="inactive-all", filters_json={"analysis_profile": "flat_sale"}
+    )
+    inactive.is_active = False
+    _listing(db_session, external_id="active-all-1", title="1-к квартира 42 м²")
+    _listing(db_session, external_id="inactive-all-1", title="1-к квартира 39 м²")
+    match_repo = ListingSearchMatchRepository(db_session)
+    match_repo.upsert_match(active.id, "active-all-1")
+    match_repo.upsert_match(inactive.id, "inactive-all-1")
+    _prepare_cli_db(monkeypatch, db_session)
+
+    output = _run_analyze_all(capsys)
+
+    assert output["ok"] is True
+    assert output["searches_total"] == 2
+    assert output["searches_considered"] == 1
+    assert output["searches_processed"] == 1
+    assert output["analyses_created_total"] == 1
+    assert _search_result(output, active.id)["status"] == "processed"
+    inactive_result = _search_result(output, inactive.id)
+    assert inactive_result["status"] == "skipped"
+    assert inactive_result["skip_reason"] == "inactive"
+
+
+def test_cli_analyze_all_active_searches_include_inactive_processes_inactive(
+    db_session, monkeypatch, capsys
+):
+    inactive = _search(
+        db_session,
+        name="inactive-included",
+        filters_json={"analysis_profile": "commercial_rent"},
+    )
+    inactive.is_active = False
+    _listing(db_session, external_id="inactive-included-1", title="Офис 60 м²")
+    ListingSearchMatchRepository(db_session).upsert_match(inactive.id, "inactive-included-1")
+    _prepare_cli_db(monkeypatch, db_session)
+
+    output = _run_analyze_all(capsys, include_inactive=True)
+
+    result = _search_result(output, inactive.id)
+    assert result["status"] == "processed"
+    assert result["count"] == 1
+    assert output["include_inactive"] is True
+
+
+def test_cli_analyze_all_active_searches_skips_missing_unknown_and_empty_pending(
+    db_session, monkeypatch, capsys
+):
+    missing = _search(db_session, name="missing-all", filters_json={})
+    unknown = _search(db_session, name="unknown-all", filters_json={"analysis_profile": "villa_sale"})
+    empty = _search(db_session, name="empty-all", filters_json={"analysis_profile": "flat_sale"})
+    _listing(db_session, external_id="unknown-all-1")
+    ListingSearchMatchRepository(db_session).upsert_match(unknown.id, "unknown-all-1")
+    _prepare_cli_db(monkeypatch, db_session)
+
+    output = _run_analyze_all(capsys)
+
+    assert output["ok"] is True
+    assert output["searches_total"] == 3
+    assert output["searches_considered"] == 3
+    assert _search_result(output, missing.id)["skip_reason"] == "missing_analysis_profile"
+    assert _search_result(output, unknown.id)["skip_reason"] == "unknown_analysis_profile"
+    assert _search_result(output, empty.id)["skip_reason"] == "no_pending_matches"
+
+
+def test_cli_analyze_all_active_searches_profile_filter(db_session, monkeypatch, capsys):
+    flat = _search(db_session, name="profile-flat", filters_json={"analysis_profile": "flat_sale"})
+    rent = _search(db_session, name="profile-rent", filters_json={"analysis_profile": "flat_rent"})
+    _listing(db_session, external_id="profile-flat-1", title="1-к квартира 42 м²")
+    _listing(db_session, external_id="profile-rent-1", title="1-к квартира 42 м²")
+    match_repo = ListingSearchMatchRepository(db_session)
+    match_repo.upsert_match(flat.id, "profile-flat-1")
+    match_repo.upsert_match(rent.id, "profile-rent-1")
+    _prepare_cli_db(monkeypatch, db_session)
+
+    output = _run_analyze_all(capsys, profile="flat_rent")
+
+    assert output["profile_filter"] == "flat_rent"
+    assert output["searches_total"] == 2
+    assert output["searches_considered"] == 1
+    assert _search_result(output, flat.id)["skip_reason"] == "profile_filter_mismatch"
+    assert _search_result(output, rent.id)["status"] == "processed"
+
+
+def test_cli_analyze_all_active_searches_dry_run_does_not_create_analyses(
+    db_session, monkeypatch, capsys
+):
+    search = _search(db_session, name="dry-all", filters_json={"analysis_profile": "flat_sale"})
+    _listing(db_session, external_id="dry-all-1", title="1-к квартира 42 м²")
+    ListingSearchMatchRepository(db_session).upsert_match(search.id, "dry-all-1")
+    _prepare_cli_db(monkeypatch, db_session)
+
+    output = _run_analyze_all(capsys, dry_run=True)
+
+    result = _search_result(output, search.id)
+    assert output["dry_run"] is True
+    assert output["ok"] is True
+    assert result["status"] == "dry_run"
+    assert result["count"] == 1
+    assert output["analyses_created_total"] == 0
+    assert db_session.scalar(select(ListingAnalysis)) is None
+
+
+def test_cli_analyze_all_active_searches_zero_limit_validation(
+    db_session, monkeypatch, capsys
+):
+    search = _search(
+        db_session, name="zero-limit", filters_json={"analysis_profile": "flat_sale"}
+    )
+    _listing(db_session, external_id="zero-limit-1", title="1-к квартира 42 м²")
+    ListingSearchMatchRepository(db_session).upsert_match(search.id, "zero-limit-1")
+    _prepare_cli_db(monkeypatch, db_session)
+    monkeypatch.setattr(
+        cli,
+        "init_db",
+        lambda: (_ for _ in ()).throw(AssertionError("init_db used")),
+    )
+
+    output = _run_analyze_all(capsys, limit_per_search=0)
+
+    assert output == {
+        "ok": False,
+        "error_type": "ValidationError",
+        "error": "limit_per_search must be a positive integer",
+        "limit_per_search": 0,
+    }
+    assert db_session.scalar(select(ListingAnalysis)) is None
+
+
+def test_cli_analyze_all_active_searches_negative_limit_validation(
+    db_session, monkeypatch, capsys
+):
+    search = _search(
+        db_session, name="negative-limit", filters_json={"analysis_profile": "flat_sale"}
+    )
+    _listing(db_session, external_id="negative-limit-1", title="1-к квартира 42 м²")
+    ListingSearchMatchRepository(db_session).upsert_match(search.id, "negative-limit-1")
+    _prepare_cli_db(monkeypatch, db_session)
+    monkeypatch.setattr(
+        cli,
+        "init_db",
+        lambda: (_ for _ in ()).throw(AssertionError("init_db used")),
+    )
+
+    output = _run_analyze_all(capsys, limit_per_search=-1)
+
+    assert output == {
+        "ok": False,
+        "error_type": "ValidationError",
+        "error": "limit_per_search must be a positive integer",
+        "limit_per_search": -1,
+    }
+    assert db_session.scalar(select(ListingAnalysis)) is None
+
+
+def test_cli_analyze_all_active_searches_limit_per_search(db_session, monkeypatch, capsys):
+    search_one = _search(db_session, name="limit-one", filters_json={"analysis_profile": "flat_sale"})
+    search_two = _search(db_session, name="limit-two", filters_json={"analysis_profile": "flat_sale"})
+    match_repo = ListingSearchMatchRepository(db_session)
+    for search in (search_one, search_two):
+        for idx in range(3):
+            external_id = f"{search.name}-{idx}"
+            _listing(db_session, external_id=external_id, title="1-к квартира 42 м²")
+            match_repo.upsert_match(search.id, external_id)
+    _prepare_cli_db(monkeypatch, db_session)
+
+    output = _run_analyze_all(capsys, limit_per_search=2)
+
+    assert output["limit_per_search"] == 2
+    assert _search_result(output, search_one.id)["count"] == 2
+    assert _search_result(output, search_two.id)["count"] == 2
+    assert output["analyses_created_total"] == 4
+
+
+def test_cli_analyze_all_active_searches_summary_shape(db_session, monkeypatch, capsys):
+    search = _search(db_session, name="shape-all", filters_json={"analysis_profile": "flat_sale"})
+    _listing(db_session, external_id="shape-all-1", title="1-к квартира 42 м²")
+    ListingSearchMatchRepository(db_session).upsert_match(search.id, "shape-all-1")
+    _prepare_cli_db(monkeypatch, db_session)
+
+    output = _run_analyze_all(capsys)
+
+    assert set(output) == {
+        "ok",
+        "limit_per_search",
+        "dry_run",
+        "include_inactive",
+        "profile_filter",
+        "searches_total",
+        "searches_considered",
+        "searches_processed",
+        "searches_skipped",
+        "searches_failed",
+        "analyses_created_total",
+        "results",
+    }
+    result = _search_result(output, search.id)
+    assert result["status"] == "processed"
+    assert result["analyses"][0]["context_key"] == f"search:{search.id}"
+
+
+def test_cli_analyze_all_active_searches_does_not_use_monitor_parser_or_notifiers(
+    db_session, monkeypatch, capsys
+):
+    search = _search(db_session, name="safe-all", filters_json={"analysis_profile": "flat_sale"})
+    _listing(db_session, external_id="safe-all-1", title="1-к квартира 42 м²")
+    ListingSearchMatchRepository(db_session).upsert_match(search.id, "safe-all-1")
+    _prepare_cli_db(monkeypatch, db_session)
+    monkeypatch.setattr(cli, "MonitorService", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("monitor used")))
+    monkeypatch.setattr(cli, "_build_parser", lambda: (_ for _ in ()).throw(AssertionError("parser used")))
+
+    output = _run_analyze_all(capsys)
+
+    assert output["ok"] is True
+    assert _search_result(output, search.id)["status"] == "processed"

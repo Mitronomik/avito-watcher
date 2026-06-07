@@ -222,6 +222,12 @@ python3 -m app.cli analyze-search-matches --search-id <flat_sale_search_id> --li
 python3 -m app.cli analyze-search-matches --search-id <flat_rent_search_id> --limit 5
 ```
 
+Run deterministic search-aware analysis manually for all active searches that have an `analysis_profile`:
+
+```bash
+python3 -m app.cli analyze-all-active-searches --limit-per-search 5
+```
+
 Inspect recent results in the database:
 
 ```sql
@@ -236,7 +242,9 @@ Operational notes:
 
 - `listing_search_matches` are created by worker cycles after PR #136 deployment.
 - Old listings will not automatically have matches unless a backfill is added later.
-- First production rollout should use small `--limit` values.
+- `analyze-all-active-searches` is a manual/operational command; it is not scheduled and is not run automatically by the worker.
+- Analysis commands do not run the parser, do not send alerts, do not call LLMs, and do not access the web or external APIs; they only analyze existing `listing_search_matches` with deterministic local providers.
+- First production use should start with small `--limit` / `--limit-per-search` values such as `5`.
 - Analysis failures must not affect monitor, parser, or notifiers.
 
 ## Ручной запуск мониторинга
