@@ -383,6 +383,96 @@ class MonitorService:
         return {key: stats.get(key) for key in PARSER_DIAGNOSTIC_KEYS}
 
 
+    @staticmethod
+    def _empty_analysis_payload_fields() -> dict:
+        return {
+            "analysis_profile": None,
+            "analysis_status": None,
+            "analysis_score": None,
+            "analysis_verdict": None,
+            "analysis_version": None,
+            "analysis_input_hash": None,
+            "analysis_context_key": None,
+            "analysis_risk_flags": [],
+            "analysis_questions": [],
+            "analysis_report_md": "",
+            "analysis_config_hash": None,
+            "analysis_config": {},
+            "analysis_price_per_m2": None,
+            "analysis_facts_compact": {},
+            "recommended_next_action": None,
+        }
+
+    @staticmethod
+    def _recommended_next_action(analysis_verdict: str | None) -> str | None:
+        if analysis_verdict == "strong":
+            return "review_listing"
+        if analysis_verdict in {"review", "medium"}:
+            return "manual_review"
+        if analysis_verdict == "weak":
+            return "skip_or_low_priority"
+        return None
+
+    def _analysis_payload_fields(self, analysis: ListingAnalysis | None) -> dict:
+        fields = self._empty_analysis_payload_fields()
+        if analysis is None:
+            return fields
+
+        facts_json = analysis.facts_json if isinstance(analysis.facts_json, dict) else {}
+        risks_json = analysis.risks_json if isinstance(analysis.risks_json, dict) else {}
+        questions_json = (
+            analysis.questions_json if isinstance(analysis.questions_json, dict) else {}
+        )
+        analysis_config = facts_json.get("analysis_config")
+        if not isinstance(analysis_config, dict):
+            analysis_config = {}
+        risk_flags = risks_json.get("flags")
+        if not isinstance(risk_flags, list):
+            risk_flags = []
+        questions = questions_json.get("items")
+        if not isinstance(questions, list):
+            questions = []
+        analysis_price_per_m2 = facts_json.get("price_per_m2")
+        if analysis_price_per_m2 is None:
+            analysis_price_per_m2 = facts_json.get("rent_per_m2")
+        facts_compact = {
+            key: facts_json[key]
+            for key in (
+                "price_per_m2",
+                "rent_per_m2",
+                "freshness_status",
+                "target_fit",
+                "detected_type",
+                "detected_flat_type",
+                "area_m2",
+                "price",
+                "published_at",
+                "analysis_config",
+            )
+            if key in facts_json
+        }
+
+        fields.update(
+            {
+                "analysis_profile": analysis.profile,
+                "analysis_status": analysis.status,
+                "analysis_score": analysis.score,
+                "analysis_verdict": analysis.verdict,
+                "analysis_version": analysis.analysis_version,
+                "analysis_input_hash": analysis.input_hash,
+                "analysis_context_key": analysis.context_key,
+                "analysis_risk_flags": risk_flags,
+                "analysis_questions": questions,
+                "analysis_report_md": analysis.report_md or "",
+                "analysis_config_hash": analysis_config.get("hash"),
+                "analysis_config": analysis_config,
+                "analysis_price_per_m2": analysis_price_per_m2,
+                "analysis_facts_compact": facts_compact,
+                "recommended_next_action": self._recommended_next_action(analysis.verdict),
+            }
+        )
+        return fields
+
     def _build_alert_payload(
         self,
         card: ListingCard,
@@ -390,6 +480,7 @@ class MonitorService:
         summary: str,
         score,
         tags: list,
+        analysis: ListingAnalysis | None = None,
     ) -> dict:
         return {
             "search_name": search_name,
@@ -405,10 +496,11 @@ class MonitorService:
             "summary": summary,
             "score": score,
             "tags": tags,
+            **self._analysis_payload_fields(analysis),
         }
 
     def _retry_context_from_snapshot(
-        self, db: Session, card: ListingCard, search_name: str
+        self, db: Session, card: ListingCard, search_name: str, analysis: ListingAnalysis | None = None
     ) -> tuple[str, dict] | None:
         snapshots = (
             db.query(ListingSnapshot)
@@ -435,6 +527,7 @@ class MonitorService:
             summary=summary,
             score=llm.get("score") if use_llm else None,
             tags=llm.get("tags", []) if use_llm else [],
+            analysis=analysis,
         )
         message = build_listing_message(
             {
@@ -859,14 +952,14 @@ class MonitorService:
                 seen_at=seen_at,
             )
 
-        def record_deterministic_analysis(external_id: str) -> None:
+        def record_deterministic_analysis(external_id: str) -> ListingAnalysis | None:
             nonlocal deterministic_analysis_attempted
             nonlocal deterministic_analysis_succeeded
             nonlocal deterministic_analysis_failed
             nonlocal deterministic_analysis_reused
             nonlocal deterministic_analysis_skipped
 
-            outcome, _analysis, attempted = self._maybe_run_deterministic_analysis(
+            outcome, analysis, attempted = self._maybe_run_deterministic_analysis(
                 db,
                 search_job_id=search_job_id,
                 listing_external_id=external_id,
@@ -882,6 +975,7 @@ class MonitorService:
                 deterministic_analysis_reused += 1
             else:
                 deterministic_analysis_skipped += 1
+            return analysis
 
         def apply_current_search_filters(card: ListingCard, now: datetime) -> bool:
             nonlocal filtered_by_rules
@@ -972,12 +1066,12 @@ class MonitorService:
                     )
                     price_changed += 1
 
-                record_deterministic_analysis(card.external_id)
+                analysis = record_deterministic_analysis(card.external_id)
 
                 if baseline_run:
                     continue
 
-                retry_context = self._retry_context_from_snapshot(db, card, search_name)
+                retry_context = self._retry_context_from_snapshot(db, card, search_name, analysis)
                 if retry_context is None:
                     continue
 
@@ -1065,8 +1159,8 @@ class MonitorService:
                         card.external_id, seen_at=now, snapshot_id=snapshot.id
                     )
                     price_changed += 1
-                record_deterministic_analysis(card.external_id)
-                retry_context = self._retry_context_from_snapshot(db, card, search_name)
+                analysis = record_deterministic_analysis(card.external_id)
+                retry_context = self._retry_context_from_snapshot(db, card, search_name, analysis)
                 if retry_context is not None:
                     message, payload = retry_context
                     delivery = await self._deliver_pending_alerts(alert_repo, card, message, payload)
@@ -1151,7 +1245,7 @@ class MonitorService:
             upsert_search_match_for_persisted_listing(
                 card.external_id, seen_at=now, snapshot_id=snapshot.id
             )
-            record_deterministic_analysis(card.external_id)
+            analysis = record_deterministic_analysis(card.external_id)
 
             use_llm_for_alert = (not settings.llm_shadow_mode) and llm.get("status") == "success"
             alert_summary = llm.get("summary", "") if use_llm_for_alert else ""
@@ -1176,6 +1270,7 @@ class MonitorService:
                 summary=alert_summary,
                 score=alert_score,
                 tags=alert_tags,
+                analysis=analysis,
             )
 
             delivery = await self._deliver_pending_alerts(alert_repo, card, message, payload)

@@ -32,6 +32,7 @@ class JsonlOutboxNotifier:
             "llm_summary": payload.get("summary", payload.get("llm_summary")),
             "search_name": payload.get("search_name"),
             "message": message,
+            "payload": payload,
         }
 
         outbox_path = Path(self.path)

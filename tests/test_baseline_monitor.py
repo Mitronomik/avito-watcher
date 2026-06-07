@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 
+from app.analysis.provider import get_analysis_provider
 from app.analysis.service import ListingAnalysisService
 from app.models.alert_sent import AlertSent
 from app.models.listing import Listing
@@ -3242,7 +3243,7 @@ def test_monitor_analysis_config_change_creates_new_analysis_and_stales_old(
     assert old.input_hash != new.input_hash
 
 
-def test_monitor_analysis_failure_does_not_block_alert_delivery(
+def test_analysis_failure_payload_does_not_block_alert(
     db_session, monkeypatch
 ):
     _enable_monitor_analysis(monkeypatch)
@@ -3276,5 +3277,215 @@ def test_monitor_analysis_failure_does_not_block_alert_delivery(
     assert result["deterministic_analysis_failed"] == 1
     assert result["alerted"] == 1
     assert notifier.messages
+    payload = notifier.payloads[0]
+    assert payload["analysis_status"] == "failed"
     analysis = db_session.scalar(select(ListingAnalysis))
     assert analysis.status == "failed"
+
+
+def _analysis_keys() -> set[str]:
+    return {
+        "analysis_profile",
+        "analysis_status",
+        "analysis_score",
+        "analysis_verdict",
+        "analysis_version",
+        "analysis_input_hash",
+        "analysis_context_key",
+        "analysis_risk_flags",
+        "analysis_questions",
+        "analysis_report_md",
+        "analysis_config_hash",
+        "analysis_config",
+        "analysis_price_per_m2",
+        "analysis_facts_compact",
+        "recommended_next_action",
+    }
+
+
+def test_build_alert_payload_includes_empty_analysis_fields_without_analysis():
+    service = MonitorService(parser=FakeParser([]), scorer=FakeScorer(), notifier=FakeNotifier())
+
+    payload = service._build_alert_payload(
+        card=card("payload-empty"),
+        search_name="Search",
+        summary="legacy summary",
+        score=91,
+        tags=["legacy"],
+    )
+
+    assert _analysis_keys().issubset(payload.keys())
+    assert payload["summary"] == "legacy summary"
+    assert payload["score"] == 91
+    assert payload["tags"] == ["legacy"]
+    assert payload["analysis_profile"] is None
+    assert payload["analysis_status"] is None
+    assert payload["analysis_score"] is None
+    assert payload["analysis_verdict"] is None
+    assert payload["analysis_version"] is None
+    assert payload["analysis_input_hash"] is None
+    assert payload["analysis_context_key"] is None
+    assert payload["analysis_risk_flags"] == []
+    assert payload["analysis_questions"] == []
+    assert payload["analysis_report_md"] == ""
+    assert payload["analysis_config_hash"] is None
+    assert payload["analysis_config"] == {}
+    assert payload["analysis_price_per_m2"] is None
+    assert payload["analysis_facts_compact"] == {}
+    assert payload["recommended_next_action"] is None
+
+
+def test_build_alert_payload_includes_success_analysis_fields():
+    service = MonitorService(parser=FakeParser([]), scorer=FakeScorer(), notifier=FakeNotifier())
+    analysis = ListingAnalysis(
+        listing_external_id="payload-success",
+        profile="commercial_rent",
+        status="success",
+        analysis_version="commercial-rent-v0",
+        input_hash="abc123",
+        context_key="search:42",
+        score=78,
+        verdict="review",
+        facts_json={
+            "analysis_config": {"hash": "cfg-hash", "profile": "commercial_rent"},
+            "price_per_m2": 1200.0,
+            "area_m2": 50.0,
+            "price": 60000.0,
+            "ignored_verbose_field": "not compact",
+        },
+        risks_json={"flags": ["missing_area"]},
+        questions_json={"items": ["Уточнить площадь"]},
+        report_md="## Report",
+    )
+
+    payload = service._build_alert_payload(
+        card=card("payload-success"),
+        search_name="Search",
+        summary="legacy summary",
+        score=91,
+        tags=["legacy"],
+        analysis=analysis,
+    )
+
+    assert payload["summary"] == "legacy summary"
+    assert payload["score"] == 91
+    assert payload["tags"] == ["legacy"]
+    assert payload["analysis_profile"] == "commercial_rent"
+    assert payload["analysis_status"] == "success"
+    assert payload["analysis_score"] == 78
+    assert payload["analysis_verdict"] == "review"
+    assert payload["analysis_version"] == "commercial-rent-v0"
+    assert payload["analysis_input_hash"] == "abc123"
+    assert payload["analysis_context_key"] == "search:42"
+    assert payload["analysis_risk_flags"] == ["missing_area"]
+    assert payload["analysis_questions"] == ["Уточнить площадь"]
+    assert payload["analysis_report_md"] == "## Report"
+    assert payload["analysis_config_hash"] == "cfg-hash"
+    assert payload["analysis_config"] == {"hash": "cfg-hash", "profile": "commercial_rent"}
+    assert payload["analysis_price_per_m2"] == 1200.0
+    assert payload["analysis_facts_compact"] == {
+        "price_per_m2": 1200.0,
+        "area_m2": 50.0,
+        "price": 60000.0,
+        "analysis_config": {"hash": "cfg-hash", "profile": "commercial_rent"},
+    }
+    assert payload["recommended_next_action"] == "manual_review"
+
+
+def test_monitor_new_alert_payload_contains_analysis_when_monitor_analysis_enabled(
+    db_session, monkeypatch
+):
+    _enable_monitor_analysis(monkeypatch)
+    search = make_search(db_session, filters_json={"analysis_profile": "commercial_rent"})
+    search.baseline_initialized = True
+    db_session.commit()
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("analysis-alert", price=60000.0, area_m2=50.0)]]),
+        scorer=FakeScorer(),
+        notifier=notifier,
+    )
+
+    result = run(service, db_session, search)
+
+    assert result["alerted"] == 1
+    assert notifier.payloads
+    payload = notifier.payloads[0]
+    assert payload["analysis_profile"] == "commercial_rent"
+    assert payload["analysis_status"] == "success"
+    assert payload["analysis_score"] is not None
+    assert payload["analysis_verdict"] is not None
+
+
+def test_monitor_alert_payload_has_empty_analysis_when_analysis_disabled(
+    db_session, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.services.monitor_service.settings.deterministic_analysis_on_monitor", False
+    )
+    search = make_search(db_session, filters_json={"analysis_profile": "commercial_rent"})
+    search.baseline_initialized = True
+    db_session.commit()
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("analysis-disabled", price=60000.0, area_m2=50.0)]]),
+        scorer=FakeScorer(),
+        notifier=notifier,
+    )
+
+    result = run(service, db_session, search)
+
+    assert result["alerted"] == 1
+    assert scalar_count(db_session, ListingAnalysis) == 0
+    payload = notifier.payloads[0]
+    assert _analysis_keys().issubset(payload.keys())
+    assert payload["analysis_profile"] is None
+    assert payload["analysis_risk_flags"] == []
+    assert payload["analysis_questions"] == []
+    assert payload["analysis_config"] == {}
+    assert payload["analysis_facts_compact"] == {}
+
+
+def test_retry_delivery_payload_includes_existing_analysis_when_available(
+    db_session, monkeypatch
+):
+    _enable_monitor_analysis(monkeypatch)
+    search = make_search(db_session, filters_json={"analysis_profile": "commercial_rent"})
+    search.baseline_initialized = True
+    retry_snapshot = _add_existing_listing_with_retry_snapshot(
+        db_session, "retry-analysis", price=60000.0
+    )
+    listing = db_session.scalar(select(Listing).where(Listing.external_id == "retry-analysis"))
+    listing.url = "https://www.avito.ru/item_retry-analysis"
+    listing.title = "Listing retry-analysis"
+    listing.price = 60000.0
+    listing.area_m2 = 50.0
+    listing.address = ""
+    db_session.add(
+        ListingSearchMatch(
+            search_job_id=search.id,
+            listing_external_id="retry-analysis",
+            last_snapshot_id=retry_snapshot.id,
+        )
+    )
+    db_session.commit()
+    existing_analysis = ListingAnalysisService(
+        db_session, provider=get_analysis_provider("commercial_rent")
+    ).analyze_search_listing(search.id, "retry-analysis")
+    db_session.commit()
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("retry-analysis", price=60000.0, area_m2=50.0)]]),
+        scorer=FakeScorer(),
+        notifier=notifier,
+    )
+
+    result = run(service, db_session, search)
+
+    assert result["alerted"] == 1
+    assert result["deterministic_analysis_reused"] == 1
+    assert scalar_count(db_session, ListingAnalysis) == 1
+    payload = notifier.payloads[0]
+    assert payload["analysis_profile"] == "commercial_rent"
+    assert payload["analysis_status"] == "success"
+    assert payload["analysis_input_hash"] == existing_analysis.input_hash
