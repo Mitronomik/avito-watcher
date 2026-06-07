@@ -43,9 +43,17 @@ class CommonSanityResult:
 
 _AREA_RE = re.compile(
     r"(?<!\d)(\d{1,4}(?:[,.]\d{1,2})?)\s*"
-    r"(?:м\s*(?:2|²)|кв\.?\s*м\.?|кв\s+метр(?:а|ов)?|метр(?:а|ов)?)",
+    r"(?:м\s*(?:2|²)|кв\.?\s*м\.?|кв\s+метр(?:а|ов)?|квадратн(?:ых|ые)\s+метр(?:а|ов)?)",
     re.IGNORECASE,
 )
+_AREA_CONTEXT_RE = re.compile(
+    r"(?<![а-яё])площадь\D{0,20}(\d{1,4}(?:[,.]\d{1,2})?)\s*метр(?:а|ов)?",
+    re.IGNORECASE,
+)
+
+COMMERCIAL_RENT_HIGH_PRICE_PER_M2 = 5_000.0
+FLAT_SALE_EXPENSIVE_PRICE_PER_M2 = 350_000.0
+FLAT_RENT_EXPENSIVE_RENT_PER_M2 = 3_000.0
 
 _PARKING_AMENITY_RE = re.compile(
     r"(?<![а-яё])"
@@ -54,7 +62,7 @@ _PARKING_AMENITY_RE = re.compile(
     re.IGNORECASE,
 )
 _PARKING_OBJECT_RE = re.compile(
-    r"(?<![а-яё])(?:паркинг|место\s+в\s+паркинге|парковочное\s+место)(?![а-яё])",
+    r"(?<![а-яё])(?:место\s+в\s+паркинге|парковочное\s+место)(?![а-яё])",
     re.IGNORECASE,
 )
 _STORAGE_OBJECT_RE = re.compile(
@@ -98,9 +106,9 @@ def apply_common_sanity_guards(
         verdict_cap = _strongest_verdict_cap(verdict_cap, "review")
 
     high_price_per_m2 = {
-        "commercial_rent": 5_000.0,
-        "flat_rent": FlatRentDeterministicAnalysisProvider.expensive_rent_per_m2,
-        "flat_sale": FlatSaleDeterministicAnalysisProvider.expensive_price_per_m2,
+        "commercial_rent": COMMERCIAL_RENT_HIGH_PRICE_PER_M2,
+        "flat_rent": FLAT_RENT_EXPENSIVE_RENT_PER_M2,
+        "flat_sale": FLAT_SALE_EXPENSIVE_PRICE_PER_M2,
     }.get(profile)
     if (
         high_price_per_m2 is not None
@@ -149,7 +157,7 @@ def apply_common_sanity_guards(
 
 
 def _extract_area_m2(text: str) -> float | None:
-    match = _AREA_RE.search(text)
+    match = _AREA_RE.search(text) or _AREA_CONTEXT_RE.search(text)
     if match is None:
         return None
     return float(match.group(1).replace(",", "."))
@@ -623,7 +631,7 @@ class FlatSaleDeterministicAnalysisProvider:
     target_max_price = 15_000_000.0
     target_freshness_hours = 72.0
     suspicious_low_price_per_m2 = 100_000.0
-    expensive_price_per_m2 = 350_000.0
+    expensive_price_per_m2 = FLAT_SALE_EXPENSIVE_PRICE_PER_M2
 
     def analyze(
         self, *, listing: Listing, snapshot: ListingSnapshot | None, input_hash: str
@@ -930,7 +938,7 @@ class FlatRentDeterministicAnalysisProvider:
     target_max_monthly_rent = 100_000.0
     target_freshness_hours = 72.0
     suspicious_low_rent_per_m2 = 600.0
-    expensive_rent_per_m2 = 3_000.0
+    expensive_rent_per_m2 = FLAT_RENT_EXPENSIVE_RENT_PER_M2
 
     def analyze(
         self, *, listing: Listing, snapshot: ListingSnapshot | None, input_hash: str
