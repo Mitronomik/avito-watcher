@@ -1089,6 +1089,20 @@ def test_flat_rent_rental_term_hints():
     assert short_term["has_short_term_hint"] is True
 
 
+def test_flat_rent_utilities_hint_uses_specific_keywords():
+    utilities = _flat_rent_result(
+        description="Коммунальные платежи и счётчики оплачиваются отдельно"
+    )
+    false_positive = _flat_rent_result(
+        description="Светлая квартира, кухня, парковку обсудим"
+    )
+
+    assert utilities.facts_json["rental_terms_hints"]["has_utilities_hint"] is True
+    assert "utilities_unknown" not in utilities.risks_json["flags"]
+    assert false_positive.facts_json["rental_terms_hints"]["has_utilities_hint"] is False
+    assert "utilities_unknown" in false_positive.risks_json["flags"]
+
+
 def test_flat_rent_risk_flags():
     flags = _flat_rent_result(
         title="1-к квартира 20 м² 1/10 эт. посуточно",
