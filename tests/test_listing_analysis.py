@@ -343,6 +343,113 @@ def test_commercial_rent_warehouse_or_production_risk_for_service_use():
     assert "warehouse_or_production_for_service_use" in production.risks_json["flags"]
 
 
+def test_commercial_rent_sanity_caps_suspicious_low_total_and_per_m2():
+    result = _commercial_result(
+        title="Свободного назначения, 100 м²",
+        price=4_000,
+        area_m2=100,
+    )
+
+    assert "suspicious_total_price" in result.risks_json["flags"]
+    assert "suspicious_low_price_per_m2" in result.risks_json["flags"]
+    assert result.score <= 70
+    assert result.verdict == "review"
+    assert result.facts_json["sanity"]["score_cap"] == 70
+
+
+def test_commercial_rent_sanity_downgrades_storage_with_low_price():
+    result = _commercial_result(title="Склад, 71 м²", price=500, area_m2=71)
+
+    assert "suspicious_total_price" in result.risks_json["flags"]
+    assert "suspicious_low_price_per_m2" in result.risks_json["flags"]
+    assert result.verdict != "strong"
+
+
+def test_commercial_rent_missing_area_sanity_cap_keeps_existing_missing_area():
+    result = _commercial_result(title="Офис у метро", price=120_000, area_m2=None)
+
+    assert "missing_area" in result.risks_json["flags"]
+    assert "missing_area_sanity_cap" in result.risks_json["flags"]
+    assert result.score <= 70
+    assert result.verdict == "review"
+
+
+def test_commercial_rent_stale_publication_sanity_cap_blocks_strong():
+    result = _commercial_result(
+        title="Офис 65 м²",
+        price=120_000,
+        area_m2=65,
+        published_at=datetime.now(UTC) - timedelta(days=5),
+    )
+
+    assert "stale_publication" in result.risks_json["flags"]
+    assert "stale_publication_sanity_cap" in result.risks_json["flags"]
+    assert result.verdict != "strong"
+
+
+def test_commercial_rent_title_area_mismatch_forces_review():
+    result = _commercial_result(title="Идеальный офис 528 м2", area_m2=30)
+
+    assert "area_parser_mismatch" in result.risks_json["flags"]
+    assert result.facts_json["sanity"]["title_area_m2"] == 528.0
+    assert result.score <= 65
+    assert result.verdict == "review"
+
+
+def test_commercial_rent_storage_object_cannot_be_strong():
+    result = _commercial_result(title="Кладовка 5 м²", price=20_000, area_m2=5)
+
+    assert "storage_parking_garage_object" in result.risks_json["flags"]
+    assert result.verdict != "strong"
+
+
+def test_commercial_rent_parking_amenity_is_not_storage_object():
+    result = _commercial_result(title="Офис 65 м², есть парковка рядом")
+
+    assert "storage_parking_garage_object" not in result.risks_json["flags"]
+
+
+def test_flat_sale_missing_area_sanity_cap_blocks_strong():
+    result = _flat_result(title="1-к квартира 42 м² 8/15 эт.", area_m2=None)
+
+    assert "missing_area_sanity_cap" in result.risks_json["flags"]
+    assert result.verdict != "strong"
+
+
+def test_flat_sale_stale_high_score_sanity_cap_blocks_strong():
+    result = _flat_result(published_at=datetime.now(UTC) - timedelta(days=5))
+
+    assert "stale_publication_sanity_cap" in result.risks_json["flags"]
+    assert result.verdict != "strong"
+
+
+def test_flat_sale_title_area_mismatch_forces_non_strong_review():
+    result = _flat_result(title="1-к квартира 104 м² 8/15 эт.", area_m2=42)
+
+    assert "area_parser_mismatch" in result.risks_json["flags"]
+    assert result.verdict == "review"
+
+
+def test_flat_rent_missing_area_sanity_cap_blocks_strong():
+    result = _flat_rent_result(title="1-к квартира 40 м² 8/15 эт.", area_m2=None)
+
+    assert "missing_area_sanity_cap" in result.risks_json["flags"]
+    assert result.verdict != "strong"
+
+
+def test_flat_rent_stale_high_score_sanity_cap_blocks_strong():
+    result = _flat_rent_result(published_at=datetime.now(UTC) - timedelta(days=5))
+
+    assert "stale_publication_sanity_cap" in result.risks_json["flags"]
+    assert result.verdict != "strong"
+
+
+def test_flat_rent_title_area_mismatch_forces_non_strong_review():
+    result = _flat_rent_result(title="1-к квартира 104 м² 8/15 эт.", area_m2=40)
+
+    assert "area_parser_mismatch" in result.risks_json["flags"]
+    assert result.verdict == "review"
+
 def test_commercial_rent_score_is_clamped_to_0_and_100():
     low = _commercial_result(
         title="Склад гараж субаренда часть помещения",
