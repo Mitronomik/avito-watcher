@@ -777,21 +777,32 @@ class MonitorService:
         delivery_failed_by_channel = {channel: 0 for channel in configured_channels}
         delivery_unknown_by_channel = {channel: 0 for channel in configured_channels}
 
+        def upsert_search_match_for_persisted_listing(
+            external_id: str,
+            *,
+            seen_at: datetime,
+            snapshot_id: int | None = None,
+        ) -> None:
+            if search_job_id is None:
+                return
+            if snapshot_id is None:
+                latest_snapshot = listing_repo.get_latest_snapshot_for_listing(external_id)
+                snapshot_id = latest_snapshot.id if latest_snapshot is not None else None
+            match_repo.upsert_match(
+                search_job_id=search_job_id,
+                listing_external_id=external_id,
+                snapshot_id=snapshot_id,
+                seen_at=seen_at,
+            )
+
         for card in cards:
             now = self._now()
             existing = existing_by_external_id.get(card.external_id)
-            if search_job_id is not None:
-                latest_snapshot = listing_repo.get_latest_snapshot_for_listing(card.external_id)
-                match_repo.upsert_match(
-                    search_job_id=search_job_id,
-                    listing_external_id=card.external_id,
-                    snapshot_id=latest_snapshot.id if latest_snapshot is not None else None,
-                    seen_at=now,
-                )
 
             if existing:
                 old_price = existing.price
                 listing_repo.update_listing_from_card(existing, card, now)
+                upsert_search_match_for_persisted_listing(card.external_id, seen_at=now)
 
                 if not baseline_run and old_price != card.price:
                     existing.price = card.price
@@ -805,13 +816,9 @@ class MonitorService:
                         screenshot_path="",
                         observed_at=now,
                     )
-                    if search_job_id is not None:
-                        match_repo.upsert_match(
-                            search_job_id=search_job_id,
-                            listing_external_id=card.external_id,
-                            snapshot_id=snapshot.id,
-                            seen_at=now,
-                        )
+                    upsert_search_match_for_persisted_listing(
+                        card.external_id, seen_at=now, snapshot_id=snapshot.id
+                    )
                     price_changed += 1
 
                 if baseline_run:
@@ -868,6 +875,7 @@ class MonitorService:
                 else:
                     listing_repo.update_listing_from_card(listing, card, now)
                     existing_by_external_id[card.external_id] = listing
+                upsert_search_match_for_persisted_listing(card.external_id, seen_at=now)
                 continue
 
             rule_failures = explain_rule_filter_failures(card, filters)
@@ -935,6 +943,7 @@ class MonitorService:
             if not was_created:
                 old_price = listing.price
                 listing_repo.update_listing_from_card(listing, card, now)
+                upsert_search_match_for_persisted_listing(card.external_id, seen_at=now)
                 if old_price != card.price:
                     listing.price = card.price
                     snapshot = listing_repo.create_snapshot(
@@ -947,13 +956,9 @@ class MonitorService:
                         screenshot_path="",
                         observed_at=now,
                     )
-                    if search_job_id is not None:
-                        match_repo.upsert_match(
-                            search_job_id=search_job_id,
-                            listing_external_id=card.external_id,
-                            snapshot_id=snapshot.id,
-                            seen_at=now,
-                        )
+                    upsert_search_match_for_persisted_listing(
+                        card.external_id, seen_at=now, snapshot_id=snapshot.id
+                    )
                     price_changed += 1
                 retry_context = self._retry_context_from_snapshot(db, card, search_name)
                 if retry_context is not None:
@@ -1037,13 +1042,9 @@ class MonitorService:
                 screenshot_path="",
                 observed_at=now,
             )
-            if search_job_id is not None:
-                match_repo.upsert_match(
-                    search_job_id=search_job_id,
-                    listing_external_id=card.external_id,
-                    snapshot_id=snapshot.id,
-                    seen_at=now,
-                )
+            upsert_search_match_for_persisted_listing(
+                card.external_id, seen_at=now, snapshot_id=snapshot.id
+            )
 
             use_llm_for_alert = (not settings.llm_shadow_mode) and llm.get("status") == "success"
             alert_summary = llm.get("summary", "") if use_llm_for_alert else ""

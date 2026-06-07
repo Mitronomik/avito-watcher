@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 
+from app.analysis.service import ListingAnalysisService
 from app.models.alert_sent import AlertSent
 from app.models.listing import Listing
 from app.models.listing_snapshot import ListingSnapshot
@@ -2592,3 +2593,165 @@ def test_monitor_service_records_search_match_without_changing_alert_delivery(db
     assert match.search_job_id == search.id
     assert match.listing_external_id == "match-monitor"
     assert match.last_snapshot_id is None
+
+
+def test_process_cards_does_not_create_match_for_rule_filtered_new_card(db_session):
+    search = make_search(db_session, filters_json={"max_price": 100.0})
+    search.baseline_initialized = True
+    db_session.commit()
+    service = MonitorService(
+        parser=FakeParser([[card("rule-filtered-match", price=150.0)]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_rules"] == 1
+    assert db_session.scalar(
+        select(Listing).where(Listing.external_id == "rule-filtered-match")
+    ) is None
+    assert scalar_count(db_session, ListingSearchMatch) == 0
+
+
+def test_process_cards_does_not_create_match_for_publication_filtered_new_card(
+    db_session,
+):
+    now = datetime(2026, 5, 17, 12, 0, 0)
+    search = make_search(db_session, filters_json={"max_age_hours": 2})
+    search.baseline_initialized = True
+    db_session.commit()
+    service = MonitorService(
+        parser=FakeParser(
+            [[card("publication-filtered-match", published_at=now - timedelta(hours=3))]]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+        now_func=lambda: now,
+    )
+
+    result = run(service, db_session, search)
+
+    assert result["filtered_by_publication_date"] == 1
+    assert scalar_count(db_session, ListingSearchMatch) == 0
+
+
+def test_baseline_creates_match_after_listing_persisted(db_session):
+    search = make_search(db_session)
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("baseline-match")]]),
+        scorer=FakeScorer(),
+        notifier=notifier,
+    )
+
+    result = run(service, db_session, search)
+
+    listing = db_session.scalar(
+        select(Listing).where(Listing.external_id == "baseline-match")
+    )
+    match = db_session.scalar(select(ListingSearchMatch))
+    assert result["baseline_run"] is True
+    assert listing is not None
+    assert match is not None
+    assert match.listing_external_id == listing.external_id
+    assert match.last_snapshot_id is None
+    assert result["alerted"] == 0
+    assert notifier.messages == []
+
+
+def test_normal_new_listing_creates_match_with_snapshot_id_after_filters(db_session):
+    search = make_search(db_session, filters_json={"max_price": 100.0})
+    search.baseline_initialized = True
+    db_session.commit()
+    service = MonitorService(
+        parser=FakeParser([[card("normal-match", price=50.0)]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    result = run(service, db_session, search)
+
+    listing = db_session.scalar(select(Listing).where(Listing.external_id == "normal-match"))
+    snapshot = db_session.scalar(
+        select(ListingSnapshot).where(ListingSnapshot.external_id == "normal-match")
+    )
+    match = db_session.scalar(select(ListingSearchMatch))
+    assert result["created"] == 1
+    assert listing is not None
+    assert snapshot is not None
+    assert match is not None
+    assert match.last_snapshot_id == snapshot.id
+
+
+def test_existing_listing_updates_match_without_creating_duplicate(db_session):
+    moments = iter(
+        [
+            datetime(2026, 5, 17, 12, 0, 0),
+            datetime(2026, 5, 17, 12, 1, 0),
+            datetime(2026, 5, 17, 12, 2, 0),
+            datetime(2026, 5, 17, 12, 3, 0),
+        ]
+    )
+    search = make_search(db_session)
+    service = MonitorService(
+        parser=FakeParser([[card("existing-match")], [card("existing-match")]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+        now_func=lambda: next(moments),
+    )
+
+    run(service, db_session, search)
+    first_match = db_session.scalar(select(ListingSearchMatch))
+    first_seen = first_match.last_seen_at
+    run(service, db_session, search)
+
+    matches = db_session.scalars(select(ListingSearchMatch)).all()
+    assert len(matches) == 1
+    assert matches[0].last_seen_at > first_seen
+
+
+def test_price_change_updates_match_last_snapshot_id(db_session):
+    search = make_search(db_session)
+    service = MonitorService(
+        parser=FakeParser(
+            [[card("price-match", price=100.0)], [card("price-match", price=150.0)]]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    run(service, db_session, search)
+    run(service, db_session, search)
+
+    snapshot = db_session.scalar(
+        select(ListingSnapshot).where(ListingSnapshot.external_id == "price-match")
+    )
+    match = db_session.scalar(select(ListingSearchMatch))
+    assert snapshot is not None
+    assert snapshot.price == 150.0
+    assert match.last_snapshot_id == snapshot.id
+
+
+def test_analyze_search_matches_ignores_filtered_cards_without_match(db_session):
+    search = make_search(db_session, filters_json={"max_price": 100.0})
+    search.baseline_initialized = True
+    db_session.commit()
+    service = MonitorService(
+        parser=FakeParser(
+            [[card("filtered-analysis", price=150.0), card("accepted-analysis", price=50.0)]]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    result = run(service, db_session, search)
+    analyses = ListingAnalysisService(db_session).analyze_search_matches(search.id, limit=20)
+
+    assert result["filtered_by_rules"] == 1
+    assert [analysis.listing_external_id for analysis in analyses] == ["accepted-analysis"]
+    assert db_session.scalar(
+        select(ListingSearchMatch).where(
+            ListingSearchMatch.listing_external_id == "filtered-analysis"
+        )
+    ) is None
