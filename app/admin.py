@@ -272,6 +272,9 @@ def _job_form(job=None, error: str = "", return_url: str = "") -> str:
     city_value = str(fv("city", ""))
     seller_value = str(fv("seller", ""))
     floor_value = str(fv("floor", ""))
+    analysis_profile_value = str(fv("analysis_profile", ""))
+    asset_type_value = str(fv("asset_type", ""))
+    deal_type_value = str(fv("deal_type", ""))
     missing_published_at_policy_value = str(fv("missing_published_at_policy", ""))
     source_sort_value = str(fv("source_sort", ""))
     return f"""{'<div class="error">'+html.escape(error)+'</div>' if error else ''}
@@ -284,6 +287,10 @@ def _job_form(job=None, error: str = "", return_url: str = "") -> str:
 <div class='row'><label>Avito search URL<textarea name='source_url' rows='3' required>{html.escape(str(v("source_url", "")))}</textarea></label></div>
 <div class='note'>Настройте основные фильтры на Avito, затем вставьте URL сюда. Ограничения вроде собственника и первого этажа пока надежнее задавать в URL Avito.</div></div>
 <div class='section'><h3>Internal filters</h3>
+<div class='note'>analysis_profile controls which specialized analysis provider is used by <code>analyze-search-matches</code>. <code>commercial_rent</code> is currently available; missing analysis_profile uses the <code>default</code> fallback. <code>flat_sale</code> and <code>flat_rent</code> are planned future profiles. analysis_profile does not affect parsing or alert delivery. Analysis is search-aware and uses <code>listing_search_matches</code>.</div>
+<div class='row'><label>Analysis profile<select name='analysis_profile'><option value='' {_selected('', analysis_profile_value)}>empty / default fallback</option><option value='default' {_selected('default', analysis_profile_value)}>default</option><option value='commercial_rent' {_selected('commercial_rent', analysis_profile_value)}>commercial_rent</option><option value='flat_sale' {_selected('flat_sale', analysis_profile_value)}>flat_sale (future)</option><option value='flat_rent' {_selected('flat_rent', analysis_profile_value)}>flat_rent (future)</option></select></label></div>
+<div class='row'><label>Asset type<select name='asset_type'><option value='' {_selected('', asset_type_value)}>empty / not specified</option><option value='commercial' {_selected('commercial', asset_type_value)}>commercial</option><option value='flat' {_selected('flat', asset_type_value)}>flat</option></select></label></div>
+<div class='row'><label>Deal type<select name='deal_type'><option value='' {_selected('', deal_type_value)}>empty / not specified</option><option value='rent' {_selected('rent', deal_type_value)}>rent</option><option value='sale' {_selected('sale', deal_type_value)}>sale</option></select></label></div>
 <div class='row'><label>Freshness preset<select name='freshness_preset'><option value='custom' {_selected('custom', freshness_preset_value)}>custom</option><option value='12' {_selected("12", freshness_preset_value)}>12 hours</option><option value='24' {_selected("24", freshness_preset_value)}>24 hours</option><option value='48' {_selected("48", freshness_preset_value)}>48 hours</option><option value='72' {_selected("72", freshness_preset_value)}>72 hours</option></select></label></div>
 <div class='row'><label>Freshness, hours<input name='max_age_hours' value='{html.escape(str(fv("max_age_hours", "")))}'></label></div>
 <div class='row checkbox'><label><input type='checkbox' name='require_published_at' {checked_req_pub}> Require publication date</label></div>
@@ -327,7 +334,7 @@ def _extract_filters(form: dict[str, str], require_published_at: bool) -> dict:
         kws = _keywords(form[n])
         if kws is not None:
             out[n] = kws
-    for n in ("profile", "category", "city", "seller", "floor"):
+    for n in ("analysis_profile", "asset_type", "deal_type", "profile", "category", "city", "seller", "floor"):
         if form[n].strip():
             out[n] = form[n].strip()
     missing_published_at_policy = form.get("missing_published_at_policy", "").strip()
@@ -535,7 +542,7 @@ async def create_search(request: Request, db: Session = Depends(get_db)):
     form.setdefault('name', '')
     form.setdefault('source_url', '')
     form.setdefault('poll_interval_sec', '180')
-    for k in ('min_price', 'max_price', 'min_area', 'max_area', 'max_age_hours', 'freshness_preset', 'include_keywords', 'exclude_keywords', 'location_keywords', 'profile', 'category', 'city', 'seller', 'floor', 'missing_published_at_policy', 'source_sort'):
+    for k in ('min_price', 'max_price', 'min_area', 'max_area', 'max_age_hours', 'freshness_preset', 'include_keywords', 'exclude_keywords', 'location_keywords', 'analysis_profile', 'asset_type', 'deal_type', 'profile', 'category', 'city', 'seller', 'floor', 'missing_published_at_policy', 'source_sort'):
         form.setdefault(k, '')
     try:
         name = form['name'].strip()
@@ -584,7 +591,7 @@ async def update_search(search_id: int, request: Request, db: Session = Depends(
     form.setdefault('name', '')
     form.setdefault('source_url', '')
     form.setdefault('poll_interval_sec', '180')
-    for k in ('min_price', 'max_price', 'min_area', 'max_area', 'max_age_hours', 'freshness_preset', 'include_keywords', 'exclude_keywords', 'location_keywords', 'profile', 'category', 'city', 'seller', 'floor', 'missing_published_at_policy', 'source_sort'):
+    for k in ('min_price', 'max_price', 'min_area', 'max_area', 'max_age_hours', 'freshness_preset', 'include_keywords', 'exclude_keywords', 'location_keywords', 'analysis_profile', 'asset_type', 'deal_type', 'profile', 'category', 'city', 'seller', 'floor', 'missing_published_at_policy', 'source_sort'):
         form.setdefault(k, '')
     try:
         name = form['name'].strip()

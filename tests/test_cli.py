@@ -2,6 +2,7 @@ import json
 from argparse import Namespace
 
 import pytest
+from sqlalchemy.orm import sessionmaker
 
 from app import cli
 from app.parsers.errors import ParserError, ParserErrorType
@@ -188,3 +189,82 @@ def test_cmd_admin_server_runs_app_instance_without_custom_uvicorn_kwargs(monkey
     assert captured["port"] == 8000
     assert captured["app"] is not None
     assert any(route.path == "/admin/searches" for route in captured["app"].routes)
+
+
+def _search_for_diagnostics(**kwargs):
+    return type(
+        "Search",
+        (),
+        {
+            "id": kwargs.get("id", 1),
+            "name": kwargs.get("name", "search"),
+            "is_active": kwargs.get("is_active", True),
+            "source_url": kwargs.get("source_url", "https://www.avito.ru/spb/kvartiry/"),
+            "filters_json": kwargs.get("filters_json", {}),
+        },
+    )()
+
+
+def test_check_analysis_profiles_reports_missing_profile(db_session, monkeypatch, capsys):
+    cli.SearchRepository(db_session).create(
+        name="missing_profile",
+        source_url="https://www.avito.ru/spb/kvartiry/",
+        filters_json={},
+    )
+    db_session.commit()
+    SessionLocal = sessionmaker(bind=db_session.get_bind(), autoflush=False, autocommit=False)
+    monkeypatch.setattr(cli, "init_db", lambda: None)
+    monkeypatch.setattr(cli, "SessionLocal", SessionLocal)
+
+    cli.cmd_check_analysis_profiles(Namespace())
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is True
+    assert output["searches_total"] == 1
+    assert output["searches_without_analysis_profile"] == 1
+    assert output["searches"][0]["warning"] == "missing_analysis_profile"
+
+
+def test_check_analysis_profiles_reports_commercial_rent_without_warning():
+    item = cli._search_analysis_profile_diagnostic(
+        _search_for_diagnostics(
+            source_url="https://www.avito.ru/spb/kommercheskaya_nedvizhimost/",
+            filters_json={
+                "analysis_profile": "commercial_rent",
+                "asset_type": "commercial",
+                "deal_type": "rent",
+            },
+        )
+    )
+
+    assert item["analysis_profile"] == "commercial_rent"
+    assert item["asset_type"] == "commercial"
+    assert item["deal_type"] == "rent"
+    assert item["warning"] is None
+
+
+def test_check_analysis_profiles_reports_unknown_profile_warning():
+    item = cli._search_analysis_profile_diagnostic(
+        _search_for_diagnostics(filters_json={"analysis_profile": "villa_sale"})
+    )
+
+    assert item["analysis_profile"] == "villa_sale"
+    assert item["warning"] == "unknown_analysis_profile"
+
+
+def test_check_analysis_profiles_reports_url_profile_hints():
+    commercial = cli._search_analysis_profile_diagnostic(
+        _search_for_diagnostics(
+            source_url="https://www.avito.ru/spb/kvartiry/",
+            filters_json={"analysis_profile": "commercial_rent"},
+        )
+    )
+    flat = cli._search_analysis_profile_diagnostic(
+        _search_for_diagnostics(
+            source_url="https://www.avito.ru/spb/kommercheskaya_nedvizhimost/",
+            filters_json={"analysis_profile": "flat_sale"},
+        )
+    )
+
+    assert commercial["warning"] == "commercial_profile_on_non_commercial_hint"
+    assert flat["warning"] == "flat_profile_on_non_flat_hint"

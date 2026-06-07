@@ -103,6 +103,7 @@ def cmd_seed_search(args) -> None:
 
 
 PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,120}$")
+SUPPORTED_ANALYSIS_PROFILES = {"default", "commercial_rent", "flat_sale", "flat_rent"}
 
 
 def _validation_error(message: str) -> dict:
@@ -253,6 +254,46 @@ def cmd_upsert_search_profile(args) -> None:
             db.commit()
 
         print(json.dumps(response, ensure_ascii=False, indent=2))
+
+
+def _search_analysis_profile_diagnostic(search) -> dict:
+    filters = search.filters_json if isinstance(search.filters_json, dict) else {}
+    raw_profile = filters.get("analysis_profile")
+    analysis_profile = raw_profile.strip() if isinstance(raw_profile, str) else None
+    warning = None
+
+    if not analysis_profile:
+        warning = "missing_analysis_profile"
+    elif analysis_profile not in SUPPORTED_ANALYSIS_PROFILES:
+        warning = "unknown_analysis_profile"
+    elif analysis_profile == "commercial_rent" and "/kommercheskaya_nedvizhimost/" not in search.source_url:
+        warning = "commercial_profile_on_non_commercial_hint"
+    elif analysis_profile in {"flat_sale", "flat_rent"} and "/kvartiry/" not in search.source_url:
+        warning = "flat_profile_on_non_flat_hint"
+
+    return {
+        "id": search.id,
+        "name": search.name,
+        "is_active": search.is_active,
+        "analysis_profile": analysis_profile,
+        "asset_type": filters.get("asset_type"),
+        "deal_type": filters.get("deal_type"),
+        "warning": warning,
+    }
+
+
+def cmd_check_analysis_profiles(args) -> None:
+    del args
+    init_db()
+    with SessionLocal() as db:
+        searches = [_search_analysis_profile_diagnostic(search) for search in SearchRepository(db).list_all()]
+        result = {
+            "ok": True,
+            "searches_total": len(searches),
+            "searches_without_analysis_profile": sum(1 for item in searches if not item["analysis_profile"]),
+            "searches": searches,
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def cmd_run_once(args) -> None:
@@ -425,6 +466,12 @@ def build_parser() -> argparse.ArgumentParser:
     upsert_profile.add_argument("--deactivate", action="store_true")
     upsert_profile.add_argument("--dry-run", action="store_true")
     upsert_profile.set_defaults(func=cmd_upsert_search_profile)
+
+    check_analysis_profiles = sub.add_parser(
+        "check-analysis-profiles",
+        help="Inspect search analysis profile readiness without running analysis",
+    )
+    check_analysis_profiles.set_defaults(func=cmd_check_analysis_profiles)
 
     run_once = sub.add_parser("run-once", help="Run one monitoring cycle")
     run_once.add_argument("--search-id", type=int, required=False)

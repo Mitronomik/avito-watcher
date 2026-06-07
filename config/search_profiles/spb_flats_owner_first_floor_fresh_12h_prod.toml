@@ -5,6 +5,9 @@ poll_interval_sec = 600
 is_active = true
 
 [filters]
+analysis_profile = "default"
+asset_type = "flat"
+deal_type = "sale"
 profile = "production"
 category = "flats_sale"
 city = "spb"
