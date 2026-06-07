@@ -483,7 +483,7 @@ class MonitorService:
             search_job_id, listing_external_id
         )
         if existing is not None and existing.status == "success":
-            return "succeeded", existing, False
+            return "reused", existing, False
 
         try:
             analysis = service.analyze_search_listing(search_job_id, listing_external_id)
@@ -827,6 +827,7 @@ class MonitorService:
         deterministic_analysis_attempted = 0
         deterministic_analysis_succeeded = 0
         deterministic_analysis_failed = 0
+        deterministic_analysis_reused = 0
         deterministic_analysis_skipped = 0
         filtered_samples: list[dict] = []
         publication_missing_allowed_count = 0
@@ -862,6 +863,7 @@ class MonitorService:
             nonlocal deterministic_analysis_attempted
             nonlocal deterministic_analysis_succeeded
             nonlocal deterministic_analysis_failed
+            nonlocal deterministic_analysis_reused
             nonlocal deterministic_analysis_skipped
 
             outcome, _analysis, attempted = self._maybe_run_deterministic_analysis(
@@ -876,6 +878,8 @@ class MonitorService:
                 deterministic_analysis_succeeded += 1
             elif outcome == "failed":
                 deterministic_analysis_failed += 1
+            elif outcome == "reused":
+                deterministic_analysis_reused += 1
             else:
                 deterministic_analysis_skipped += 1
 
@@ -1224,6 +1228,7 @@ class MonitorService:
             "deterministic_analysis_attempted": deterministic_analysis_attempted,
             "deterministic_analysis_succeeded": deterministic_analysis_succeeded,
             "deterministic_analysis_failed": deterministic_analysis_failed,
+            "deterministic_analysis_reused": deterministic_analysis_reused,
             "deterministic_analysis_skipped": deterministic_analysis_skipped,
             "total_seen": len(cards),
             "filtered_samples": filtered_samples,

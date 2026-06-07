@@ -3105,8 +3105,9 @@ def test_monitor_existing_listing_passing_filters_creates_analysis(
         notifier=FakeNotifier(),
     )
 
-    run(service, db_session, search)
-    run(service, db_session, search)
+    first_result = run(service, db_session, search)
+    first_analyses = _analysis_rows(db_session)
+    second_result = run(service, db_session, search)
 
     assert db_session.scalar(
         select(ListingSearchMatch).where(
@@ -3115,7 +3116,14 @@ def test_monitor_existing_listing_passing_filters_creates_analysis(
         )
     ) is not None
     analyses = _analysis_rows(db_session)
+    assert first_result["deterministic_analysis_attempted"] == 1
+    assert first_result["deterministic_analysis_succeeded"] == 1
+    assert second_result["deterministic_analysis_attempted"] == 0
+    assert second_result["deterministic_analysis_reused"] == 1
+    assert second_result["deterministic_analysis_succeeded"] == 0
+    assert len(first_analyses) == 1
     assert len(analyses) == 1
+    assert analyses[0].id == first_analyses[0].id
     assert analyses[0].status == "success"
 
 
