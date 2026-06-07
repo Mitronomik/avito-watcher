@@ -80,6 +80,15 @@ def test_list_and_new(monkeypatch):
     assert "New search" in page
     for heading in ("Basic", "Avito source", "Internal filters", "Metadata", "Runtime"):
         assert heading in page
+    assert "analysis_profile controls which specialized analysis provider is used" in page
+    assert "commercial_rent" in page
+    assert "default fallback" in page
+    assert "flat_sale" in page and "flat_rent" in page
+    assert "does not affect parsing or alert delivery" in page
+    assert "listing_search_matches" in page
+    assert "name='analysis_profile'" in page
+    assert "name='asset_type'" in page
+    assert "name='deal_type'" in page
     assert "name='profile'" in page
     assert "name='category'" in page
     assert "name='city'" in page
@@ -87,6 +96,28 @@ def test_list_and_new(monkeypatch):
     assert "name='floor'" in page
     assert "name='missing_published_at_policy'" in page
     assert "name='source_sort'" in page
+
+
+def test_create_saves_analysis_metadata(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    resp = client.post(
+        "/admin/searches",
+        data={
+            "name": "analysis_admin",
+            "source_url": "https://www.avito.ru/spb/kommercheskaya_nedvizhimost/",
+            "poll_interval_sec": "180",
+            "analysis_profile": "commercial_rent",
+            "asset_type": "commercial",
+            "deal_type": "rent",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    with Session() as s:
+        job = s.query(SearchJob).filter_by(name="analysis_admin").one()
+        assert job.filters_json["analysis_profile"] == "commercial_rent"
+        assert job.filters_json["asset_type"] == "commercial"
+        assert job.filters_json["deal_type"] == "rent"
 
 
 def test_create_saves_missing_published_at_policy_and_source_sort(monkeypatch):

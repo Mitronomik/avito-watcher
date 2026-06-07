@@ -164,6 +164,78 @@ python -m app.cli run-all
 python -m app.cli telegram-bot
 ```
 
+## Search profile analysis metadata
+
+Search profiles loaded with `python -m app.cli upsert-search-profile --file <path>` can include analysis metadata in the `[filters]` TOML table. `analysis_profile` controls the specialized deterministic analysis provider used by `analyze-search-matches`; it does **not** affect Avito parsing, monitor cadence, alert filtering, notifiers, or alert delivery.
+
+Documented `analysis_profile` values:
+
+- `default` — generic deterministic local provider.
+- `commercial_rent` — currently available deterministic commercial-rent provider.
+- `flat_sale` — planned future profile; provider is not implemented yet.
+- `flat_rent` — planned future profile; provider is not implemented yet.
+
+Commercial rent example:
+
+```toml
+[filters]
+analysis_profile = "commercial_rent"
+asset_type = "commercial"
+deal_type = "rent"
+require_published_at = true
+max_age_hours = 72
+missing_published_at_policy = "reject"
+source_sort = "date"
+```
+
+Flat sale future example:
+
+```toml
+[filters]
+analysis_profile = "flat_sale"
+asset_type = "flat"
+deal_type = "sale"
+```
+
+Flat rent future example:
+
+```toml
+[filters]
+analysis_profile = "flat_rent"
+asset_type = "flat"
+deal_type = "rent"
+```
+
+## Search-aware analysis runbook
+
+Run the operational guardrail first to inspect profile readiness without running analysis:
+
+```bash
+python3 -m app.cli check-analysis-profiles
+```
+
+Run deterministic search-aware analysis for one search with a small initial limit:
+
+```bash
+python3 -m app.cli analyze-search-matches --search-id <id> --limit 5
+```
+
+Inspect recent results in the database:
+
+```sql
+select id, search_job_id, context_key, listing_external_id, profile, analysis_version, status, score, verdict
+from listing_analyses
+where search_job_id = <id>
+order by id desc
+limit 20;
+```
+
+Operational notes:
+
+- `listing_search_matches` are created by worker cycles after PR #136 deployment.
+- Old listings will not automatically have matches unless a backfill is added later.
+- First production rollout should use small `--limit` values.
+- Analysis failures must not affect monitor, parser, or notifiers.
 
 ## Ручной запуск мониторинга
 

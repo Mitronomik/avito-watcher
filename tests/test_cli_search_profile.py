@@ -145,6 +145,21 @@ def test_filters_and_title_stored(monkeypatch, db_session, tmp_path):
     assert item.filters_json["human_title"] == "Human"
 
 
+def test_filters_preserve_analysis_metadata(monkeypatch, db_session, tmp_path):
+    _prepare_db(monkeypatch, db_session)
+    file_path = _write_profile(
+        tmp_path,
+        'name="analysis_ok"\nurl="https://www.avito.ru/spb/kommercheskaya_nedvizhimost/"\n[filters]\nanalysis_profile="commercial_rent"\nasset_type="commercial"\ndeal_type="rent"\n',
+    )
+
+    cli.cmd_upsert_search_profile(_args(file_path))
+
+    item = SearchRepository(db_session).get_by_name("analysis_ok")
+    assert item.filters_json["analysis_profile"] == "commercial_rent"
+    assert item.filters_json["asset_type"] == "commercial"
+    assert item.filters_json["deal_type"] == "rent"
+
+
 def test_seed_search_unchanged(monkeypatch, db_session):
     _prepare_db(monkeypatch, db_session)
     cli.cmd_seed_search(Namespace(name="seeded", url="https://www.avito.ru/test", interval=180))
