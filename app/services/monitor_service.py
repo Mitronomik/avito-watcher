@@ -11,9 +11,12 @@ from sqlalchemy.orm import Session
 
 from app.agents.llm_providers import resolve_llm_runtime_config
 from app.agents.scorer import ListingScorer
+from app.analysis.provider import get_analysis_provider
+from app.analysis.service import ListingAnalysisService
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.search_job import SearchJob
+from app.models.listing_analysis import ListingAnalysis
 from app.models.listing_snapshot import ListingSnapshot
 from app.notifiers.composite import CompositeNotifier
 from app.notifiers.email import EmailNotifier
@@ -447,6 +450,62 @@ class MonitorService:
         )
         return message, payload
 
+    def _maybe_run_deterministic_analysis(
+        self,
+        db: Session,
+        *,
+        search_job_id: int | None,
+        listing_external_id: str,
+        filters: dict | None,
+    ) -> tuple[str, ListingAnalysis | None, bool]:
+        if not settings.deterministic_analysis_on_monitor:
+            return "skipped", None, False
+        if search_job_id is None:
+            return "skipped", None, False
+        if not isinstance(filters, dict):
+            return "skipped", None, False
+        profile = filters.get("analysis_profile")
+        if not isinstance(profile, str) or not profile.strip():
+            return "skipped", None, False
+        profile = profile.strip()
+
+        try:
+            provider = get_analysis_provider(profile)
+        except ValueError:
+            logger.warning(
+                "Skipping deterministic monitor analysis for unsupported profile",
+                extra={"analysis_profile": profile, "search_job_id": search_job_id},
+            )
+            return "skipped", None, False
+
+        service = ListingAnalysisService(db, provider=provider)
+        existing = service.get_current_search_listing_analysis(
+            search_job_id, listing_external_id
+        )
+        if existing is not None and existing.status == "success":
+            return "succeeded", existing, False
+
+        try:
+            analysis = service.analyze_search_listing(search_job_id, listing_external_id)
+        except Exception:
+            logger.exception(
+                "Deterministic monitor analysis failed",
+                extra={
+                    "listing_external_id": listing_external_id,
+                    "search_job_id": search_job_id,
+                    "analysis_profile": profile,
+                },
+            )
+            return "failed", None, True
+
+        if analysis is None:
+            return "skipped", None, False
+        if analysis.status == "success":
+            return "succeeded", analysis, True
+        if analysis.status == "failed":
+            return "failed", analysis, True
+        return "skipped", analysis, True
+
     async def _deliver_pending_alerts(
         self,
         alert_repo: AlertRepository,
@@ -765,6 +824,10 @@ class MonitorService:
         llm_succeeded = 0
         llm_failed = 0
         llm_skipped = 0
+        deterministic_analysis_attempted = 0
+        deterministic_analysis_succeeded = 0
+        deterministic_analysis_failed = 0
+        deterministic_analysis_skipped = 0
         filtered_samples: list[dict] = []
         publication_missing_allowed_count = 0
         publication_missing_rejected_count = 0
@@ -794,6 +857,27 @@ class MonitorService:
                 snapshot_id=snapshot_id,
                 seen_at=seen_at,
             )
+
+        def record_deterministic_analysis(external_id: str) -> None:
+            nonlocal deterministic_analysis_attempted
+            nonlocal deterministic_analysis_succeeded
+            nonlocal deterministic_analysis_failed
+            nonlocal deterministic_analysis_skipped
+
+            outcome, _analysis, attempted = self._maybe_run_deterministic_analysis(
+                db,
+                search_job_id=search_job_id,
+                listing_external_id=external_id,
+                filters=filters,
+            )
+            if attempted:
+                deterministic_analysis_attempted += 1
+            if outcome == "succeeded":
+                deterministic_analysis_succeeded += 1
+            elif outcome == "failed":
+                deterministic_analysis_failed += 1
+            else:
+                deterministic_analysis_skipped += 1
 
         def apply_current_search_filters(card: ListingCard, now: datetime) -> bool:
             nonlocal filtered_by_rules
@@ -884,6 +968,8 @@ class MonitorService:
                     )
                     price_changed += 1
 
+                record_deterministic_analysis(card.external_id)
+
                 if baseline_run:
                     continue
 
@@ -939,6 +1025,7 @@ class MonitorService:
                     listing_repo.update_listing_from_card(listing, card, now)
                     existing_by_external_id[card.external_id] = listing
                 upsert_search_match_for_persisted_listing(card.external_id, seen_at=now)
+                record_deterministic_analysis(card.external_id)
                 continue
 
             listing, was_created = listing_repo.create_listing_safe(
@@ -974,6 +1061,7 @@ class MonitorService:
                         card.external_id, seen_at=now, snapshot_id=snapshot.id
                     )
                     price_changed += 1
+                record_deterministic_analysis(card.external_id)
                 retry_context = self._retry_context_from_snapshot(db, card, search_name)
                 if retry_context is not None:
                     message, payload = retry_context
@@ -1059,6 +1147,7 @@ class MonitorService:
             upsert_search_match_for_persisted_listing(
                 card.external_id, seen_at=now, snapshot_id=snapshot.id
             )
+            record_deterministic_analysis(card.external_id)
 
             use_llm_for_alert = (not settings.llm_shadow_mode) and llm.get("status") == "success"
             alert_summary = llm.get("summary", "") if use_llm_for_alert else ""
@@ -1132,6 +1221,10 @@ class MonitorService:
             "llm_failed": llm_failed,
             "llm_skipped": llm_skipped,
             "llm_shadow_mode": settings.llm_shadow_mode,
+            "deterministic_analysis_attempted": deterministic_analysis_attempted,
+            "deterministic_analysis_succeeded": deterministic_analysis_succeeded,
+            "deterministic_analysis_failed": deterministic_analysis_failed,
+            "deterministic_analysis_skipped": deterministic_analysis_skipped,
             "total_seen": len(cards),
             "filtered_samples": filtered_samples,
             "publication_missing_allowed_count": publication_missing_allowed_count,

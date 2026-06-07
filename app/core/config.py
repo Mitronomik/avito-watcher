@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen2.5:7b-instruct"
     scoring_enabled: bool = True
+    deterministic_analysis_on_monitor: bool = False
     llm_provider: Literal["off", "ollama", "openai_compatible"] = "off"
     llm_base_url: str = ""
     llm_model: str = ""
