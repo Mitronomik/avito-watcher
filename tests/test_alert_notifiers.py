@@ -398,3 +398,107 @@ def test_composite_counts_jsonl_success(tmp_path: Path):
     notifier = CompositeNotifier([JsonlOutboxNotifier(enabled=True, path=str(out))])
     sent = asyncio.run(notifier.send_listing_alert("msg", {"external_id": "42"}))
     assert sent == ["jsonl"]
+
+
+def test_google_sheets_webhook_sends_analysis_fields(monkeypatch):
+    captured = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(handler)
+
+    class FakeClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    import app.notifiers.google_sheets_webhook as module
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", FakeClient)
+    notifier = GoogleSheetsWebhookNotifier(
+        enabled=True,
+        webhook_url="https://example.com/webhook",
+        secret="top",
+    )
+    payload = {
+        "search_name": "s",
+        "external_id": "1",
+        "title": "T",
+        "price": 10,
+        "area_m2": 20,
+        "rooms": "2",
+        "address": "A",
+        "published_label": "today",
+        "published_at": "2025-01-01T00:00:00",
+        "url": "u",
+        "summary": "sum",
+        "score": 90,
+        "tags": ["hot"],
+        "analysis_profile": "commercial_rent",
+        "analysis_status": "success",
+        "analysis_score": 78,
+        "analysis_verdict": "review",
+        "analysis_version": "commercial-rent-v0",
+        "analysis_input_hash": "input-hash",
+        "analysis_context_key": "search:1",
+        "analysis_risk_flags": ["missing_area"],
+        "analysis_questions": ["Уточнить площадь"],
+        "analysis_report_md": "## Report",
+        "analysis_config_hash": "cfg-hash",
+        "analysis_config": {"hash": "cfg-hash"},
+        "analysis_price_per_m2": 500.0,
+        "analysis_facts_compact": {"price_per_m2": 500.0},
+        "recommended_next_action": "manual_review",
+    }
+
+    sent = asyncio.run(notifier.send_listing_alert("msg", payload))
+
+    assert sent is True
+    body = captured["body"]
+    assert body["secret"] == "top"
+    assert body["external_id"] == "1"
+    assert body["message"] == "msg"
+    assert body["analysis_profile"] == "commercial_rent"
+    assert body["analysis_status"] == "success"
+    assert body["analysis_score"] == 78
+    assert body["analysis_verdict"] == "review"
+    assert body["analysis_version"] == "commercial-rent-v0"
+    assert body["analysis_input_hash"] == "input-hash"
+    assert body["analysis_context_key"] == "search:1"
+    assert body["analysis_risk_flags"] == ["missing_area"]
+    assert body["analysis_questions"] == ["Уточнить площадь"]
+    assert body["analysis_report_md"] == "## Report"
+    assert body["analysis_config_hash"] == "cfg-hash"
+    assert body["analysis_config"] == {"hash": "cfg-hash"}
+    assert body["analysis_price_per_m2"] == 500.0
+    assert body["analysis_facts_compact"] == {"price_per_m2": 500.0}
+    assert body["recommended_next_action"] == "manual_review"
+
+
+def test_jsonl_outbox_preserves_analysis_payload(tmp_path: Path):
+    out = tmp_path / "alerts" / "alerts.jsonl"
+    notifier = JsonlOutboxNotifier(enabled=True, path=str(out))
+    payload = {
+        "external_id": "42",
+        "title": "T",
+        "price": 1,
+        "area_m2": 2,
+        "analysis_score": 78,
+        "analysis_verdict": "review",
+        "analysis_risk_flags": ["missing_area"],
+        "analysis_questions": ["Уточнить площадь"],
+    }
+
+    sent = asyncio.run(notifier.send_listing_alert("msg", payload))
+
+    line = out.read_text(encoding="utf-8").strip()
+    data = json.loads(line)
+    assert sent is True
+    assert data["external_id"] == "42"
+    assert data["title"] == "T"
+    assert data["payload"]["analysis_score"] == 78
+    assert data["payload"]["analysis_verdict"] == "review"
+    assert data["payload"]["analysis_risk_flags"] == ["missing_area"]
+    assert data["payload"]["analysis_questions"] == ["Уточнить площадь"]
