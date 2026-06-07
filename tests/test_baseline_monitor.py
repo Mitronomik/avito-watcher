@@ -423,7 +423,7 @@ def test_include_keywords_allows_matching_new_listing(db_session):
     result = run(service, db_session, search)
 
     assert result["created"] == 1
-    assert result["filtered"] == 0
+    assert result["filtered"] == 1
     assert result["scored"] == 1
     assert result["alerted"] == 1
     assert scalar_count(db_session, Listing) == 2
@@ -853,9 +853,20 @@ def test_filtered_samples_includes_rules_reason(db_session):
     run(service, db_session, search)
     result = run(service, db_session, search)
 
-    assert result["filtered_by_rules"] == 1
+    assert result["filtered_by_rules"] == 2
     assert result["filtered_by_publication_date"] == 0
     assert result["filtered_samples"] == [
+        {
+            "external_id": "1",
+            "title": "Listing 1",
+            "price": 100.0,
+            "area_m2": None,
+            "address": "",
+            "published_label": "",
+            "url": "https://www.avito.ru/item_1",
+            "reason": "rules",
+            "rule_failures": ["min_price"],
+        },
         {
             "external_id": "2",
             "title": "Listing 2",
@@ -1044,7 +1055,7 @@ def test_missing_published_at_policy_allow_allows_card(db_session):
     assert result["filtered_by_publication_date"] == 0
     assert result["created"] == 1
     assert result["alerted"] == 1
-    assert result["publication_missing_allowed_count"] == 1
+    assert result["publication_missing_allowed_count"] == 2
     assert result["publication_missing_rejected_count"] == 0
 
 
@@ -1068,7 +1079,7 @@ def test_missing_published_at_policy_allow_when_date_sorted_allows_card(db_sessi
 
     assert result["filtered_by_publication_date"] == 0
     assert result["created"] == 1
-    assert result["publication_missing_allowed_count"] == 1
+    assert result["publication_missing_allowed_count"] == 2
     assert result["publication_missing_rejected_count"] == 0
 
 
@@ -1089,9 +1100,9 @@ def test_missing_published_at_policy_allow_when_not_date_sorted_rejects(db_sessi
     run(service, db_session, search)
     result = run(service, db_session, search)
 
-    assert result["filtered_by_publication_date"] == 1
+    assert result["filtered_by_publication_date"] == 2
     assert result["publication_missing_allowed_count"] == 0
-    assert result["publication_missing_rejected_count"] == 1
+    assert result["publication_missing_rejected_count"] == 2
 
 
 def test_filtered_samples_capped_at_ten(db_session):
@@ -1107,7 +1118,7 @@ def test_filtered_samples_capped_at_ten(db_session):
     run(service, db_session, search)
     result = run(service, db_session, search)
 
-    assert result["filtered_by_rules"] == 15
+    assert result["filtered_by_rules"] == 16
     assert len(result["filtered_samples"]) == 10
 
 
@@ -1229,8 +1240,8 @@ def test_require_published_at_filters_unknown_published_at(db_session):
     run(service, db_session, search)
     result = run(service, db_session, search)
 
-    assert result["filtered_by_publication_date"] == 1
-    assert result["filtered"] == 1
+    assert result["filtered_by_publication_date"] == 2
+    assert result["filtered"] == 2
     assert result["created"] == 0
     assert result["scored"] == 0
     assert result["alerted"] == 0
@@ -1238,7 +1249,7 @@ def test_require_published_at_filters_unknown_published_at(db_session):
     assert scalar_count(db_session, ListingSnapshot) == 0
     assert scalar_count(db_session, AlertSent) == 0
     assert result["publication_missing_allowed_count"] == 0
-    assert result["publication_missing_rejected_count"] == 1
+    assert result["publication_missing_rejected_count"] == 2
 
 
 def test_baseline_ignores_publication_filters_but_saves_records(db_session):
@@ -1961,7 +1972,7 @@ def test_enrichment_disabled_preserves_behavior_and_zero_counters(db_session):
     assert second["item_page_publication_enrichment_failed"] == 0
     assert second["item_page_publication_enrichment_cache_hits"] == 0
     assert second["item_page_details_enrichment_attempted"] == 0
-    assert second["filtered_by_publication_date"] == 1
+    assert second["filtered_by_publication_date"] == 2
 
 
 def test_enrichment_enabled_updates_missing_published_at_and_respects_limit(monkeypatch, db_session):
@@ -2060,7 +2071,7 @@ def test_failed_enrichment_keeps_missing_and_rejects_require_published_at(monkey
     monkeypatch.setattr("app.services.monitor_service.settings.scrape_enrich_missing_published_at", True)
     result = run(service, db_session, search)
     assert result["item_page_publication_enrichment_failed"] == 1
-    assert result["filtered_by_publication_date"] == 1
+    assert result["filtered_by_publication_date"] == 2
     assert result["alerted"] == 0
 
 
@@ -2753,5 +2764,213 @@ def test_analyze_search_matches_ignores_filtered_cards_without_match(db_session)
     assert db_session.scalar(
         select(ListingSearchMatch).where(
             ListingSearchMatch.listing_external_id == "filtered-analysis"
+        )
+    ) is None
+
+
+def _add_existing_listing_with_retry_snapshot(
+    db_session,
+    external_id: str,
+    *,
+    price: float = 50.0,
+    observed_at: datetime | None = None,
+) -> ListingSnapshot:
+    observed_at = observed_at or datetime(2026, 5, 17, 11, 0, 0)
+    listing = Listing(
+        external_id=external_id,
+        url=f"https://www.avito.ru/old_{external_id}",
+        title=f"Existing {external_id}",
+        price=price,
+        first_seen_at=observed_at,
+        last_seen_at=observed_at,
+    )
+    snapshot = ListingSnapshot(
+        external_id=external_id,
+        title=listing.title,
+        price=price,
+        published_label="",
+        payload_json={
+            "llm_score": {
+                "score": 100,
+                "summary": "retry me",
+                "tags": [],
+                "status": "success",
+            }
+        },
+        screenshot_path="",
+        observed_at=observed_at,
+    )
+    db_session.add_all([listing, snapshot])
+    db_session.commit()
+    return snapshot
+
+
+def test_existing_listing_failing_rule_filters_removes_existing_search_match(db_session):
+    search = make_search(db_session, filters_json={"max_price": 100.0})
+    search.baseline_initialized = True
+    retry_snapshot = _add_existing_listing_with_retry_snapshot(
+        db_session, "existing-rule-filtered", price=50.0
+    )
+    db_session.add(
+        ListingSearchMatch(
+            search_job_id=search.id,
+            listing_external_id="existing-rule-filtered",
+            last_snapshot_id=retry_snapshot.id,
+        )
+    )
+    db_session.commit()
+    service = MonitorService(
+        parser=FakeParser(
+            [[card("existing-rule-filtered", price=150.0, title="Rejected update")]]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    result = run(service, db_session, search)
+
+    listing = db_session.scalar(
+        select(Listing).where(Listing.external_id == "existing-rule-filtered")
+    )
+    snapshots = db_session.scalars(
+        select(ListingSnapshot).where(
+            ListingSnapshot.external_id == "existing-rule-filtered"
+        )
+    ).all()
+    assert result["filtered_by_rules"] == 1
+    assert result["filtered_samples"][0]["reason"] == "rules"
+    assert db_session.scalar(
+        select(ListingSearchMatch).where(
+            ListingSearchMatch.search_job_id == search.id,
+            ListingSearchMatch.listing_external_id == "existing-rule-filtered",
+        )
+    ) is None
+    assert listing.title == "Existing existing-rule-filtered"
+    assert listing.price == 50.0
+    assert [snapshot.id for snapshot in snapshots] == [retry_snapshot.id]
+    assert service.notifier.messages == []
+
+
+def test_existing_listing_failing_publication_filters_removes_existing_search_match(
+    db_session,
+):
+    now = datetime(2026, 5, 17, 12, 0, 0)
+    search = make_search(db_session, filters_json={"max_age_hours": 24})
+    search.baseline_initialized = True
+    retry_snapshot = _add_existing_listing_with_retry_snapshot(
+        db_session, "existing-publication-filtered", price=50.0
+    )
+    db_session.add(
+        ListingSearchMatch(
+            search_job_id=search.id,
+            listing_external_id="existing-publication-filtered",
+            last_snapshot_id=retry_snapshot.id,
+        )
+    )
+    db_session.commit()
+    service = MonitorService(
+        parser=FakeParser(
+            [
+                [
+                    card(
+                        "existing-publication-filtered",
+                        price=50.0,
+                        title="Rejected publication update",
+                        published_at=now - timedelta(hours=25),
+                    )
+                ]
+            ]
+        ),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+        now_func=lambda: now,
+    )
+
+    result = run(service, db_session, search)
+
+    listing = db_session.scalar(
+        select(Listing).where(Listing.external_id == "existing-publication-filtered")
+    )
+    snapshots = db_session.scalars(
+        select(ListingSnapshot).where(
+            ListingSnapshot.external_id == "existing-publication-filtered"
+        )
+    ).all()
+    assert result["filtered_by_publication_date"] == 1
+    assert result["filtered_samples"][0]["reason"] == "publication_date"
+    assert db_session.scalar(
+        select(ListingSearchMatch).where(
+            ListingSearchMatch.search_job_id == search.id,
+            ListingSearchMatch.listing_external_id == "existing-publication-filtered",
+        )
+    ) is None
+    assert listing.title == "Existing existing-publication-filtered"
+    assert [snapshot.id for snapshot in snapshots] == [retry_snapshot.id]
+    assert service.notifier.messages == []
+
+
+def test_existing_listing_passing_filters_still_updates_match_and_retry(db_session):
+    search = make_search(db_session, filters_json={"max_price": 100.0})
+    search.baseline_initialized = True
+    retry_snapshot = _add_existing_listing_with_retry_snapshot(
+        db_session, "existing-passing-filters", price=50.0
+    )
+    service = MonitorService(
+        parser=FakeParser([[card("existing-passing-filters", price=50.0)]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    result = run(service, db_session, search)
+
+    match = db_session.scalar(
+        select(ListingSearchMatch).where(
+            ListingSearchMatch.search_job_id == search.id,
+            ListingSearchMatch.listing_external_id == "existing-passing-filters",
+        )
+    )
+    assert result["filtered"] == 0
+    assert result["alerted"] == 1
+    assert match is not None
+    assert match.last_snapshot_id == retry_snapshot.id
+    assert service.notifier.messages
+    assert db_session.scalar(
+        select(AlertSent).where(
+            AlertSent.dedupe_key == "telegram:new:existing-passing-filters"
+        )
+    ) is not None
+
+
+def test_analyze_search_matches_does_not_see_removed_stale_match(
+    db_session,
+):
+    search = make_search(db_session, filters_json={"max_price": 100.0})
+    search.baseline_initialized = True
+    retry_snapshot = _add_existing_listing_with_retry_snapshot(
+        db_session, "existing-filtered-analysis", price=50.0
+    )
+    db_session.add(
+        ListingSearchMatch(
+            search_job_id=search.id,
+            listing_external_id="existing-filtered-analysis",
+            last_snapshot_id=retry_snapshot.id,
+        )
+    )
+    db_session.commit()
+    service = MonitorService(
+        parser=FakeParser([[card("existing-filtered-analysis", price=150.0)]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    result = run(service, db_session, search)
+    analyses = ListingAnalysisService(db_session).analyze_search_matches(search.id, limit=20)
+
+    assert result["filtered_by_rules"] == 1
+    assert analyses == []
+    assert db_session.scalar(
+        select(ListingSearchMatch).where(
+            ListingSearchMatch.search_job_id == search.id,
+            ListingSearchMatch.listing_external_id == "existing-filtered-analysis",
         )
     ) is None
