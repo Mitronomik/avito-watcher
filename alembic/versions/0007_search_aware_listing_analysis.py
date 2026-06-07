@@ -1,6 +1,6 @@
 """add search-aware listing analysis context
 
-Revision ID: 0007_search_aware_listing_analysis
+Revision ID: 0007_search_analysis_ctx
 Revises: 0006_listing_analyses
 Create Date: 2026-06-07
 """
@@ -8,7 +8,7 @@ Create Date: 2026-06-07
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0007_search_aware_listing_analysis"
+revision = "0007_search_analysis_ctx"
 down_revision = "0006_listing_analyses"
 branch_labels = None
 depends_on = None
