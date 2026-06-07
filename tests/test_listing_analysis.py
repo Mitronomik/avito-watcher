@@ -132,6 +132,21 @@ def test_analysis_config_hash_stability_and_invalidation():
     assert base.hash() == AnalysisConfig.from_search_filters(profile="commercial_rent").hash()
 
 
+def test_analysis_config_hash_payload_omits_none_and_null_filters_are_missing():
+    default = AnalysisConfig.from_search_filters(profile="commercial_rent")
+    with_null = AnalysisConfig.from_search_filters(
+        profile="commercial_rent",
+        filters_json={"max_price": None, "estimated_monthly_rent": None},
+    )
+    payload = default.to_hash_payload()
+
+    assert "min_price_per_m2" not in payload
+    assert "estimated_monthly_rent" not in payload
+    assert "opex_ratio" not in payload
+    assert with_null == default
+    assert with_null.hash() == default.hash()
+
+
 def test_calculate_input_hash_uses_analysis_config_hash_only_for_filters(db_session):
     listing = _listing(db_session, external_id="hash-config-1")
     snapshot = _snapshot(db_session, external_id="hash-config-1")
@@ -197,6 +212,45 @@ def test_search_analysis_uses_filters_json_config_and_dedupes_same_input_hash(db
     assert len(rows) == 1
 
 
+def test_search_analysis_reanalyzes_when_config_hash_changes(db_session):
+    search = _search(
+        db_session,
+        name="config-invalidation",
+        filters_json={"analysis_profile": "commercial_rent", "max_age_hours": 72},
+    )
+    _listing(
+        db_session,
+        external_id="config-invalidation-1",
+        title="Офис 60 м²",
+        price=120_000,
+        area_m2=60,
+        published_at=datetime.now(UTC) - timedelta(hours=30),
+    )
+    ListingSearchMatchRepository(db_session).upsert_match(
+        search.id, "config-invalidation-1"
+    )
+    service = ListingAnalysisService(
+        db_session, provider=get_analysis_provider(resolve_search_analysis_profile(search))
+    )
+
+    first = service.analyze_search_matches(search.id, limit=20)
+    search.filters_json = {"analysis_profile": "commercial_rent", "max_age_hours": 24}
+    db_session.flush()
+    second = service.analyze_search_matches(search.id, limit=20)
+
+    assert len(first) == 1
+    assert len(second) == 1
+    assert first[0].input_hash != second[0].input_hash
+    assert first[0].status == "stale"
+    assert second[0].status == "success"
+    assert second[0].facts_json["analysis_config"]["max_age_hours"] == 24
+    assert second[0].facts_json["freshness_status"] == "stale"
+    rows = db_session.scalars(
+        select(ListingAnalysis).order_by(ListingAnalysis.id.asc())
+    ).all()
+    assert len(rows) == 2
+
+
 def test_commercial_rent_default_freshness_window_remains_72h():
     result = CommercialRentDeterministicAnalysisProvider().analyze(
         listing=Listing(
@@ -236,6 +290,86 @@ def test_commercial_rent_config_max_age_hours_marks_30h_listing_stale():
 
     assert result.facts_json["freshness_status"] == "stale"
     assert "stale_publication_sanity_cap" in result.risks_json["flags"]
+
+
+def test_commercial_rent_config_max_age_hours_below_24_caps_freshness():
+    provider = CommercialRentDeterministicAnalysisProvider()
+    config = AnalysisConfig.from_search_filters(
+        profile="commercial_rent", filters_json={"max_age_hours": 12}
+    )
+
+    stale = provider.analyze(
+        listing=Listing(
+            external_id="fresh-12-stale",
+            url="https://www.avito.ru/item/fresh-12-stale",
+            title="Офис 60 м²",
+            price=120_000,
+            address="Санкт-Петербург",
+            area_m2=60,
+            published_at=datetime.now(UTC) - timedelta(hours=18),
+        ),
+        snapshot=None,
+        input_hash="hash",
+        config=config,
+    )
+    fresh = provider.analyze(
+        listing=Listing(
+            external_id="fresh-12-fresh",
+            url="https://www.avito.ru/item/fresh-12-fresh",
+            title="Офис 60 м²",
+            price=120_000,
+            address="Санкт-Петербург",
+            area_m2=60,
+            published_at=datetime.now(UTC) - timedelta(hours=6),
+        ),
+        snapshot=None,
+        input_hash="hash",
+        config=config,
+    )
+
+    assert stale.facts_json["freshness_status"] == "stale"
+    assert fresh.facts_json["freshness_status"] == "fresh"
+
+
+def test_commercial_rent_provider_config_does_not_leak_between_analyses():
+    provider = CommercialRentDeterministicAnalysisProvider()
+    narrow_config = AnalysisConfig.from_search_filters(
+        profile="commercial_rent",
+        filters_json={"max_age_hours": 12, "max_price": 1},
+    )
+
+    provider.analyze(
+        listing=Listing(
+            external_id="leak-first",
+            url="https://www.avito.ru/item/leak-first",
+            title="Офис 60 м²",
+            price=120_000,
+            address="Санкт-Петербург",
+            area_m2=60,
+            published_at=datetime.now(UTC) - timedelta(hours=18),
+        ),
+        snapshot=None,
+        input_hash="hash",
+        config=narrow_config,
+    )
+    default_result = provider.analyze(
+        listing=Listing(
+            external_id="leak-second",
+            url="https://www.avito.ru/item/leak-second",
+            title="Офис 60 м²",
+            price=120_000,
+            address="Санкт-Петербург",
+            area_m2=60,
+            published_at=datetime.now(UTC) - timedelta(hours=30),
+        ),
+        snapshot=None,
+        input_hash="hash",
+    )
+
+    assert provider.target_max_price == 200_000.0
+    assert provider.target_freshness_hours == 72.0
+    assert default_result.facts_json["freshness_status"] == "recent"
+    assert "over_budget" not in default_result.risks_json["flags"]
 
 
 def test_creates_analysis_for_alerted_listing(db_session):

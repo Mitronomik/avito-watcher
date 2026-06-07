@@ -42,7 +42,11 @@ class AnalysisConfig:
         return cls(**values)
 
     def to_hash_payload(self) -> dict[str, Any]:
-        return {key: _normalize_value(value) for key, value in asdict(self).items()}
+        return {
+            key: _normalize_value(value)
+            for key, value in asdict(self).items()
+            if value is not None
+        }
 
     def hash(self) -> str:
         raw = json.dumps(
@@ -102,9 +106,9 @@ def _profile_defaults(profile: str) -> AnalysisConfig:
     return AnalysisConfig(profile=profile, max_age_hours=72.0)
 
 
-def _coerce_number(value: Any) -> float | None | object:
+def _coerce_number(value: Any) -> float | object:
     if value is None:
-        return None
+        return _MISSING
     if isinstance(value, bool):
         return _MISSING
     if isinstance(value, int | float):

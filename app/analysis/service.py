@@ -116,13 +116,9 @@ class ListingAnalysisService:
     def analyze_search_matches(self, search_job_id: int, limit: int) -> list[ListingAnalysis]:
         context_key = f"search:{search_job_id}"
         config = self._config_for_search(search_job_id)
-        match_repo = ListingSearchMatchRepository(self.db)
         analyses: list[ListingAnalysis] = []
-        for match in match_repo.list_matches_without_analysis(
-            search_job_id=search_job_id,
-            profile=self.provider.profile,
-            analysis_version=self.provider.analysis_version,
-            limit=limit,
+        for match in self.list_search_matches_needing_analysis(
+            search_job_id=search_job_id, limit=limit
         ):
             listing = self.listing_repo.get_by_external_id(match.listing_external_id)
             if listing is None:
@@ -137,6 +133,37 @@ class ListingAnalysisService:
             )
         return analyses
 
+    def list_search_matches_needing_analysis(
+        self, search_job_id: int, limit: int
+    ) -> list:
+        if limit <= 0:
+            return []
+        context_key = f"search:{search_job_id}"
+        config = self._config_for_search(search_job_id)
+        pending = []
+        for match in ListingSearchMatchRepository(self.db).list_matches_for_search(
+            search_job_id
+        ):
+            listing = self.listing_repo.get_by_external_id(match.listing_external_id)
+            if listing is None:
+                continue
+            input_hash = self._calculate_current_input_hash(
+                listing=listing, context_key=context_key, config=config
+            )
+            existing = self.analysis_repo.get_by_input_hash(
+                listing_external_id=listing.external_id,
+                profile=self.provider.profile,
+                analysis_version=self.provider.analysis_version,
+                input_hash=input_hash,
+                context_key=context_key,
+            )
+            if existing is not None:
+                continue
+            pending.append(match)
+            if len(pending) >= limit:
+                break
+        return pending
+
     def _analyze_existing_listing(
         self,
         listing: Listing,
@@ -149,13 +176,8 @@ class ListingAnalysisService:
             listing.external_id
         )
         config = config or AnalysisConfig.from_search_filters(profile=self.provider.profile)
-        input_hash = calculate_input_hash(
-            listing,
-            snapshot,
-            profile=self.provider.profile,
-            analysis_version=self.provider.analysis_version,
-            context_key=context_key,
-            config=config,
+        input_hash = self._calculate_current_input_hash(
+            listing=listing, snapshot=snapshot, context_key=context_key, config=config
         )
         analysis = self.analysis_repo.create_or_update_analysis(
             listing_external_id=listing.external_id,
@@ -200,6 +222,27 @@ class ListingAnalysisService:
             model_name=result.model_name,
         )
         return analysis
+
+    def _calculate_current_input_hash(
+        self,
+        *,
+        listing: Listing,
+        context_key: str,
+        config: AnalysisConfig,
+        snapshot: ListingSnapshot | None = None,
+    ) -> str:
+        if snapshot is None:
+            snapshot = self.analysis_repo.get_latest_snapshot_for_listing(
+                listing.external_id
+            )
+        return calculate_input_hash(
+            listing,
+            snapshot,
+            profile=self.provider.profile,
+            analysis_version=self.provider.analysis_version,
+            context_key=context_key,
+            config=config,
+        )
 
 
     def _config_for_search(self, search_job_id: int) -> AnalysisConfig:
