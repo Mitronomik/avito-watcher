@@ -18,6 +18,7 @@ from app.cli import _build_parser, _parser_stats_snapshot
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.listing import Listing
+from app.models.listing_analysis import ListingAnalysis
 from app.parsers.errors import ParserError
 from app.repositories.search_repository import SearchRepository
 from app.services.monitor_service import MonitorService, runtime_diagnostics
@@ -432,7 +433,7 @@ def searches(request: Request, db: Session = Depends(get_db)):
         f"<strong>Last success:</strong> {html.escape(str(last_success or '—'))}<br>"
         f"<strong>Last error:</strong> {html.escape(recent_error)}</p></section>"
     )
-    return _render_page("Searches", f"<h1>Searches</h1>{notice}<p><a href='{_admin_url('/admin/searches/new', api_key)}'>New search</a> · <a href='{_admin_url('/admin/alerts', api_key)}'>Alerts</a> · <a href='{_admin_url('/admin/listings', api_key)}'>Listings</a></p>{runtime_block}<table><tr><th>id</th><th>name / source</th><th>human_title</th><th>status</th><th>fail_count</th><th>last_error</th><th>last_success_at</th><th>next_run_at</th><th>poll_interval_sec</th><th>cli</th><th>actions</th></tr>{''.join(rows)}</table>")
+    return _render_page("Searches", f"<h1>Searches</h1>{notice}<p><a href='{_admin_url('/admin/searches/new', api_key)}'>New search</a> · <a href='{_admin_url('/admin/alerts', api_key)}'>Alerts</a> · <a href='{_admin_url('/admin/listings', api_key)}'>Listings</a> · <a href='{_admin_url('/admin/listing-analyses', api_key)}'>Listing analyses</a></p>{runtime_block}<table><tr><th>id</th><th>name / source</th><th>human_title</th><th>status</th><th>fail_count</th><th>last_error</th><th>last_success_at</th><th>next_run_at</th><th>poll_interval_sec</th><th>cli</th><th>actions</th></tr>{''.join(rows)}</table>")
 
 
 @router.get('/alerts', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
@@ -461,7 +462,7 @@ def alerts(request: Request, limit: int = Query(default=50), search_name: str | 
     current_limit = _html_attr(effective_limit)
     current_search = _html_attr(normalized_search_name)
     body = (
-        f"<h1>Alerts</h1><p><a href='{_html_attr(_admin_url('/admin/searches', api_key))}'>Back to searches</a> · <a href='{_html_attr(_admin_url('/admin/listings', api_key))}'>Listings</a></p>"
+        f"<h1>Alerts</h1><p><a href='{_html_attr(_admin_url('/admin/searches', api_key))}'>Back to searches</a> · <a href='{_html_attr(_admin_url('/admin/listings', api_key))}'>Listings</a> · <a href='{_html_attr(_admin_url('/admin/listing-analyses', api_key))}'>Listing analyses</a></p>"
         f"<p>JSONL file: <code>{html.escape(settings.jsonl_outbox_path)}</code></p>"
         f"<p>Visible: {len(rows_data)} / Loaded: {total_loaded}</p>{warning}"
         f"<form method='get' action='{_html_attr(form_action)}'><input type='hidden' name='api_key' value='{_html_attr(api_key)}'>"
@@ -470,6 +471,104 @@ def alerts(request: Request, limit: int = Query(default=50), search_name: str | 
         f"<button type='submit'>Apply</button></form>{empty}{table}"
     )
     return _render_page('Alerts', body)
+
+
+
+def _json_pre(value: object) -> str:
+    return html.escape(json.dumps(value or {}, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+@router.get('/listing-analyses', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
+def listing_analyses(
+    request: Request,
+    db: Session = Depends(get_db),
+    profile: str | None = Query(default=None),
+    status_filter: str | None = Query(default=None, alias='status'),
+    verdict: str | None = Query(default=None),
+    search_job_id: int | None = Query(default=None),
+    listing_external_id: str | None = Query(default=None),
+    limit: int = Query(default=100),
+):
+    api_key = request.query_params.get('api_key')
+    effective_limit = max(1, min(limit, 500))
+    normalized_profile = (profile or '').strip() or None
+    normalized_status = (status_filter or '').strip() or None
+    normalized_verdict = (verdict or '').strip() or None
+    normalized_listing_external_id = (listing_external_id or '').strip() or None
+
+    stmt = select(ListingAnalysis, Listing).outerjoin(
+        Listing,
+        Listing.external_id == ListingAnalysis.listing_external_id,
+    )
+    if normalized_profile:
+        stmt = stmt.where(ListingAnalysis.profile == normalized_profile)
+    if normalized_status:
+        stmt = stmt.where(ListingAnalysis.status == normalized_status)
+    if normalized_verdict:
+        stmt = stmt.where(ListingAnalysis.verdict == normalized_verdict)
+    if search_job_id is not None:
+        stmt = stmt.where(ListingAnalysis.search_job_id == search_job_id)
+    if normalized_listing_external_id:
+        stmt = stmt.where(ListingAnalysis.listing_external_id == normalized_listing_external_id)
+
+    rows_data = db.execute(
+        stmt.order_by(ListingAnalysis.created_at.desc(), ListingAnalysis.id.desc()).limit(effective_limit)
+    ).all()
+
+    rows = []
+    for analysis, listing in rows_data:
+        listing_block = '<span class="preview">No matching listing.</span>'
+        if listing is not None:
+            listing_link = (
+                f"<div><a href='{_html_attr(listing.url)}' target='_blank' rel='noopener noreferrer'>{html.escape(listing.url)}</a></div>"
+                if listing.url
+                else ''
+            )
+            listing_block = (
+                f"<div><strong>{html.escape(listing.title or '')}</strong></div>"
+                f"<div>price={html.escape(str(listing.price or ''))}; area_m2={html.escape(str(listing.area_m2 or ''))}</div>"
+                f"<div>{html.escape(listing.address or '')}</div>{listing_link}"
+            )
+        details = (
+            "<details><summary>report / details</summary>"
+            f"<h4>report_md</h4><pre>{html.escape(analysis.report_md or '')}</pre>"
+            f"<h4>facts_json</h4><pre>{_json_pre(analysis.facts_json)}</pre>"
+            f"<h4>risks_json</h4><pre>{_json_pre(analysis.risks_json)}</pre>"
+            f"<h4>questions_json</h4><pre>{_json_pre(analysis.questions_json)}</pre>"
+            f"<h4>error</h4><pre>error_type: {html.escape(analysis.error_type or '')}\nerror_message: {html.escape(analysis.error_message or '')}</pre>"
+            "</details>"
+        )
+        rows.append(
+            f"<tr><td>{analysis.id}</td><td>{html.escape(str(analysis.search_job_id or ''))}</td>"
+            f"<td>{html.escape(analysis.context_key or '')}</td><td>{html.escape(analysis.listing_external_id or '')}</td>"
+            f"<td>{html.escape(analysis.profile or '')}</td><td>{html.escape(analysis.analysis_version or '')}</td>"
+            f"<td>{html.escape(analysis.status or '')}</td><td>{html.escape(str(analysis.score if analysis.score is not None else ''))}</td>"
+            f"<td>{html.escape(analysis.verdict or '')}</td><td>{html.escape(str(analysis.created_at or ''))}</td>"
+            f"<td>{html.escape(str(analysis.updated_at or ''))}</td><td>{listing_block}</td><td>{details}</td></tr>"
+        )
+
+    empty = '<p>No listing analyses found yet.</p>' if not rows else ''
+    table = '' if not rows else (
+        "<table><tr><th>id</th><th>search_job_id</th><th>context_key</th><th>listing_external_id</th>"
+        "<th>profile</th><th>analysis_version</th><th>status</th><th>score</th><th>verdict</th>"
+        "<th>created_at</th><th>updated_at</th><th>listing</th><th>report</th></tr>"
+        f"{''.join(rows)}</table>"
+    )
+    form_action = _admin_url('/admin/listing-analyses', api_key)
+    body = (
+        f"<h1>Listing analyses</h1><p><a href='{_html_attr(_admin_url('/admin/searches', api_key))}'>Back to searches</a> · "
+        f"<a href='{_html_attr(_admin_url('/admin/listings', api_key))}'>Listings</a> · <a href='{_html_attr(_admin_url('/admin/listing-analyses', api_key))}'>Listing analyses</a></p>"
+        "<p class='preview'>Read-only analysis report view. This page does not execute, edit, delete, or re-run analyses.</p>"
+        f"<form method='get' action='{_html_attr(form_action)}'><input type='hidden' name='api_key' value='{_html_attr(api_key)}'>"
+        f"<div class='row'><label>profile<input name='profile' value='{_html_attr(normalized_profile or '')}'></label></div>"
+        f"<div class='row'><label>status<input name='status' value='{_html_attr(normalized_status or '')}'></label></div>"
+        f"<div class='row'><label>verdict<input name='verdict' value='{_html_attr(normalized_verdict or '')}'></label></div>"
+        f"<div class='row'><label>search_job_id<input name='search_job_id' type='number' value='{_html_attr(search_job_id or '')}'></label></div>"
+        f"<div class='row'><label>listing_external_id<input name='listing_external_id' value='{_html_attr(normalized_listing_external_id or '')}'></label></div>"
+        f"<div class='row'><label>limit<input name='limit' type='number' min='1' max='500' value='{_html_attr(effective_limit)}'></label></div>"
+        f"<button type='submit'>Apply</button></form>{empty}{table}"
+    )
+    return _render_page('Listing analyses', body)
 
 
 
@@ -514,7 +613,7 @@ def listings(request: Request, db: Session = Depends(get_db), limit: int = Query
     current_q = _html_attr(query_text)
     current_limit = _html_attr(effective_limit)
     body = (
-        f"<h1>Listings</h1><p><a href='{_html_attr(_admin_url('/admin/searches', api_key))}'>Back to searches</a> · <a href='{_html_attr(_admin_url('/admin/alerts', api_key))}'>Alerts</a></p>"
+        f"<h1>Listings</h1><p><a href='{_html_attr(_admin_url('/admin/searches', api_key))}'>Back to searches</a> · <a href='{_html_attr(_admin_url('/admin/alerts', api_key))}'>Alerts</a> · <a href='{_html_attr(_admin_url('/admin/listing-analyses', api_key))}'>Listing analyses</a></p>"
         f"<form method='get' action='{_html_attr(form_action)}'><input type='hidden' name='api_key' value='{_html_attr(api_key)}'>"
         f"<div class='row'><label>q<input name='q' value='{current_q}'></label></div>"
         f"<div class='row'><label>published<select name='published'>"
