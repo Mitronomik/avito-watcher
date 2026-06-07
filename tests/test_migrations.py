@@ -7,6 +7,12 @@ from sqlalchemy.engine import make_url
 
 
 def test_alembic_upgrade_head_passes_on_postgresql():
+    if os.getenv("RUN_ALEMBIC_SMOKE") != "1":
+        pytest.skip(
+            "set RUN_ALEMBIC_SMOKE=1 to run the PostgreSQL migration smoke test; "
+            "GitHub CI already runs alembic upgrade head in a dedicated step"
+        )
+
     database_url = os.getenv("DATABASE_URL", "")
     if not database_url.startswith("postgresql"):
         pytest.skip("PostgreSQL DATABASE_URL is required for migration smoke test")
