@@ -5,6 +5,7 @@ from app.models.listing import Listing  # noqa: F401
 from app.models.listing_snapshot import ListingSnapshot  # noqa: F401
 from app.models.alert_sent import AlertSent  # noqa: F401
 from app.models.listing_analysis import ListingAnalysis  # noqa: F401
+from app.models.listing_search_match import ListingSearchMatch  # noqa: F401
 
 
 def init_db() -> None:

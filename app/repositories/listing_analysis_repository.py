@@ -18,13 +18,18 @@ class ListingAnalysisRepository:
         self.db = db
 
     def get_latest_for_listing(
-        self, external_id: str, profile: str | None = None
+        self,
+        external_id: str,
+        profile: str | None = None,
+        context_key: str | None = None,
     ) -> ListingAnalysis | None:
         stmt = select(ListingAnalysis).where(
             ListingAnalysis.listing_external_id == external_id
         )
         if profile is not None:
             stmt = stmt.where(ListingAnalysis.profile == profile)
+        if context_key is not None:
+            stmt = stmt.where(ListingAnalysis.context_key == context_key)
         return self.db.scalar(
             stmt.order_by(ListingAnalysis.created_at.desc(), ListingAnalysis.id.desc())
         )
@@ -47,6 +52,8 @@ class ListingAnalysisRepository:
         status: str,
         analysis_version: str,
         input_hash: str,
+        search_job_id: int | None = None,
+        context_key: str = "global",
         model_provider: str | None = None,
         model_name: str | None = None,
         score: float | None = None,
@@ -65,6 +72,7 @@ class ListingAnalysisRepository:
                 ListingAnalysis.profile == profile,
                 ListingAnalysis.analysis_version == analysis_version,
                 ListingAnalysis.input_hash == input_hash,
+                ListingAnalysis.context_key == context_key,
             )
         )
         if existing is None:
@@ -73,16 +81,21 @@ class ListingAnalysisRepository:
                 profile=profile,
                 analysis_version=analysis_version,
                 input_hash=input_hash,
+                context_key=context_key,
             )
             existing = ListingAnalysis(
                 listing_external_id=listing_external_id,
                 profile=profile,
                 analysis_version=analysis_version,
                 input_hash=input_hash,
+                search_job_id=search_job_id,
+                context_key=context_key,
             )
             self.db.add(existing)
 
         existing.snapshot_id = snapshot_id
+        existing.search_job_id = search_job_id
+        existing.context_key = context_key
         existing.status = status
         existing.model_provider = model_provider
         existing.model_name = model_name
@@ -99,7 +112,11 @@ class ListingAnalysisRepository:
         return existing
 
     def list_alerted_listings_without_analysis(
-        self, limit: int, profile: str | None = None
+        self,
+        limit: int,
+        profile: str | None = None,
+        analysis_version: str | None = None,
+        context_key: str = "global",
     ) -> list[Listing]:
         if limit <= 0:
             return []
@@ -113,9 +130,16 @@ class ListingAnalysisRepository:
             .subquery()
         )
         analyzed_external_ids = select(ListingAnalysis.listing_external_id).distinct()
+        analyzed_external_ids = analyzed_external_ids.where(
+            ListingAnalysis.context_key == context_key
+        )
         if profile is not None:
             analyzed_external_ids = analyzed_external_ids.where(
                 ListingAnalysis.profile == profile
+            )
+        if analysis_version is not None:
+            analyzed_external_ids = analyzed_external_ids.where(
+                ListingAnalysis.analysis_version == analysis_version
             )
         stmt = (
             select(Listing)
@@ -183,12 +207,14 @@ class ListingAnalysisRepository:
         profile: str,
         analysis_version: str,
         input_hash: str,
+        context_key: str,
     ) -> None:
         for analysis in self.db.scalars(
             select(ListingAnalysis).where(
                 ListingAnalysis.listing_external_id == listing_external_id,
                 ListingAnalysis.profile == profile,
                 ListingAnalysis.analysis_version == analysis_version,
+                ListingAnalysis.context_key == context_key,
                 ListingAnalysis.input_hash != input_hash,
                 ListingAnalysis.status != "stale",
             )

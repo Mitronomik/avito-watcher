@@ -21,13 +21,16 @@ class ListingAnalysis(Base):
             "profile",
             "analysis_version",
             "input_hash",
-            name="uq_listing_analyses_input",
+            "context_key",
+            name="uq_listing_analyses_input_context",
         ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     listing_external_id: Mapped[str] = mapped_column(String(128), index=True)
     snapshot_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    search_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    context_key: Mapped[str] = mapped_column(String(160), default="global", index=True)
     profile: Mapped[str] = mapped_column(String(128), default="default", index=True)
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
     analysis_version: Mapped[str] = mapped_column(String(64), default="mock-v1")

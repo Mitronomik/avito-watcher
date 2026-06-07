@@ -24,6 +24,7 @@ from app.parsers.avito_parser import AvitoParser
 from app.parsers.schemas import ListingCard
 from app.repositories.alert_repository import AlertRepository
 from app.repositories.listing_repository import ListingRepository
+from app.repositories.listing_search_match_repository import ListingSearchMatchRepository
 from app.repositories.search_repository import SearchRepository
 from app.utils.formatting import build_listing_message
 
@@ -546,7 +547,7 @@ class MonitorService:
             else:
                 cards = await self.parser.fetch_search_cards(search.source_url)
             result = await self._process_cards(
-                db, cards, baseline_run, search.filters_json, search.name
+                db, cards, baseline_run, search.filters_json, search.name, search.id
             )
 
             if baseline_run:
@@ -734,8 +735,10 @@ class MonitorService:
         baseline_run: bool,
         filters: dict | None,
         search_name: str,
+        search_job_id: int | None = None,
     ) -> dict:
         listing_repo = ListingRepository(db)
+        match_repo = ListingSearchMatchRepository(db)
         existing_by_external_id = {
             card.external_id: listing_repo.get_by_external_id(card.external_id)
             for card in cards
@@ -777,6 +780,14 @@ class MonitorService:
         for card in cards:
             now = self._now()
             existing = existing_by_external_id.get(card.external_id)
+            if search_job_id is not None:
+                latest_snapshot = listing_repo.get_latest_snapshot_for_listing(card.external_id)
+                match_repo.upsert_match(
+                    search_job_id=search_job_id,
+                    listing_external_id=card.external_id,
+                    snapshot_id=latest_snapshot.id if latest_snapshot is not None else None,
+                    seen_at=now,
+                )
 
             if existing:
                 old_price = existing.price
@@ -784,7 +795,7 @@ class MonitorService:
 
                 if not baseline_run and old_price != card.price:
                     existing.price = card.price
-                    listing_repo.create_snapshot(
+                    snapshot = listing_repo.create_snapshot(
                         external_id=card.external_id,
                         title=card.title,
                         price=card.price,
@@ -794,6 +805,13 @@ class MonitorService:
                         screenshot_path="",
                         observed_at=now,
                     )
+                    if search_job_id is not None:
+                        match_repo.upsert_match(
+                            search_job_id=search_job_id,
+                            listing_external_id=card.external_id,
+                            snapshot_id=snapshot.id,
+                            seen_at=now,
+                        )
                     price_changed += 1
 
                 if baseline_run:
@@ -919,7 +937,7 @@ class MonitorService:
                 listing_repo.update_listing_from_card(listing, card, now)
                 if old_price != card.price:
                     listing.price = card.price
-                    listing_repo.create_snapshot(
+                    snapshot = listing_repo.create_snapshot(
                         external_id=card.external_id,
                         title=card.title,
                         price=card.price,
@@ -929,6 +947,13 @@ class MonitorService:
                         screenshot_path="",
                         observed_at=now,
                     )
+                    if search_job_id is not None:
+                        match_repo.upsert_match(
+                            search_job_id=search_job_id,
+                            listing_external_id=card.external_id,
+                            snapshot_id=snapshot.id,
+                            seen_at=now,
+                        )
                     price_changed += 1
                 retry_context = self._retry_context_from_snapshot(db, card, search_name)
                 if retry_context is not None:
@@ -1002,7 +1027,7 @@ class MonitorService:
                 llm_skipped += 1
                 llm = {"score": None, "summary": "", "tags": [], "status": "skipped", "provider": "off", "model": "", "prompt_version": settings.llm_prompt_version, "error_type": None}
 
-            listing_repo.create_snapshot(
+            snapshot = listing_repo.create_snapshot(
                 external_id=card.external_id,
                 title=card.title,
                 price=card.price,
@@ -1012,6 +1037,13 @@ class MonitorService:
                 screenshot_path="",
                 observed_at=now,
             )
+            if search_job_id is not None:
+                match_repo.upsert_match(
+                    search_job_id=search_job_id,
+                    listing_external_id=card.external_id,
+                    snapshot_id=snapshot.id,
+                    seen_at=now,
+                )
 
             use_llm_for_alert = (not settings.llm_shadow_mode) and llm.get("status") == "success"
             alert_summary = llm.get("summary", "") if use_llm_for_alert else ""

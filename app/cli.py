@@ -9,7 +9,7 @@ import uvicorn
 from pathlib import Path
 from urllib.parse import urlparse
 from app.analysis.provider import get_analysis_provider
-from app.analysis.service import ListingAnalysisService
+from app.analysis.service import ListingAnalysisService, resolve_search_analysis_profile
 from app.bot.telegram_commands import build_telegram_application
 from app.parsers.avito_parser import AvitoParser
 from app.parsers.errors import ParserError
@@ -317,6 +317,8 @@ def _analysis_to_json(analysis) -> dict:
         "status": analysis.status,
         "analysis_version": analysis.analysis_version,
         "input_hash": analysis.input_hash,
+        "search_job_id": analysis.search_job_id,
+        "context_key": analysis.context_key,
         "score": analysis.score,
         "verdict": analysis.verdict,
         "error_type": analysis.error_type,
@@ -359,6 +361,36 @@ def cmd_analyze_alerted_listings(args) -> None:
         db.commit()
         result = {
             "ok": True,
+            "limit": args.limit,
+            "count": len(analyses),
+            "analyses": [_analysis_to_json(analysis) for analysis in analyses],
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_analyze_search_matches(args) -> None:
+    init_db()
+    with SessionLocal() as db:
+        search_repo = SearchRepository(db)
+        search = search_repo.get(args.search_id)
+        if search is None:
+            result = {
+                "ok": False,
+                "search_id": args.search_id,
+                "error_type": "ValueError",
+                "error": f"Search job {args.search_id} not found",
+            }
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return
+
+        profile = resolve_search_analysis_profile(search)
+        service = ListingAnalysisService(db, provider=get_analysis_provider(profile))
+        analyses = service.analyze_search_matches(search.id, args.limit)
+        db.commit()
+        result = {
+            "ok": True,
+            "search_id": search.id,
+            "profile": profile,
             "limit": args.limit,
             "count": len(analyses),
             "analyses": [_analysis_to_json(analysis) for analysis in analyses],
@@ -430,6 +462,14 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_alerted.add_argument("--limit", type=int, default=20)
     analyze_alerted.add_argument("--profile", default="default")
     analyze_alerted.set_defaults(func=cmd_analyze_alerted_listings)
+
+    analyze_search_matches = sub.add_parser(
+        "analyze-search-matches",
+        help="Analyze listing matches for one search using its analysis profile",
+    )
+    analyze_search_matches.add_argument("--search-id", type=int, required=True)
+    analyze_search_matches.add_argument("--limit", type=int, default=20)
+    analyze_search_matches.set_defaults(func=cmd_analyze_search_matches)
 
     return parser
 
