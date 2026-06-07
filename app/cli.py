@@ -17,6 +17,7 @@ from app.parsers.proxy_manager import ProxyManager
 from app.parsers.proxy_url import validate_proxy_urls
 from app.db.init_db import init_db
 from app.db.session import SessionLocal
+from app.repositories.listing_search_match_repository import ListingSearchMatchRepository
 from app.repositories.search_repository import SearchRepository
 from app.services.monitor_service import MonitorService, runtime_diagnostics
 
@@ -439,6 +440,143 @@ def cmd_analyze_search_matches(args) -> None:
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def _search_analysis_profile(search) -> str | None:
+    filters = search.filters_json if isinstance(search.filters_json, dict) else {}
+    raw_profile = filters.get("analysis_profile")
+    if isinstance(raw_profile, str) and raw_profile.strip():
+        return raw_profile.strip()
+    return None
+
+
+def _skipped_search_result(search, profile: str | None, skip_reason: str) -> dict:
+    return {
+        "search_id": search.id,
+        "name": search.name,
+        "is_active": search.is_active,
+        "analysis_profile": profile,
+        "status": "skipped",
+        "skip_reason": skip_reason,
+        "count": 0,
+        "analyses": [],
+    }
+
+
+def _pending_search_matches(db, search, provider, limit: int) -> list:
+    return ListingSearchMatchRepository(db).list_matches_without_analysis(
+        search_job_id=search.id,
+        profile=provider.profile,
+        analysis_version=provider.analysis_version,
+        limit=limit,
+    )
+
+
+def cmd_analyze_all_active_searches(args) -> None:
+    init_db()
+    with SessionLocal() as db:
+        searches = SearchRepository(db).list_all()
+        results = []
+        analyses_created_total = 0
+
+        for search in searches:
+            profile = _search_analysis_profile(search)
+
+            if not args.include_inactive and not search.is_active:
+                results.append(_skipped_search_result(search, profile, "inactive"))
+                continue
+            if not profile:
+                results.append(
+                    _skipped_search_result(search, profile, "missing_analysis_profile")
+                )
+                continue
+            if args.profile and profile != args.profile:
+                results.append(
+                    _skipped_search_result(search, profile, "profile_filter_mismatch")
+                )
+                continue
+
+            try:
+                provider = get_analysis_provider(profile)
+            except Exception:
+                results.append(
+                    _skipped_search_result(search, profile, "unknown_analysis_profile")
+                )
+                continue
+
+            try:
+                pending_matches = _pending_search_matches(
+                    db, search, provider, args.limit_per_search
+                )
+                if not pending_matches:
+                    results.append(_skipped_search_result(search, profile, "no_pending_matches"))
+                    continue
+
+                if args.dry_run:
+                    results.append(
+                        {
+                            "search_id": search.id,
+                            "name": search.name,
+                            "is_active": search.is_active,
+                            "analysis_profile": profile,
+                            "status": "dry_run",
+                            "count": len(pending_matches),
+                            "analyses": [],
+                        }
+                    )
+                    db.rollback()
+                    continue
+
+                service = ListingAnalysisService(db, provider=provider)
+                analyses = service.analyze_search_matches(
+                    search_job_id=search.id, limit=args.limit_per_search
+                )
+                db.commit()
+                analyses_created_total += len(analyses)
+                results.append(
+                    {
+                        "search_id": search.id,
+                        "name": search.name,
+                        "is_active": search.is_active,
+                        "analysis_profile": profile,
+                        "status": "processed",
+                        "count": len(analyses),
+                        "analyses": [_analysis_to_json(analysis) for analysis in analyses],
+                    }
+                )
+            except Exception as exc:
+                db.rollback()
+                results.append(
+                    {
+                        "search_id": search.id,
+                        "name": search.name,
+                        "is_active": search.is_active,
+                        "analysis_profile": profile,
+                        "status": "failed",
+                        "error_type": exc.__class__.__name__,
+                        "error_message": str(exc),
+                        "count": 0,
+                        "analyses": [],
+                    }
+                )
+
+        searches_processed = sum(
+            1 for item in results if item["status"] in {"processed", "dry_run"}
+        )
+        result = {
+            "ok": True,
+            "limit_per_search": args.limit_per_search,
+            "dry_run": args.dry_run,
+            "include_inactive": args.include_inactive,
+            "profile_filter": args.profile,
+            "searches_total": len(searches),
+            "searches_considered": len(results),
+            "searches_processed": searches_processed,
+            "searches_skipped": sum(1 for item in results if item["status"] == "skipped"),
+            "analyses_created_total": analyses_created_total,
+            "results": results,
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def cmd_admin_server(args) -> None:
     from app.main import create_app
 
@@ -517,6 +655,16 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_search_matches.add_argument("--search-id", type=int, required=True)
     analyze_search_matches.add_argument("--limit", type=int, default=20)
     analyze_search_matches.set_defaults(func=cmd_analyze_search_matches)
+
+    analyze_all_active = sub.add_parser(
+        "analyze-all-active-searches",
+        help="Analyze pending listing matches for all active searches with analysis profiles",
+    )
+    analyze_all_active.add_argument("--limit-per-search", type=int, default=5)
+    analyze_all_active.add_argument("--include-inactive", action="store_true")
+    analyze_all_active.add_argument("--profile", default="")
+    analyze_all_active.add_argument("--dry-run", action="store_true")
+    analyze_all_active.set_defaults(func=cmd_analyze_all_active_searches)
 
     return parser
 
