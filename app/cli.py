@@ -103,7 +103,7 @@ def cmd_seed_search(args) -> None:
 
 
 PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,120}$")
-SUPPORTED_ANALYSIS_PROFILES = {"default", "commercial_rent", "flat_sale", "flat_rent"}
+SUPPORTED_ANALYSIS_PROFILES = {"default", "commercial_rent", "flat_sale"}
 
 
 def _validation_error(message: str) -> dict:

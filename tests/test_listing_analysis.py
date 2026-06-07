@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from app import cli
 from app.analysis.provider import (
     CommercialRentDeterministicAnalysisProvider,
+    FlatSaleDeterministicAnalysisProvider,
     ListingAnalysisResult,
     _verdict,
     get_analysis_provider,
@@ -243,15 +244,18 @@ def _commercial_result(**kwargs):
     )
 
 
-def test_get_analysis_provider_supports_default_and_commercial_rent():
+def test_get_analysis_provider_supports_default_commercial_rent_and_flat_sale():
     default_provider = get_analysis_provider("default")
     commercial_provider = get_analysis_provider("commercial_rent")
+    flat_provider = get_analysis_provider("flat_sale")
 
     assert default_provider.profile == "default"
     assert commercial_provider.profile == "commercial_rent"
     assert commercial_provider.analysis_version == "commercial-rent-v0"
     assert commercial_provider.model_provider == "deterministic"
     assert commercial_provider.model_name == "commercial-rent-rules-v0"
+    assert flat_provider.profile == "flat_sale"
+    assert flat_provider.analysis_version == "flat-sale-v0"
 
 
 def test_get_analysis_provider_unknown_profile_fails_safely():
@@ -421,6 +425,160 @@ def test_cli_analyze_alerted_listings_works_with_commercial_rent_profile(
 
 
 
+
+def _flat_result(snapshot=True, **kwargs):
+    now = datetime.now(UTC)
+    listing = Listing(
+        external_id=kwargs.pop("external_id", "flat-1"),
+        url=kwargs.pop("url", "https://www.avito.ru/item/flat-1"),
+        title=kwargs.pop("title", "1-к квартира 42 м² 8/15 эт."),
+        price=kwargs.pop("price", 10_500_000),
+        address=kwargs.pop("address", "Санкт-Петербург, Приморский район"),
+        area_m2=kwargs.pop("area_m2", 42.0),
+        published_label=kwargs.pop("published_label", "сегодня"),
+        published_at=kwargs.pop("published_at", now - timedelta(hours=2)),
+        **kwargs,
+    )
+    listing_snapshot = None
+    if snapshot:
+        listing_snapshot = ListingSnapshot(
+            id=2,
+            external_id=listing.external_id,
+            title=listing.title,
+            price=listing.price,
+            published_label=listing.published_label,
+            published_at=listing.published_at,
+            payload_json={"source": "test"},
+        )
+    return FlatSaleDeterministicAnalysisProvider().analyze(
+        listing=listing, snapshot=listing_snapshot, input_hash="hash"
+    )
+
+
+def test_flat_sale_provider_metadata():
+    provider = FlatSaleDeterministicAnalysisProvider()
+
+    assert provider.profile == "flat_sale"
+    assert provider.analysis_version == "flat-sale-v0"
+    assert provider.model_provider == "deterministic"
+    assert provider.model_name == "flat-sale-rules-v0"
+
+
+def test_flat_sale_calculates_price_per_m2():
+    result = _flat_result(price=9_000_000, area_m2=45)
+
+    assert result.facts_json["price_per_m2"] == 200_000
+
+
+def test_flat_sale_detects_flat_type_variants():
+    assert _flat_result(title="Квартира-студия 28 м² 5/12 эт.").facts_json["detected_flat_type"] == "studio"
+    assert _flat_result(title="1-комн. квартира 36 м² 5/12 эт.").facts_json["detected_flat_type"] == "one_room"
+    assert _flat_result(title="2-к квартира 55 м² 5/12 эт.").facts_json["detected_flat_type"] == "two_room"
+    assert _flat_result(title="3-комн квартира 75 м² 5/12 эт.").facts_json["detected_flat_type"] == "three_room"
+    assert _flat_result(title="Квартира свободной планировки 40 м² 5/12 эт.").facts_json["detected_flat_type"] == "unknown"
+
+
+def test_flat_sale_parses_floor_info():
+    first = _flat_result(title="1-к квартира 36 м² 1/11 эт.").facts_json["floor_info"]
+    last = _flat_result(title="2-к квартира 55 м² 6/6 эт.").facts_json["floor_info"]
+    middle = _flat_result(title="3-к квартира 75 м² 8/15 эт.").facts_json["floor_info"]
+    unknown = _flat_result(title="Квартира без этажа").facts_json["floor_info"]
+
+    assert first == {"floor": 1, "total_floors": 11, "is_first_floor": True, "is_last_floor": False}
+    assert last == {"floor": 6, "total_floors": 6, "is_first_floor": False, "is_last_floor": True}
+    assert middle == {"floor": 8, "total_floors": 15, "is_first_floor": False, "is_last_floor": False}
+    assert unknown == {"floor": None, "total_floors": None, "is_first_floor": None, "is_last_floor": None}
+
+
+def test_flat_sale_freshness_statuses():
+    now = datetime.now(UTC)
+
+    assert _flat_result(published_at=now - timedelta(hours=1)).facts_json["freshness_status"] == "fresh"
+    assert _flat_result(published_at=now - timedelta(hours=48)).facts_json["freshness_status"] == "recent"
+    assert _flat_result(published_at=now - timedelta(hours=96)).facts_json["freshness_status"] == "stale"
+    assert _flat_result(published_at=None).facts_json["freshness_status"] == "unknown"
+
+
+def test_flat_sale_target_fit_logic():
+    good = _flat_result(price=10_000_000, area_m2=45)
+    poor = _flat_result(price=18_000_000, area_m2=100)
+    unknown = _flat_result(price=None, area_m2=None, published_at=None)
+
+    assert good.facts_json["target_fit"]["area_fit"] is True
+    assert good.facts_json["target_fit"]["price_fit"] is True
+    assert good.facts_json["target_fit"]["freshness_fit"] is True
+    assert good.facts_json["target_fit"]["overall"] == "good"
+    assert poor.facts_json["target_fit"]["area_fit"] is False
+    assert poor.facts_json["target_fit"]["price_fit"] is False
+    assert poor.facts_json["target_fit"]["overall"] == "partial"
+    assert unknown.facts_json["target_fit"]["overall"] == "unknown"
+
+
+def test_flat_sale_first_and_last_floor_risk_flags():
+    first = _flat_result(title="1-к квартира 36 м² 1/11 эт.")
+    last = _flat_result(title="2-к квартира 55 м² 6/6 эт.")
+
+    assert "first_floor" in first.risks_json["flags"]
+    assert "last_floor" in last.risks_json["flags"]
+    assert any("Для первого этажа" in item for item in first.questions_json["items"])
+    assert any("Для последнего этажа" in item for item in last.questions_json["items"])
+
+
+def test_flat_sale_over_budget_and_area_risks():
+    small = _flat_result(price=18_000_000, area_m2=20)
+    large = _flat_result(area_m2=120)
+
+    assert "over_budget" in small.risks_json["flags"]
+    assert "area_too_small" in small.risks_json["flags"]
+    assert "area_too_large" in large.risks_json["flags"]
+
+
+def test_flat_sale_price_per_m2_risk_flags():
+    low = _flat_result(price=2_000_000, area_m2=40)
+    expensive = _flat_result(price=20_000_000, area_m2=40)
+
+    assert "suspicious_low_price" in low.risks_json["flags"]
+    assert "expensive_price_per_m2" in expensive.risks_json["flags"]
+
+
+def test_flat_sale_score_is_clamped_to_0_and_100():
+    low = _flat_result(
+        title="Квартира без данных",
+        price=50_000_000,
+        area_m2=500,
+        address="",
+        published_at=datetime.now(UTC) - timedelta(days=30),
+        snapshot=False,
+    )
+
+    assert low.score == 0
+    assert 0 <= _flat_result().score <= 100
+
+
+def test_flat_sale_verdict_thresholds():
+    assert _verdict(score=75, flags=[]) == "strong"
+    assert _verdict(score=55, flags=[]) == "medium"
+    assert _verdict(score=35, flags=[]) == "weak"
+    assert _verdict(score=34, flags=[]) == "review"
+    assert _verdict(score=80, flags=["missing_area"]) == "review"
+
+
+def test_flat_sale_report_contains_russian_sections():
+    report = _flat_result().report_md
+
+    assert "## Вердикт" in report
+    assert "## Факты" in report
+    assert "## Риски" in report
+    assert "## Что уточнить перед звонком" in report
+
+
+def test_get_analysis_provider_supports_flat_sale():
+    provider = get_analysis_provider("flat_sale")
+
+    assert isinstance(provider, FlatSaleDeterministicAnalysisProvider)
+    assert provider.profile == "flat_sale"
+
+
 def _search(db_session, name="search-1", filters_json=None):
     search = SearchRepository(db_session).create(
         name=name,
@@ -520,6 +678,33 @@ def test_analyze_search_matches_analyzes_only_requested_search_id(db_session):
     ) is None
 
 
+def test_analyze_search_matches_uses_flat_sale_profile(db_session):
+    search = _search(
+        db_session,
+        name="flat-sale",
+        filters_json={"analysis_profile": "flat_sale"},
+    )
+    _listing(
+        db_session,
+        external_id="flat-sale-1",
+        title="1-к квартира 42 м² 8/15 эт.",
+        price=10_500_000,
+        area_m2=42,
+    )
+    ListingSearchMatchRepository(db_session).upsert_match(search.id, "flat-sale-1")
+
+    service = ListingAnalysisService(
+        db_session,
+        provider=get_analysis_provider(resolve_search_analysis_profile(search)),
+    )
+    analyses = service.analyze_search_matches(search.id, limit=20)
+
+    assert len(analyses) == 1
+    assert analyses[0].profile == "flat_sale"
+    assert analyses[0].analysis_version == "flat-sale-v0"
+    assert analyses[0].facts_json["detected_flat_type"] == "one_room"
+
+
 def test_cli_analyze_search_matches_uses_search_profile(db_session, monkeypatch, capsys):
     search = _search(
         db_session,
@@ -551,6 +736,40 @@ def test_cli_analyze_search_matches_uses_search_profile(db_session, monkeypatch,
     assert output["profile"] == "commercial_rent"
     assert output["count"] == 1
     assert output["analyses"][0]["context_key"] == f"search:{search.id}"
+
+
+def test_cli_analyze_search_matches_uses_flat_sale_search_profile(
+    db_session, monkeypatch, capsys
+):
+    search = _search(
+        db_session,
+        name="flat-cli-search",
+        filters_json={"analysis_profile": "flat_sale"},
+    )
+    _listing(
+        db_session,
+        external_id="flat-search-cli-1",
+        title="1-к квартира 42 м² 8/15 эт.",
+        price=10_500_000,
+        area_m2=42,
+    )
+    ListingSearchMatchRepository(db_session).upsert_match(
+        search.id, "flat-search-cli-1"
+    )
+    db_session.commit()
+    SessionLocal = sessionmaker(
+        bind=db_session.get_bind(), autoflush=False, autocommit=False
+    )
+    monkeypatch.setattr(cli, "init_db", lambda: None)
+    monkeypatch.setattr(cli, "SessionLocal", SessionLocal)
+
+    cli.cmd_analyze_search_matches(Namespace(search_id=search.id, limit=20))
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is True
+    assert output["profile"] == "flat_sale"
+    assert output["count"] == 1
+    assert output["analyses"][0]["profile"] == "flat_sale"
 
 
 def test_global_and_search_context_idempotency_are_separate(db_session):
