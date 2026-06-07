@@ -858,6 +858,8 @@ class MonitorService:
             existing = existing_by_external_id.get(card.external_id)
 
             if not baseline_run and not apply_current_search_filters(card, now):
+                if existing is not None and search_job_id is not None:
+                    match_repo.delete_match(search_job_id, card.external_id)
                 continue
 
             if existing:

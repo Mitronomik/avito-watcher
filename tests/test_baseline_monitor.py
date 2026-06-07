@@ -2805,20 +2805,38 @@ def _add_existing_listing_with_retry_snapshot(
     return snapshot
 
 
-def test_existing_listing_failing_rule_filters_does_not_create_or_update_match(db_session):
+def test_existing_listing_failing_rule_filters_removes_existing_search_match(db_session):
     search = make_search(db_session, filters_json={"max_price": 100.0})
     search.baseline_initialized = True
     retry_snapshot = _add_existing_listing_with_retry_snapshot(
         db_session, "existing-rule-filtered", price=50.0
     )
+    db_session.add(
+        ListingSearchMatch(
+            search_job_id=search.id,
+            listing_external_id="existing-rule-filtered",
+            last_snapshot_id=retry_snapshot.id,
+        )
+    )
+    db_session.commit()
     service = MonitorService(
-        parser=FakeParser([[card("existing-rule-filtered", price=150.0)]]),
+        parser=FakeParser(
+            [[card("existing-rule-filtered", price=150.0, title="Rejected update")]]
+        ),
         scorer=FakeScorer(),
         notifier=FakeNotifier(),
     )
 
     result = run(service, db_session, search)
 
+    listing = db_session.scalar(
+        select(Listing).where(Listing.external_id == "existing-rule-filtered")
+    )
+    snapshots = db_session.scalars(
+        select(ListingSnapshot).where(
+            ListingSnapshot.external_id == "existing-rule-filtered"
+        )
+    ).all()
     assert result["filtered_by_rules"] == 1
     assert result["filtered_samples"][0]["reason"] == "rules"
     assert db_session.scalar(
@@ -2827,24 +2845,29 @@ def test_existing_listing_failing_rule_filters_does_not_create_or_update_match(d
             ListingSearchMatch.listing_external_id == "existing-rule-filtered",
         )
     ) is None
-    assert service.notifier.messages == []
-    snapshots = db_session.scalars(
-        select(ListingSnapshot).where(
-            ListingSnapshot.external_id == "existing-rule-filtered"
-        )
-    ).all()
+    assert listing.title == "Existing existing-rule-filtered"
+    assert listing.price == 50.0
     assert [snapshot.id for snapshot in snapshots] == [retry_snapshot.id]
+    assert service.notifier.messages == []
 
 
-def test_existing_listing_failing_publication_filters_does_not_create_or_update_match(
+def test_existing_listing_failing_publication_filters_removes_existing_search_match(
     db_session,
 ):
     now = datetime(2026, 5, 17, 12, 0, 0)
     search = make_search(db_session, filters_json={"max_age_hours": 24})
     search.baseline_initialized = True
-    _add_existing_listing_with_retry_snapshot(
+    retry_snapshot = _add_existing_listing_with_retry_snapshot(
         db_session, "existing-publication-filtered", price=50.0
     )
+    db_session.add(
+        ListingSearchMatch(
+            search_job_id=search.id,
+            listing_external_id="existing-publication-filtered",
+            last_snapshot_id=retry_snapshot.id,
+        )
+    )
+    db_session.commit()
     service = MonitorService(
         parser=FakeParser(
             [
@@ -2852,6 +2875,7 @@ def test_existing_listing_failing_publication_filters_does_not_create_or_update_
                     card(
                         "existing-publication-filtered",
                         price=50.0,
+                        title="Rejected publication update",
                         published_at=now - timedelta(hours=25),
                     )
                 ]
@@ -2864,6 +2888,14 @@ def test_existing_listing_failing_publication_filters_does_not_create_or_update_
 
     result = run(service, db_session, search)
 
+    listing = db_session.scalar(
+        select(Listing).where(Listing.external_id == "existing-publication-filtered")
+    )
+    snapshots = db_session.scalars(
+        select(ListingSnapshot).where(
+            ListingSnapshot.external_id == "existing-publication-filtered"
+        )
+    ).all()
     assert result["filtered_by_publication_date"] == 1
     assert result["filtered_samples"][0]["reason"] == "publication_date"
     assert db_session.scalar(
@@ -2872,6 +2904,8 @@ def test_existing_listing_failing_publication_filters_does_not_create_or_update_
             ListingSearchMatch.listing_external_id == "existing-publication-filtered",
         )
     ) is None
+    assert listing.title == "Existing existing-publication-filtered"
+    assert [snapshot.id for snapshot in snapshots] == [retry_snapshot.id]
     assert service.notifier.messages == []
 
 
@@ -2907,14 +2941,22 @@ def test_existing_listing_passing_filters_still_updates_match_and_retry(db_sessi
     ) is not None
 
 
-def test_analyze_search_matches_ignores_existing_listing_filtered_by_current_search(
+def test_analyze_search_matches_does_not_see_removed_stale_match(
     db_session,
 ):
     search = make_search(db_session, filters_json={"max_price": 100.0})
     search.baseline_initialized = True
-    _add_existing_listing_with_retry_snapshot(
+    retry_snapshot = _add_existing_listing_with_retry_snapshot(
         db_session, "existing-filtered-analysis", price=50.0
     )
+    db_session.add(
+        ListingSearchMatch(
+            search_job_id=search.id,
+            listing_external_id="existing-filtered-analysis",
+            last_snapshot_id=retry_snapshot.id,
+        )
+    )
+    db_session.commit()
     service = MonitorService(
         parser=FakeParser([[card("existing-filtered-analysis", price=150.0)]]),
         scorer=FakeScorer(),

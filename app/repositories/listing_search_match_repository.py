@@ -69,6 +69,14 @@ class ListingSearchMatchRepository:
         )
         return list(self.db.scalars(stmt).all())
 
+    def delete_match(self, search_job_id: int, listing_external_id: str) -> bool:
+        match = self.get_latest_match(search_job_id, listing_external_id)
+        if match is None:
+            return False
+        self.db.delete(match)
+        self.db.flush()
+        return True
+
     def get_latest_match(
         self, search_job_id: int, listing_external_id: str
     ) -> ListingSearchMatch | None:
