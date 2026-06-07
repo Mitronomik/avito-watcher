@@ -346,12 +346,46 @@ class CommercialRentDeterministicAnalysisProvider:
         return max(0, min(100, score))
 
 
-_FLAT_TYPE_KEYWORDS = (
-    ("studio", ("квартира-студия", "студия")),
-    ("one_room", ("1-к", "1 к", "1-комн", "1 комнат", "однокомнат")),
-    ("two_room", ("2-к", "2 к", "2-комн", "2 комнат", "двухкомнат")),
-    ("three_room", ("3-к", "3 к", "3-комн", "3 комнат", "трехкомнат", "трёхкомнат")),
-    ("multi_room", ("4-к", "4 к", "4-комн", "4 комнат", "многокомнат")),
+_FLAT_ROOM_MARKER_RE_BY_TYPE = (
+    (
+        "studio",
+        re.compile(
+            r"(?<![а-яё])(?:квартира\s*-\s*студия|студия)(?![а-яё])",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "one_room",
+        re.compile(
+            r"(?<![\dа-яё])(?:1\s*-\s*(?:к|комн)\.?|1\s+к\.?)(?![а-яё])"
+            r"|(?<![а-яё])однокомнат",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "two_room",
+        re.compile(
+            r"(?<![\dа-яё])(?:2\s*-\s*(?:к|комн)\.?|2\s+к\.?)(?![а-яё])"
+            r"|(?<![а-яё])двухкомнат",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "three_room",
+        re.compile(
+            r"(?<![\dа-яё])(?:3\s*-\s*(?:к|комн)\.?|3\s+к\.?)(?![а-яё])"
+            r"|(?<![а-яё])трехкомнат|(?<![а-яё])трёхкомнат",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "multi_room",
+        re.compile(
+            r"(?<![\dа-яё])(?:4\s*-\s*(?:к|комн)\.?|4\s+к\.?)(?![а-яё])"
+            r"|(?<![а-яё])многокомнат",
+            re.IGNORECASE,
+        ),
+    ),
 )
 
 _FLAT_FLOOR_RE = re.compile(r"(?<!\d)(\d{1,2})\s*/\s*(\d{1,2})\s*эт", re.IGNORECASE)
@@ -472,7 +506,7 @@ class FlatSaleDeterministicAnalysisProvider:
         }
         questions = {"items": _flat_questions_for(flags=flags)}
         score = self._score(facts=facts, flags=flags)
-        verdict = _verdict(score=score, flags=flags)
+        verdict = _flat_verdict(score=score)
 
         return ListingAnalysisResult(
             score=score,
@@ -819,11 +853,20 @@ def _suitable_for(commercial_type: str) -> str:
     return "неизвестно"
 
 
+def _flat_verdict(*, score: int) -> str:
+    if score >= 75:
+        return "strong"
+    if score >= 55:
+        return "medium"
+    if score >= 35:
+        return "weak"
+    return "review"
+
 
 def _detect_flat_type(listing: Listing, snapshot: ListingSnapshot | None) -> str:
     text = _analysis_text(listing, snapshot)
-    for flat_type, keywords in _FLAT_TYPE_KEYWORDS:
-        if _has_any(text, keywords):
+    for flat_type, pattern in _FLAT_ROOM_MARKER_RE_BY_TYPE:
+        if pattern.search(text):
             return flat_type
     return "unknown"
 
@@ -900,6 +943,8 @@ def _flat_report_md(
             "## Вердикт",
             "",
             f"{verdict}, score {score}/100.",
+            "Вердикт flat-sale-v0 определяется только по score thresholds: "
+            "strong >= 75, medium >= 55, weak >= 35, review < 35.",
             "",
             "## Кратко",
             "",

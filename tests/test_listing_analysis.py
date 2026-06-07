@@ -10,6 +10,7 @@ from app.analysis.provider import (
     CommercialRentDeterministicAnalysisProvider,
     FlatSaleDeterministicAnalysisProvider,
     ListingAnalysisResult,
+    _flat_verdict,
     _verdict,
     get_analysis_provider,
 )
@@ -471,11 +472,49 @@ def test_flat_sale_calculates_price_per_m2():
 
 
 def test_flat_sale_detects_flat_type_variants():
-    assert _flat_result(title="Квартира-студия 28 м² 5/12 эт.").facts_json["detected_flat_type"] == "studio"
-    assert _flat_result(title="1-комн. квартира 36 м² 5/12 эт.").facts_json["detected_flat_type"] == "one_room"
-    assert _flat_result(title="2-к квартира 55 м² 5/12 эт.").facts_json["detected_flat_type"] == "two_room"
-    assert _flat_result(title="3-комн квартира 75 м² 5/12 эт.").facts_json["detected_flat_type"] == "three_room"
-    assert _flat_result(title="Квартира свободной планировки 40 м² 5/12 эт.").facts_json["detected_flat_type"] == "unknown"
+    assert (
+        _flat_result(title="Квартира-студия 28 м² 5/12 эт.").facts_json[
+            "detected_flat_type"
+        ]
+        == "studio"
+    )
+    assert (
+        _flat_result(title="1-комн. квартира 36 м² 5/12 эт.").facts_json[
+            "detected_flat_type"
+        ]
+        == "one_room"
+    )
+    assert (
+        _flat_result(title="2-к квартира 55 м² 5/12 эт.").facts_json[
+            "detected_flat_type"
+        ]
+        == "two_room"
+    )
+    assert (
+        _flat_result(title="3-комн квартира 75 м² 5/12 эт.").facts_json[
+            "detected_flat_type"
+        ]
+        == "three_room"
+    )
+    assert (
+        _flat_result(title="Квартира свободной планировки 40 м² 5/12 эт.").facts_json[
+            "detected_flat_type"
+        ]
+        == "unknown"
+    )
+
+
+def test_flat_sale_detects_room_markers_without_using_floor_patterns():
+    cases = [
+        ("2-к. квартира, 60,8 м², 2/12 эт.", "two_room"),
+        ("1-к. квартира, 32 м², 12/16 эт.", "one_room"),
+        ("3-к. квартира, 78 м², 1/12 эт.", "three_room"),
+        ("Квартира-студия, 24 м², 5/12 эт.", "studio"),
+        ("Квартира, 60,8 м², 2/12 эт.", "unknown"),
+    ]
+
+    for title, flat_type in cases:
+        assert _flat_result(title=title).facts_json["detected_flat_type"] == flat_type
 
 
 def test_flat_sale_parses_floor_info():
@@ -556,11 +595,20 @@ def test_flat_sale_score_is_clamped_to_0_and_100():
 
 
 def test_flat_sale_verdict_thresholds():
-    assert _verdict(score=75, flags=[]) == "strong"
-    assert _verdict(score=55, flags=[]) == "medium"
-    assert _verdict(score=35, flags=[]) == "weak"
-    assert _verdict(score=34, flags=[]) == "review"
-    assert _verdict(score=80, flags=["missing_area"]) == "review"
+    assert _flat_verdict(score=75) == "strong"
+    assert _flat_verdict(score=55) == "medium"
+    assert _flat_verdict(score=35) == "weak"
+    assert _flat_verdict(score=34) == "review"
+
+
+def test_flat_sale_score_75_is_strong_with_missing_published_at_risk():
+    result = _flat_result(published_at=None)
+
+    assert result.score == 75
+    assert "missing_published_at" in result.risks_json["flags"]
+    assert result.verdict == "strong"
+    assert "review, score 75/100" not in result.report_md
+    assert "strong, score 75/100" in result.report_md
 
 
 def test_flat_sale_report_contains_russian_sections():
