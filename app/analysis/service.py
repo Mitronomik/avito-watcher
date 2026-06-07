@@ -1,9 +1,11 @@
 import hashlib
+import inspect
 import json
 from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from app.analysis.config import AnalysisConfig
 from app.analysis.provider import AnalysisProvider, DeterministicAnalysisProvider
 from app.models.listing import Listing
 from app.models.listing_analysis import ListingAnalysis
@@ -12,14 +14,28 @@ from app.models.search_job import SearchJob
 from app.repositories.listing_analysis_repository import ListingAnalysisRepository
 from app.repositories.listing_repository import ListingRepository
 from app.repositories.listing_search_match_repository import ListingSearchMatchRepository
+from app.repositories.search_repository import SearchRepository
 
 
 def _dt(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
 
-def build_analysis_input(listing: Listing, snapshot: ListingSnapshot | None) -> dict:
+def build_analysis_input(
+    listing: Listing,
+    snapshot: ListingSnapshot | None,
+    *,
+    profile: str = "default",
+    analysis_version: str = "mock-v1",
+    context_key: str = "global",
+    config: AnalysisConfig | None = None,
+) -> dict:
+    config = config or AnalysisConfig.from_search_filters(profile=profile)
     return {
+        "profile": profile,
+        "analysis_version": analysis_version,
+        "context_key": context_key,
+        "analysis_config_hash": config.hash(),
         "listing": {
             "external_id": listing.external_id,
             "url": listing.url,
@@ -47,8 +63,23 @@ def build_analysis_input(listing: Listing, snapshot: ListingSnapshot | None) -> 
     }
 
 
-def calculate_input_hash(listing: Listing, snapshot: ListingSnapshot | None) -> str:
-    payload = build_analysis_input(listing, snapshot)
+def calculate_input_hash(
+    listing: Listing,
+    snapshot: ListingSnapshot | None,
+    *,
+    profile: str = "default",
+    analysis_version: str = "mock-v1",
+    context_key: str = "global",
+    config: AnalysisConfig | None = None,
+) -> str:
+    payload = build_analysis_input(
+        listing,
+        snapshot,
+        profile=profile,
+        analysis_version=analysis_version,
+        context_key=context_key,
+        config=config,
+    )
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -63,6 +94,7 @@ class ListingAnalysisService:
         self.provider = provider or DeterministicAnalysisProvider()
         self.analysis_repo = ListingAnalysisRepository(db)
         self.listing_repo = ListingRepository(db)
+        self.search_repo = SearchRepository(db)
 
     def analyze_listing(self, external_id: str) -> ListingAnalysis:
         listing = self.listing_repo.get_by_external_id(external_id)
@@ -83,6 +115,7 @@ class ListingAnalysisService:
 
     def analyze_search_matches(self, search_job_id: int, limit: int) -> list[ListingAnalysis]:
         context_key = f"search:{search_job_id}"
+        config = self._config_for_search(search_job_id)
         match_repo = ListingSearchMatchRepository(self.db)
         analyses: list[ListingAnalysis] = []
         for match in match_repo.list_matches_without_analysis(
@@ -96,7 +129,10 @@ class ListingAnalysisService:
                 continue
             analyses.append(
                 self._analyze_existing_listing(
-                    listing, search_job_id=search_job_id, context_key=context_key
+                    listing,
+                    search_job_id=search_job_id,
+                    context_key=context_key,
+                    config=config,
                 )
             )
         return analyses
@@ -107,11 +143,20 @@ class ListingAnalysisService:
         *,
         search_job_id: int | None = None,
         context_key: str = "global",
+        config: AnalysisConfig | None = None,
     ) -> ListingAnalysis:
         snapshot = self.analysis_repo.get_latest_snapshot_for_listing(
             listing.external_id
         )
-        input_hash = calculate_input_hash(listing, snapshot)
+        config = config or AnalysisConfig.from_search_filters(profile=self.provider.profile)
+        input_hash = calculate_input_hash(
+            listing,
+            snapshot,
+            profile=self.provider.profile,
+            analysis_version=self.provider.analysis_version,
+            context_key=context_key,
+            config=config,
+        )
         analysis = self.analysis_repo.create_or_update_analysis(
             listing_external_id=listing.external_id,
             snapshot_id=snapshot.id if snapshot is not None else None,
@@ -127,9 +172,14 @@ class ListingAnalysisService:
         self.analysis_repo.mark_running(analysis)
 
         try:
-            result = self.provider.analyze(
-                listing=listing, snapshot=snapshot, input_hash=input_hash
-            )
+            analyze_kwargs = {
+                "listing": listing,
+                "snapshot": snapshot,
+                "input_hash": input_hash,
+            }
+            if "config" in inspect.signature(self.provider.analyze).parameters:
+                analyze_kwargs["config"] = config
+            result = self.provider.analyze(**analyze_kwargs)
         except Exception as exc:
             self.analysis_repo.mark_failed(
                 analysis,
@@ -150,6 +200,16 @@ class ListingAnalysisService:
             model_name=result.model_name,
         )
         return analysis
+
+
+    def _config_for_search(self, search_job_id: int) -> AnalysisConfig:
+        search = self.search_repo.get(search_job_id)
+        filters = search.filters_json if search is not None else None
+        if not isinstance(filters, dict):
+            filters = None
+        return AnalysisConfig.from_search_filters(
+            profile=self.provider.profile, filters_json=filters
+        )
 
 
 def resolve_search_analysis_profile(search: SearchJob) -> str:

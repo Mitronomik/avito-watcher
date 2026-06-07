@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from app import cli
+from app.analysis.config import AnalysisConfig
 from app.analysis.provider import (
     CommercialRentDeterministicAnalysisProvider,
     FlatRentDeterministicAnalysisProvider,
@@ -15,7 +16,11 @@ from app.analysis.provider import (
     _verdict,
     get_analysis_provider,
 )
-from app.analysis.service import ListingAnalysisService, resolve_search_analysis_profile
+from app.analysis.service import (
+    ListingAnalysisService,
+    calculate_input_hash,
+    resolve_search_analysis_profile,
+)
 from app.models.alert_sent import AlertSent
 from app.models.listing import Listing
 from app.models.listing_analysis import ListingAnalysis
@@ -61,6 +66,176 @@ def _alert(db_session, external_id: str = "ext-1") -> AlertSent:
         listing_external_id=external_id,
         dedupe_key=f"telegram:{external_id}",
     )
+
+
+def test_analysis_config_defaults_and_filter_overrides_are_whitelisted():
+    default = AnalysisConfig.from_search_filters(profile="commercial_rent")
+    overridden = AnalysisConfig.from_search_filters(
+        profile="commercial_rent",
+        filters_json={
+            "max_age_hours": 24,
+            "estimated_monthly_rent": 180_000,
+            "irrelevant_key": "ignored",
+        },
+    )
+    ignored_only = AnalysisConfig.from_search_filters(
+        profile="commercial_rent", filters_json={"irrelevant_key": "ignored"}
+    )
+
+    assert default.min_area_m2 == 40.0
+    assert default.max_area_m2 == 150.0
+    assert default.max_price == 200_000.0
+    assert default.max_age_hours == 72.0
+    assert default.max_price_per_m2 == 5_000.0
+    assert default.suspicious_total_price == 5_000.0
+    assert default.suspicious_low_price_per_m2 == 300.0
+    assert overridden.max_age_hours == 24.0
+    assert overridden.estimated_monthly_rent == 180_000.0
+    assert ignored_only == default
+
+
+def test_analysis_config_profile_defaults_for_flat_profiles():
+    flat_sale = AnalysisConfig.from_search_filters(profile="flat_sale")
+    flat_rent = AnalysisConfig.from_search_filters(profile="flat_rent")
+
+    assert flat_sale.min_area_m2 == 25.0
+    assert flat_sale.max_area_m2 == 90.0
+    assert flat_sale.max_price == 15_000_000.0
+    assert flat_sale.max_age_hours == 72.0
+    assert flat_sale.suspicious_low_price_per_m2 == 100_000.0
+    assert flat_sale.max_price_per_m2 == 350_000.0
+    assert flat_rent.min_area_m2 == 20.0
+    assert flat_rent.max_area_m2 == 90.0
+    assert flat_rent.max_price == 100_000.0
+    assert flat_rent.max_age_hours == 72.0
+    assert flat_rent.suspicious_low_price_per_m2 == 600.0
+    assert flat_rent.max_price_per_m2 == 3_000.0
+
+
+def test_analysis_config_hash_stability_and_invalidation():
+    base = AnalysisConfig.from_search_filters(
+        profile="commercial_rent", filters_json={"irrelevant_key": "a"}
+    )
+    same = AnalysisConfig.from_search_filters(
+        profile="commercial_rent", filters_json={"irrelevant_key": "b"}
+    )
+    changed_age = AnalysisConfig.from_search_filters(
+        profile="commercial_rent", filters_json={"max_age_hours": 24}
+    )
+    changed_rent = AnalysisConfig.from_search_filters(
+        profile="commercial_rent", filters_json={"estimated_monthly_rent": 1}
+    )
+
+    assert base.hash() == same.hash()
+    assert base.hash() != changed_age.hash()
+    assert base.hash() != changed_rent.hash()
+    assert base.hash() == AnalysisConfig.from_search_filters(profile="commercial_rent").hash()
+
+
+def test_calculate_input_hash_uses_analysis_config_hash_only_for_filters(db_session):
+    listing = _listing(db_session, external_id="hash-config-1")
+    snapshot = _snapshot(db_session, external_id="hash-config-1")
+    base = AnalysisConfig.from_search_filters(
+        profile="commercial_rent", filters_json={"irrelevant_key": "a"}
+    )
+    same = AnalysisConfig.from_search_filters(
+        profile="commercial_rent", filters_json={"irrelevant_key": "b"}
+    )
+    changed_age = AnalysisConfig.from_search_filters(
+        profile="commercial_rent", filters_json={"max_age_hours": 24}
+    )
+    changed_rent = AnalysisConfig.from_search_filters(
+        profile="commercial_rent", filters_json={"estimated_monthly_rent": 1}
+    )
+
+    kwargs = {
+        "profile": "commercial_rent",
+        "analysis_version": "commercial-rent-v0",
+        "context_key": "search:1",
+    }
+    base_hash = calculate_input_hash(listing, snapshot, config=base, **kwargs)
+
+    assert base_hash == calculate_input_hash(listing, snapshot, config=base, **kwargs)
+    assert base_hash == calculate_input_hash(listing, snapshot, config=same, **kwargs)
+    assert base_hash != calculate_input_hash(listing, snapshot, config=changed_age, **kwargs)
+    assert base_hash != calculate_input_hash(listing, snapshot, config=changed_rent, **kwargs)
+
+
+def test_search_analysis_uses_filters_json_config_and_dedupes_same_input_hash(db_session):
+    search = _search(
+        db_session,
+        name="config-search",
+        filters_json={
+            "analysis_profile": "commercial_rent",
+            "max_age_hours": 24,
+            "irrelevant_key": "ignored",
+        },
+    )
+    _listing(
+        db_session,
+        external_id="config-search-1",
+        title="Офис 60 м²",
+        price=120_000,
+        area_m2=60,
+        published_at=datetime.now(UTC) - timedelta(hours=30),
+    )
+    ListingSearchMatchRepository(db_session).upsert_match(search.id, "config-search-1")
+    service = ListingAnalysisService(
+        db_session, provider=get_analysis_provider(resolve_search_analysis_profile(search))
+    )
+
+    first = service.analyze_search_matches(search.id, limit=20)
+    second = service.analyze_search_matches(search.id, limit=20)
+
+    assert len(first) == 1
+    assert second == []
+    analysis = first[0]
+    assert analysis.facts_json["analysis_config"]["max_age_hours"] == 24
+    assert analysis.facts_json["freshness_status"] == "stale"
+    assert "stale_publication_sanity_cap" in analysis.risks_json["flags"]
+    rows = db_session.scalars(select(ListingAnalysis)).all()
+    assert len(rows) == 1
+
+
+def test_commercial_rent_default_freshness_window_remains_72h():
+    result = CommercialRentDeterministicAnalysisProvider().analyze(
+        listing=Listing(
+            external_id="fresh-default",
+            url="https://www.avito.ru/item/fresh-default",
+            title="Офис 60 м²",
+            price=120_000,
+            address="Санкт-Петербург",
+            area_m2=60,
+            published_at=datetime.now(UTC) - timedelta(hours=30),
+        ),
+        snapshot=None,
+        input_hash="hash",
+    )
+
+    assert result.facts_json["freshness_status"] == "recent"
+    assert "stale_publication_sanity_cap" not in result.risks_json["flags"]
+
+
+def test_commercial_rent_config_max_age_hours_marks_30h_listing_stale():
+    result = CommercialRentDeterministicAnalysisProvider().analyze(
+        listing=Listing(
+            external_id="fresh-override",
+            url="https://www.avito.ru/item/fresh-override",
+            title="Офис 60 м²",
+            price=120_000,
+            address="Санкт-Петербург",
+            area_m2=60,
+            published_at=datetime.now(UTC) - timedelta(hours=30),
+        ),
+        snapshot=None,
+        input_hash="hash",
+        config=AnalysisConfig.from_search_filters(
+            profile="commercial_rent", filters_json={"max_age_hours": 24}
+        ),
+    )
+
+    assert result.facts_json["freshness_status"] == "stale"
+    assert "stale_publication_sanity_cap" in result.risks_json["flags"]
 
 
 def test_creates_analysis_for_alerted_listing(db_session):
@@ -1358,6 +1533,41 @@ def test_analyze_search_matches_uses_flat_rent_profile(db_session):
     assert analyses[0].profile == "flat_rent"
     assert analyses[0].analysis_version == "flat-rent-v0"
     assert analyses[0].facts_json["detected_flat_type"] == "one_room"
+
+
+def test_cli_analyze_all_active_searches_uses_filters_json_config(
+    db_session, monkeypatch, capsys
+):
+    search = _search(
+        db_session,
+        name="all-active-config",
+        filters_json={"analysis_profile": "commercial_rent", "max_age_hours": 24},
+    )
+    _listing(
+        db_session,
+        external_id="all-active-config-1",
+        title="Офис 60 м²",
+        price=120_000,
+        area_m2=60,
+        published_at=datetime.now(UTC) - timedelta(hours=30),
+    )
+    ListingSearchMatchRepository(db_session).upsert_match(
+        search.id, "all-active-config-1"
+    )
+    _prepare_cli_db(monkeypatch, db_session)
+
+    cli.cmd_analyze_all_active_searches(
+        Namespace(
+            limit_per_search=20, include_inactive=False, profile="", dry_run=False
+        )
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    analysis = db_session.scalar(select(ListingAnalysis))
+    assert output["ok"] is True
+    assert output["analyses_created_total"] == 1
+    assert analysis.facts_json["analysis_config"]["max_age_hours"] == 24
+    assert analysis.facts_json["freshness_status"] == "stale"
 
 
 def _prepare_cli_db(monkeypatch, db_session):
