@@ -1,7 +1,12 @@
 # ruff: noqa: E402
 import os
 
-os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
+if os.environ.get("RUN_ALEMBIC_SMOKE") != "1":
+    # Keep normal unit tests hermetic even when CI exports a PostgreSQL
+    # DATABASE_URL for the dedicated Alembic migration step.
+    os.environ["DATABASE_URL"] = "sqlite+pysqlite:///:memory:"
+else:
+    os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
 _TEST_ISOLATED_ENV_VARS = (
