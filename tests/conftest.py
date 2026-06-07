@@ -38,6 +38,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db.base import Base
 from app.models.alert_sent import AlertSent  # noqa: F401
+from app.models.listing_analysis import ListingAnalysis  # noqa: F401
 from app.models.listing import Listing  # noqa: F401
 from app.models.listing_snapshot import ListingSnapshot  # noqa: F401
 from app.models.search_job import SearchJob  # noqa: F401

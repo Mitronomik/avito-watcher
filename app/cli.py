@@ -8,6 +8,7 @@ import tomllib
 import uvicorn
 from pathlib import Path
 from urllib.parse import urlparse
+from app.analysis.service import ListingAnalysisService
 from app.bot.telegram_commands import build_telegram_application
 from app.parsers.avito_parser import AvitoParser
 from app.parsers.errors import ParserError
@@ -290,6 +291,57 @@ def cmd_run_telegram_bot(args) -> None:
 
 
 
+def _analysis_to_json(analysis) -> dict:
+    return {
+        "id": analysis.id,
+        "listing_external_id": analysis.listing_external_id,
+        "snapshot_id": analysis.snapshot_id,
+        "profile": analysis.profile,
+        "status": analysis.status,
+        "analysis_version": analysis.analysis_version,
+        "input_hash": analysis.input_hash,
+        "score": analysis.score,
+        "verdict": analysis.verdict,
+        "error_type": analysis.error_type,
+        "error_message": analysis.error_message,
+    }
+
+
+def cmd_analyze_listing(args) -> None:
+    init_db()
+    with SessionLocal() as db:
+        service = ListingAnalysisService(db)
+        try:
+            analysis = service.analyze_listing(args.external_id)
+        except Exception as exc:
+            db.rollback()
+            result = {
+                "ok": False,
+                "external_id": args.external_id,
+                "error_type": exc.__class__.__name__,
+                "error": str(exc),
+            }
+        else:
+            db.commit()
+            result = {"ok": analysis.status == "success", "analysis": _analysis_to_json(analysis)}
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_analyze_alerted_listings(args) -> None:
+    init_db()
+    with SessionLocal() as db:
+        service = ListingAnalysisService(db)
+        analyses = service.analyze_alerted_listings(args.limit)
+        db.commit()
+        result = {
+            "ok": True,
+            "limit": args.limit,
+            "count": len(analyses),
+            "analyses": [_analysis_to_json(analysis) for analysis in analyses],
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def cmd_admin_server(args) -> None:
     from app.main import create_app
 
@@ -332,6 +384,14 @@ def build_parser() -> argparse.ArgumentParser:
     admin_server.add_argument("--host", default="127.0.0.1")
     admin_server.add_argument("--port", type=int, default=8000)
     admin_server.set_defaults(func=cmd_admin_server)
+
+    analyze_listing = sub.add_parser("analyze-listing", help="Analyze one already parsed listing locally")
+    analyze_listing.add_argument("--external-id", required=True)
+    analyze_listing.set_defaults(func=cmd_analyze_listing)
+
+    analyze_alerted = sub.add_parser("analyze-alerted-listings", help="Analyze alerted listings without prior analysis locally")
+    analyze_alerted.add_argument("--limit", type=int, default=20)
+    analyze_alerted.set_defaults(func=cmd_analyze_alerted_listings)
 
     return parser
 
