@@ -570,3 +570,104 @@ def test_global_and_search_context_idempotency_are_separate(db_session):
     assert rerun == []
     rows = db_session.scalars(select(ListingAnalysis)).all()
     assert len(rows) == 2
+
+
+def test_listing_search_match_upsert_duplicate_race_does_not_raise(db_session, monkeypatch):
+    search = _search(db_session)
+    repo = ListingSearchMatchRepository(db_session)
+    first_seen = datetime(2026, 6, 1, 12, 0, 0)
+    second_seen = datetime(2026, 6, 1, 13, 0, 0)
+    original_get_latest_match = repo.get_latest_match
+    repo.upsert_match(search.id, "race-match", snapshot_id=10, seen_at=first_seen)
+    calls = {"count": 0}
+
+    def stale_read_once(search_job_id, listing_external_id):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return None
+        return original_get_latest_match(search_job_id, listing_external_id)
+
+    monkeypatch.setattr(repo, "get_latest_match", stale_read_once)
+
+    match = repo.upsert_match(
+        search.id, "race-match", snapshot_id=11, seen_at=second_seen
+    )
+
+    assert match.first_seen_at == first_seen
+    assert match.last_seen_at == second_seen
+    assert match.last_snapshot_id == 11
+    assert len(db_session.scalars(select(ListingSearchMatch)).all()) == 1
+
+
+class CommercialRentV1Provider(CustomSuccessProvider):
+    profile = "commercial_rent"
+    analysis_version = "commercial-rent-v1"
+    model_provider = "deterministic"
+    model_name = "commercial-rent-rules-v1"
+
+
+class CommercialRentV0Provider(CustomSuccessProvider):
+    profile = "commercial_rent"
+    analysis_version = "commercial-rent-v0"
+    model_provider = "deterministic"
+    model_name = "commercial-rent-rules-v0"
+
+
+def test_analyze_search_matches_only_skips_same_profile_version_context(db_session):
+    search = _search(
+        db_session,
+        name="versioned-commercial",
+        filters_json={"analysis_profile": "commercial_rent"},
+    )
+    _listing(
+        db_session,
+        external_id="versioned-office-1",
+        title="Офис 60 м²",
+        price=120_000,
+        area_m2=60,
+    )
+    ListingSearchMatchRepository(db_session).upsert_match(
+        search.id, "versioned-office-1"
+    )
+    ListingAnalysisRepository(db_session).create_or_update_analysis(
+        listing_external_id="versioned-office-1",
+        snapshot_id=None,
+        profile="commercial_rent",
+        status="success",
+        analysis_version="commercial-rent-v0",
+        input_hash="old-hash",
+        search_job_id=search.id,
+        context_key=f"search:{search.id}",
+    )
+
+    analyses = ListingAnalysisService(
+        db_session, provider=CommercialRentV1Provider()
+    ).analyze_search_matches(search.id, limit=20)
+
+    assert len(analyses) == 1
+    assert analyses[0].listing_external_id == "versioned-office-1"
+    assert analyses[0].analysis_version == "commercial-rent-v1"
+    assert analyses[0].context_key == f"search:{search.id}"
+
+
+def test_global_alerted_selection_is_analysis_version_aware(db_session):
+    _listing(db_session, external_id="versioned-global-1")
+    _alert(db_session, external_id="versioned-global-1")
+    ListingAnalysisRepository(db_session).create_or_update_analysis(
+        listing_external_id="versioned-global-1",
+        snapshot_id=None,
+        profile="commercial_rent",
+        status="success",
+        analysis_version="commercial-rent-v0",
+        input_hash="old-global-hash",
+        context_key="global",
+    )
+
+    analyses = ListingAnalysisService(
+        db_session, provider=CommercialRentV1Provider()
+    ).analyze_alerted_listings(limit=20)
+
+    assert len(analyses) == 1
+    assert analyses[0].listing_external_id == "versioned-global-1"
+    assert analyses[0].analysis_version == "commercial-rent-v1"
+    assert analyses[0].context_key == "global"

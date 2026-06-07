@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.listing_analysis import ListingAnalysis
@@ -24,27 +25,45 @@ class ListingSearchMatchRepository:
     ) -> ListingSearchMatch:
         seen_at = seen_at or _now()
         existing = self.get_latest_match(search_job_id, listing_external_id)
-        if existing is None:
-            existing = ListingSearchMatch(
-                search_job_id=search_job_id,
-                listing_external_id=listing_external_id,
-                first_seen_at=seen_at,
-                last_seen_at=seen_at,
-                last_snapshot_id=snapshot_id,
-                created_at=seen_at,
-                updated_at=seen_at,
-            )
-            self.db.add(existing)
-        else:
-            existing.last_seen_at = seen_at
-            if snapshot_id is not None:
-                existing.last_snapshot_id = snapshot_id
-            existing.updated_at = _now()
+        if existing is not None:
+            return self._update_seen(existing, snapshot_id=snapshot_id, seen_at=seen_at)
+
+        try:
+            with self.db.begin_nested():
+                created = ListingSearchMatch(
+                    search_job_id=search_job_id,
+                    listing_external_id=listing_external_id,
+                    first_seen_at=seen_at,
+                    last_seen_at=seen_at,
+                    last_snapshot_id=snapshot_id,
+                    created_at=seen_at,
+                    updated_at=seen_at,
+                )
+                self.db.add(created)
+                self.db.flush()
+            return created
+        except IntegrityError:
+            existing = self.get_latest_match(search_job_id, listing_external_id)
+            if existing is None:
+                raise
+            return self._update_seen(existing, snapshot_id=snapshot_id, seen_at=seen_at)
+
+    def _update_seen(
+        self,
+        match: ListingSearchMatch,
+        *,
+        snapshot_id: int | None,
+        seen_at: datetime,
+    ) -> ListingSearchMatch:
+        match.last_seen_at = seen_at
+        if snapshot_id is not None:
+            match.last_snapshot_id = snapshot_id
+        match.updated_at = _now()
         self.db.flush()
-        return existing
+        return match
 
     def list_matches_without_analysis(
-        self, search_job_id: int, profile: str, limit: int
+        self, search_job_id: int, profile: str, analysis_version: str, limit: int
     ) -> list[ListingSearchMatch]:
         if limit <= 0:
             return []
@@ -53,6 +72,7 @@ class ListingSearchMatchRepository:
             select(ListingAnalysis.listing_external_id)
             .where(
                 ListingAnalysis.profile == profile,
+                ListingAnalysis.analysis_version == analysis_version,
                 ListingAnalysis.context_key == context_key,
             )
             .distinct()

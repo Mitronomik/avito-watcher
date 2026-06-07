@@ -73,7 +73,10 @@ class ListingAnalysisService:
     def analyze_alerted_listings(self, limit: int) -> list[ListingAnalysis]:
         analyses: list[ListingAnalysis] = []
         for listing in self.analysis_repo.list_alerted_listings_without_analysis(
-            limit, profile=self.provider.profile, context_key="global"
+            limit,
+            profile=self.provider.profile,
+            analysis_version=self.provider.analysis_version,
+            context_key="global",
         ):
             analyses.append(self._analyze_existing_listing(listing))
         return analyses
@@ -83,7 +86,10 @@ class ListingAnalysisService:
         match_repo = ListingSearchMatchRepository(self.db)
         analyses: list[ListingAnalysis] = []
         for match in match_repo.list_matches_without_analysis(
-            search_job_id=search_job_id, profile=self.provider.profile, limit=limit
+            search_job_id=search_job_id,
+            profile=self.provider.profile,
+            analysis_version=self.provider.analysis_version,
+            limit=limit,
         ):
             listing = self.listing_repo.get_by_external_id(match.listing_external_id)
             if listing is None:

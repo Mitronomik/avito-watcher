@@ -112,7 +112,11 @@ class ListingAnalysisRepository:
         return existing
 
     def list_alerted_listings_without_analysis(
-        self, limit: int, profile: str | None = None, context_key: str = "global"
+        self,
+        limit: int,
+        profile: str | None = None,
+        analysis_version: str | None = None,
+        context_key: str = "global",
     ) -> list[Listing]:
         if limit <= 0:
             return []
@@ -132,6 +136,10 @@ class ListingAnalysisRepository:
         if profile is not None:
             analyzed_external_ids = analyzed_external_ids.where(
                 ListingAnalysis.profile == profile
+            )
+        if analysis_version is not None:
+            analyzed_external_ids = analyzed_external_ids.where(
+                ListingAnalysis.analysis_version == analysis_version
             )
         stmt = (
             select(Listing)
