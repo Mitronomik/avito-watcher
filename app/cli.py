@@ -471,11 +471,22 @@ def _pending_search_matches(db, search, provider, limit: int) -> list:
 
 
 def cmd_analyze_all_active_searches(args) -> None:
+    if args.limit_per_search <= 0:
+        result = {
+            "ok": False,
+            "error_type": "ValidationError",
+            "error": "limit_per_search must be a positive integer",
+            "limit_per_search": args.limit_per_search,
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
     init_db()
     with SessionLocal() as db:
         searches = SearchRepository(db).list_all()
         results = []
         analyses_created_total = 0
+        searches_considered = 0
 
         for search in searches:
             profile = _search_analysis_profile(search)
@@ -483,14 +494,17 @@ def cmd_analyze_all_active_searches(args) -> None:
             if not args.include_inactive and not search.is_active:
                 results.append(_skipped_search_result(search, profile, "inactive"))
                 continue
-            if not profile:
-                results.append(
-                    _skipped_search_result(search, profile, "missing_analysis_profile")
-                )
-                continue
             if args.profile and profile != args.profile:
                 results.append(
                     _skipped_search_result(search, profile, "profile_filter_mismatch")
+                )
+                continue
+
+            searches_considered += 1
+
+            if not profile:
+                results.append(
+                    _skipped_search_result(search, profile, "missing_analysis_profile")
                 )
                 continue
 
@@ -558,9 +572,6 @@ def cmd_analyze_all_active_searches(args) -> None:
                     }
                 )
 
-        searches_processed = sum(
-            1 for item in results if item["status"] in {"processed", "dry_run"}
-        )
         result = {
             "ok": True,
             "limit_per_search": args.limit_per_search,
@@ -568,9 +579,12 @@ def cmd_analyze_all_active_searches(args) -> None:
             "include_inactive": args.include_inactive,
             "profile_filter": args.profile,
             "searches_total": len(searches),
-            "searches_considered": len(results),
-            "searches_processed": searches_processed,
+            "searches_considered": searches_considered,
+            "searches_processed": sum(
+                1 for item in results if item["status"] == "processed"
+            ),
             "searches_skipped": sum(1 for item in results if item["status"] == "skipped"),
+            "searches_failed": sum(1 for item in results if item["status"] == "failed"),
             "analyses_created_total": analyses_created_total,
             "results": results,
         }

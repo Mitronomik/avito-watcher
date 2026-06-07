@@ -1256,6 +1256,7 @@ def test_cli_analyze_all_active_searches_processes_only_active_by_default(
 
     assert output["ok"] is True
     assert output["searches_total"] == 2
+    assert output["searches_considered"] == 1
     assert output["searches_processed"] == 1
     assert output["analyses_created_total"] == 1
     assert _search_result(output, active.id)["status"] == "processed"
@@ -1298,6 +1299,8 @@ def test_cli_analyze_all_active_searches_skips_missing_unknown_and_empty_pending
     output = _run_analyze_all(capsys)
 
     assert output["ok"] is True
+    assert output["searches_total"] == 3
+    assert output["searches_considered"] == 3
     assert _search_result(output, missing.id)["skip_reason"] == "missing_analysis_profile"
     assert _search_result(output, unknown.id)["skip_reason"] == "unknown_analysis_profile"
     assert _search_result(output, empty.id)["skip_reason"] == "no_pending_matches"
@@ -1316,6 +1319,8 @@ def test_cli_analyze_all_active_searches_profile_filter(db_session, monkeypatch,
     output = _run_analyze_all(capsys, profile="flat_rent")
 
     assert output["profile_filter"] == "flat_rent"
+    assert output["searches_total"] == 2
+    assert output["searches_considered"] == 1
     assert _search_result(output, flat.id)["skip_reason"] == "profile_filter_mismatch"
     assert _search_result(output, rent.id)["status"] == "processed"
 
@@ -1336,6 +1341,58 @@ def test_cli_analyze_all_active_searches_dry_run_does_not_create_analyses(
     assert result["status"] == "dry_run"
     assert result["count"] == 1
     assert output["analyses_created_total"] == 0
+    assert db_session.scalar(select(ListingAnalysis)) is None
+
+
+def test_cli_analyze_all_active_searches_zero_limit_validation(
+    db_session, monkeypatch, capsys
+):
+    search = _search(
+        db_session, name="zero-limit", filters_json={"analysis_profile": "flat_sale"}
+    )
+    _listing(db_session, external_id="zero-limit-1", title="1-к квартира 42 м²")
+    ListingSearchMatchRepository(db_session).upsert_match(search.id, "zero-limit-1")
+    _prepare_cli_db(monkeypatch, db_session)
+    monkeypatch.setattr(
+        cli,
+        "init_db",
+        lambda: (_ for _ in ()).throw(AssertionError("init_db used")),
+    )
+
+    output = _run_analyze_all(capsys, limit_per_search=0)
+
+    assert output == {
+        "ok": False,
+        "error_type": "ValidationError",
+        "error": "limit_per_search must be a positive integer",
+        "limit_per_search": 0,
+    }
+    assert db_session.scalar(select(ListingAnalysis)) is None
+
+
+def test_cli_analyze_all_active_searches_negative_limit_validation(
+    db_session, monkeypatch, capsys
+):
+    search = _search(
+        db_session, name="negative-limit", filters_json={"analysis_profile": "flat_sale"}
+    )
+    _listing(db_session, external_id="negative-limit-1", title="1-к квартира 42 м²")
+    ListingSearchMatchRepository(db_session).upsert_match(search.id, "negative-limit-1")
+    _prepare_cli_db(monkeypatch, db_session)
+    monkeypatch.setattr(
+        cli,
+        "init_db",
+        lambda: (_ for _ in ()).throw(AssertionError("init_db used")),
+    )
+
+    output = _run_analyze_all(capsys, limit_per_search=-1)
+
+    assert output == {
+        "ok": False,
+        "error_type": "ValidationError",
+        "error": "limit_per_search must be a positive integer",
+        "limit_per_search": -1,
+    }
     assert db_session.scalar(select(ListingAnalysis)) is None
 
 
@@ -1376,6 +1433,7 @@ def test_cli_analyze_all_active_searches_summary_shape(db_session, monkeypatch, 
         "searches_considered",
         "searches_processed",
         "searches_skipped",
+        "searches_failed",
         "analyses_created_total",
         "results",
     }
