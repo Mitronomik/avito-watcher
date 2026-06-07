@@ -795,9 +795,70 @@ class MonitorService:
                 seen_at=seen_at,
             )
 
+        def apply_current_search_filters(card: ListingCard, now: datetime) -> bool:
+            nonlocal filtered_by_rules
+            nonlocal filtered_by_publication_date
+            nonlocal publication_missing_allowed_count
+            nonlocal publication_missing_rejected_count
+
+            filter_config = filters or {}
+            rule_failures = explain_rule_filter_failures(card, filter_config)
+            if rule_failures:
+                filtered_by_rules += 1
+                if len(filtered_samples) < 10:
+                    filtered_samples.append(
+                        _filtered_sample(
+                            card,
+                            reason="rules",
+                            rule_failures=rule_failures,
+                        )
+                    )
+                return False
+
+            publication_date_failures = explain_publication_filter_failures(card, filter_config, now)
+            if filter_config.get("require_published_at") is True and card.published_at is None:
+                if "missing_published_at" in publication_date_failures:
+                    publication_missing_rejected_count += 1
+                elif _is_missing_published_at_allowed(filter_config):
+                    publication_missing_allowed_count += 1
+            if publication_date_failures:
+                publication_date_all_diagnostics = explain_publication_filter_failures(
+                    card, filter_config, now, include_non_blocking=True
+                )
+                publication_date_warnings = [
+                    item
+                    for item in publication_date_all_diagnostics
+                    if item not in publication_date_failures
+                ]
+                filtered_by_publication_date += 1
+                if len(filtered_samples) < 10:
+                    if (
+                        filter_config.get("require_published_at") is True
+                        and card.published_at is None
+                        and _is_missing_published_at_allowed(filter_config)
+                    ):
+                        publication_date_warnings = [
+                            *publication_date_warnings,
+                            "missing_published_at_allowed",
+                        ]
+                    filtered_samples.append(
+                        _filtered_sample(
+                            card,
+                            reason="publication_date",
+                            publication_date_failures=publication_date_failures,
+                            publication_date_warnings=publication_date_warnings,
+                        )
+                    )
+                return False
+
+            return True
+
         for card in cards:
             now = self._now()
             existing = existing_by_external_id.get(card.external_id)
+
+            if not baseline_run and not apply_current_search_filters(card, now):
+                continue
 
             if existing:
                 old_price = existing.price
@@ -876,55 +937,6 @@ class MonitorService:
                     listing_repo.update_listing_from_card(listing, card, now)
                     existing_by_external_id[card.external_id] = listing
                 upsert_search_match_for_persisted_listing(card.external_id, seen_at=now)
-                continue
-
-            rule_failures = explain_rule_filter_failures(card, filters)
-            if rule_failures:
-                filtered_by_rules += 1
-                if len(filtered_samples) < 10:
-                    filtered_samples.append(
-                        _filtered_sample(
-                            card,
-                            reason="rules",
-                            rule_failures=rule_failures,
-                        )
-                    )
-                continue
-
-            publication_date_failures = explain_publication_filter_failures(card, filters, now)
-            if filters.get("require_published_at") is True and card.published_at is None:
-                if "missing_published_at" in publication_date_failures:
-                    publication_missing_rejected_count += 1
-                elif _is_missing_published_at_allowed(filters):
-                    publication_missing_allowed_count += 1
-            if publication_date_failures:
-                publication_date_all_diagnostics = explain_publication_filter_failures(
-                    card, filters, now, include_non_blocking=True
-                )
-                publication_date_warnings = [
-                    item
-                    for item in publication_date_all_diagnostics
-                    if item not in publication_date_failures
-                ]
-                filtered_by_publication_date += 1
-                if len(filtered_samples) < 10:
-                    if (
-                        filters.get("require_published_at") is True
-                        and card.published_at is None
-                        and _is_missing_published_at_allowed(filters)
-                    ):
-                        publication_date_warnings = [
-                            *publication_date_warnings,
-                            "missing_published_at_allowed",
-                        ]
-                    filtered_samples.append(
-                        _filtered_sample(
-                            card,
-                            reason="publication_date",
-                            publication_date_failures=publication_date_failures,
-                            publication_date_warnings=publication_date_warnings,
-                        )
-                    )
                 continue
 
             listing, was_created = listing_repo.create_listing_safe(
