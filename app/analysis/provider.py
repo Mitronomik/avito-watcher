@@ -646,6 +646,314 @@ class FlatSaleDeterministicAnalysisProvider:
         return max(0, min(100, score))
 
 
+
+_FLAT_RENT_TERM_KEYWORDS = {
+    "has_deposit_hint": ("залог", "депозит"),
+    "has_commission_hint": ("комиссия",),
+    "has_no_commission_hint": ("без комиссии", "комиссии нет"),
+    "has_utilities_hint": ("ку", "коммунальные", "счетчики", "счётчики"),
+    "has_furniture_hint": ("мебель", "меблир", "диван", "кровать", "шкаф"),
+    "has_appliances_hint": ("техника", "холодильник", "стиральная", "посудомоечная"),
+    "has_pets_hint": ("животн", "с питомц", "можно с кош", "можно с собак"),
+    "has_children_hint": ("дети", "с детьми"),
+    "has_long_term_hint": ("длительный срок", "долгосрочно"),
+    "has_short_term_hint": ("посуточно", "краткосрочно", "на сутки"),
+}
+
+_FLAT_RENT_RISK_DESCRIPTIONS = {
+    "missing_price": "Не указана месячная аренда.",
+    "missing_area": "Не указана площадь квартиры.",
+    "missing_address": "Не указан адрес или понятная локация.",
+    "missing_published_at": "Не удалось определить дату публикации.",
+    "stale_publication": "Публикация старше целевого окна свежести 72 часа.",
+    "over_budget": "Аренда выше целевого бюджета v0.",
+    "area_too_small": "Площадь меньше целевого диапазона v0.",
+    "area_too_large": "Площадь больше целевого диапазона v0.",
+    "first_floor": "Первый этаж требует дополнительной проверки.",
+    "last_floor": "Последний этаж требует дополнительной проверки.",
+    "unknown_floor": "Этаж не удалось определить из заголовка.",
+    "unknown_flat_type": "Тип квартиры не удалось определить из текста объявления.",
+    "no_snapshot": "Нет сохранённого снапшота объявления.",
+    "expensive_rent_per_m2": "Аренда за м² выше простого порога v0.",
+    "suspicious_low_rent_per_m2": "Аренда за м² ниже простого порога v0; нужна ручная проверка.",
+    "short_term_rent": "Есть признаки краткосрочной или посуточной аренды.",
+    "deposit_unknown": "Не найден явный hint про залог или депозит.",
+    "commission_unknown": "Не найден явный hint про комиссию или её отсутствие.",
+    "utilities_unknown": "Не найден явный hint про коммунальные платежи или счётчики.",
+    "furniture_unknown": "Не найден явный hint про мебель.",
+}
+
+_FLAT_RENT_BASE_QUESTIONS = [
+    "Уточнить итоговый ежемесячный платеж.",
+    "Уточнить, включены ли коммунальные платежи и счетчики.",
+    "Уточнить размер залога и условия возврата.",
+    "Уточнить комиссию.",
+    "Уточнить срок аренды и возможность долгосрочного договора.",
+    "Уточнить состав мебели и техники.",
+    "Уточнить, можно ли с детьми и животными.",
+    "Уточнить интернет, парковку, лифты, шум и соседей.",
+    "Уточнить, кто собственник и как оформляется договор.",
+]
+
+
+class FlatRentDeterministicAnalysisProvider:
+    profile = "flat_rent"
+    analysis_version = "flat-rent-v0"
+    model_provider = "deterministic"
+    model_name = "flat-rent-rules-v0"
+
+    target_min_area_m2 = 20.0
+    target_max_area_m2 = 90.0
+    target_max_monthly_rent = 100_000.0
+    target_freshness_hours = 72.0
+    suspicious_low_rent_per_m2 = 600.0
+    expensive_rent_per_m2 = 3_000.0
+
+    def analyze(
+        self, *, listing: Listing, snapshot: ListingSnapshot | None, input_hash: str
+    ) -> ListingAnalysisResult:
+        del input_hash
+        title = listing.title or (snapshot.title if snapshot is not None else "")
+        price = (
+            listing.price
+            if listing.price is not None
+            else (snapshot.price if snapshot is not None else None)
+        )
+        area_m2 = listing.area_m2
+        address = listing.address or ""
+        published_label = listing.published_label or (
+            snapshot.published_label if snapshot is not None else ""
+        )
+        published_at = listing.published_at or (
+            snapshot.published_at if snapshot is not None else None
+        )
+        published_at_utc = _as_utc(published_at)
+        freshness_status = _freshness_status(published_at_utc)
+        rent_per_m2 = (
+            round(price / area_m2, 2)
+            if _positive(price) and _positive(area_m2)
+            else None
+        )
+        floor_info = _parse_flat_floor(title)
+        detected_flat_type = _detect_flat_type(listing, snapshot)
+        rental_terms_hints = _flat_rent_terms_hints(listing, snapshot)
+        target_fit = self._target_fit(
+            price=price, area_m2=area_m2, freshness_status=freshness_status
+        )
+        facts = {
+            "external_id": listing.external_id,
+            "title": title,
+            "url": listing.url,
+            "price": price,
+            "area_m2": area_m2,
+            "rent_per_m2": rent_per_m2,
+            "address": address,
+            "published_label": published_label,
+            "published_at": published_at_utc.isoformat()
+            if published_at_utc is not None
+            else None,
+            "freshness_status": freshness_status,
+            "has_snapshot": snapshot is not None,
+            "snapshot_id": snapshot.id if snapshot is not None else None,
+            "detected_flat_type": detected_flat_type,
+            "floor_info": floor_info,
+            "rental_terms_hints": rental_terms_hints,
+            "target_fit": target_fit,
+        }
+        flags = self._risk_flags(
+            price=price,
+            area_m2=area_m2,
+            address=address,
+            published_at=published_at_utc,
+            freshness_status=freshness_status,
+            detected_flat_type=detected_flat_type,
+            floor_info=floor_info,
+            rent_per_m2=rent_per_m2,
+            has_snapshot=snapshot is not None,
+            rental_terms_hints=rental_terms_hints,
+        )
+        risks = {
+            "flags": flags,
+            "items": [
+                {"flag": flag, "description": _FLAT_RENT_RISK_DESCRIPTIONS[flag]}
+                for flag in flags
+            ],
+            "assumptions": {
+                "target_min_area_m2": self.target_min_area_m2,
+                "target_max_area_m2": self.target_max_area_m2,
+                "target_max_monthly_rent": self.target_max_monthly_rent,
+                "target_freshness_hours": self.target_freshness_hours,
+                "suspicious_low_rent_per_m2": self.suspicious_low_rent_per_m2,
+                "expensive_rent_per_m2": self.expensive_rent_per_m2,
+                "note": "Пороги flat-rent-v0 являются простыми допущениями, а не рыночной оценкой.",
+            },
+        }
+        questions = {"items": _flat_rent_questions_for(flags=flags, hints=rental_terms_hints)}
+        score = self._score(facts=facts, flags=flags)
+        verdict = _flat_verdict(score=score)
+
+        return ListingAnalysisResult(
+            score=score,
+            verdict=verdict,
+            facts_json=facts,
+            risks_json=risks,
+            questions_json=questions,
+            report_md=_flat_rent_report_md(
+                external_id=listing.external_id,
+                score=score,
+                verdict=verdict,
+                facts=facts,
+                risks=risks,
+                questions=questions,
+            ),
+            model_provider=self.model_provider,
+            model_name=self.model_name,
+        )
+
+    def _target_fit(
+        self, *, price: float | None, area_m2: float | None, freshness_status: str
+    ) -> dict:
+        area_fit = (
+            None
+            if area_m2 is None
+            else self.target_min_area_m2 <= area_m2 <= self.target_max_area_m2
+        )
+        price_fit = None if price is None else price <= self.target_max_monthly_rent
+        freshness_fit = (
+            None
+            if freshness_status == "unknown"
+            else freshness_status in {"fresh", "recent"}
+        )
+        known = [
+            value for value in (area_fit, price_fit, freshness_fit) if value is not None
+        ]
+        if not known:
+            overall = "unknown"
+        elif all(known) and len(known) == 3:
+            overall = "good"
+        elif any(known):
+            overall = "partial"
+        else:
+            overall = "poor"
+        return {
+            "area_fit": area_fit,
+            "price_fit": price_fit,
+            "freshness_fit": freshness_fit,
+            "overall": overall,
+            "target_min_area_m2": self.target_min_area_m2,
+            "target_max_area_m2": self.target_max_area_m2,
+            "target_max_monthly_rent": self.target_max_monthly_rent,
+            "target_freshness_hours": self.target_freshness_hours,
+        }
+
+    def _risk_flags(
+        self,
+        *,
+        price: float | None,
+        area_m2: float | None,
+        address: str,
+        published_at: datetime | None,
+        freshness_status: str,
+        detected_flat_type: str,
+        floor_info: dict,
+        rent_per_m2: float | None,
+        has_snapshot: bool,
+        rental_terms_hints: dict,
+    ) -> list[str]:
+        flags: list[str] = []
+        if price is None:
+            flags.append("missing_price")
+        if area_m2 is None:
+            flags.append("missing_area")
+        if not address:
+            flags.append("missing_address")
+        if published_at is None:
+            flags.append("missing_published_at")
+        if freshness_status == "stale":
+            flags.append("stale_publication")
+        if price is not None and price > self.target_max_monthly_rent:
+            flags.append("over_budget")
+        if area_m2 is not None and area_m2 < self.target_min_area_m2:
+            flags.append("area_too_small")
+        if area_m2 is not None and area_m2 > self.target_max_area_m2:
+            flags.append("area_too_large")
+        if floor_info["is_first_floor"] is True:
+            flags.append("first_floor")
+        if floor_info["is_last_floor"] is True:
+            flags.append("last_floor")
+        if floor_info["floor"] is None:
+            flags.append("unknown_floor")
+        if detected_flat_type == "unknown":
+            flags.append("unknown_flat_type")
+        if not has_snapshot:
+            flags.append("no_snapshot")
+        if rent_per_m2 is not None and rent_per_m2 > self.expensive_rent_per_m2:
+            flags.append("expensive_rent_per_m2")
+        if rent_per_m2 is not None and rent_per_m2 < self.suspicious_low_rent_per_m2:
+            flags.append("suspicious_low_rent_per_m2")
+        if rental_terms_hints["has_short_term_hint"]:
+            flags.append("short_term_rent")
+        if not rental_terms_hints["has_deposit_hint"]:
+            flags.append("deposit_unknown")
+        if not (
+            rental_terms_hints["has_commission_hint"]
+            or rental_terms_hints["has_no_commission_hint"]
+        ):
+            flags.append("commission_unknown")
+        if not rental_terms_hints["has_utilities_hint"]:
+            flags.append("utilities_unknown")
+        if not rental_terms_hints["has_furniture_hint"]:
+            flags.append("furniture_unknown")
+        return flags
+
+    def _score(self, *, facts: dict, flags: list[str]) -> int:
+        target_fit = facts["target_fit"]
+        hints = facts["rental_terms_hints"]
+        score = 50
+        if facts["freshness_status"] in {"fresh", "recent"}:
+            score += 10
+        if target_fit["price_fit"] is True:
+            score += 10
+        if target_fit["area_fit"] is True:
+            score += 10
+        if facts["address"]:
+            score += 5
+        if facts["has_snapshot"]:
+            score += 5
+        if facts["detected_flat_type"] != "unknown":
+            score += 5
+        if hints["has_furniture_hint"] or hints["has_appliances_hint"]:
+            score += 5
+        if hints["has_no_commission_hint"]:
+            score += 5
+        if "missing_published_at" in flags:
+            score -= 10
+        if "stale_publication" in flags:
+            score -= 15
+        if "over_budget" in flags:
+            score -= 15
+        if "area_too_small" in flags or "area_too_large" in flags:
+            score -= 10
+        if "first_floor" in flags:
+            score -= 8
+        if "last_floor" in flags:
+            score -= 6
+        if "unknown_floor" in flags:
+            score -= 5
+        if "unknown_flat_type" in flags:
+            score -= 5
+        if "no_snapshot" in flags:
+            score -= 10
+        if "expensive_rent_per_m2" in flags:
+            score -= 10
+        if "short_term_rent" in flags:
+            score -= 10
+        if "deposit_unknown" in flags:
+            score -= 5
+        if "commission_unknown" in flags:
+            score -= 5
+        return max(0, min(100, score))
+
 def get_analysis_provider(profile: str) -> AnalysisProvider:
     if profile == "default":
         return DeterministicAnalysisProvider()
@@ -653,6 +961,8 @@ def get_analysis_provider(profile: str) -> AnalysisProvider:
         return CommercialRentDeterministicAnalysisProvider()
     if profile == "flat_sale":
         return FlatSaleDeterministicAnalysisProvider()
+    if profile == "flat_rent":
+        return FlatRentDeterministicAnalysisProvider()
     raise ValueError(f"unsupported analysis profile: {profile}")
 
 
@@ -1022,3 +1332,145 @@ def _fmt_area(value: float | None) -> str:
     if value is None:
         return "не указана"
     return f"{value:g} м²"
+
+
+def _flat_rent_terms_hints(
+    listing: Listing, snapshot: ListingSnapshot | None
+) -> dict[str, bool]:
+    text = _analysis_text(listing, snapshot)
+    return {
+        key: _has_any(text, keywords)
+        for key, keywords in _FLAT_RENT_TERM_KEYWORDS.items()
+    }
+
+
+def _flat_rent_questions_for(*, flags: list[str], hints: dict) -> list[str]:
+    questions = list(_FLAT_RENT_BASE_QUESTIONS)
+    if "first_floor" in flags:
+        questions.append(
+            "Для первого этажа: уточнить безопасность, окна, шум и приватность."
+        )
+    if "last_floor" in flags:
+        questions.append(
+            "Для последнего этажа: уточнить крышу, техэтаж и шум оборудования."
+        )
+    if "over_budget" in flags or "missing_price" in flags:
+        questions.append("Уточнить финальную ставку аренды и все обязательные платежи.")
+    if "short_term_rent" in flags or hints["has_short_term_hint"]:
+        questions.append("Уточнить, возможен ли долгосрочный договор вместо краткосрочной аренды.")
+    if not hints["has_utilities_hint"]:
+        questions.append("Уточнить отдельно КУ, счетчики, интернет и сезонные платежи.")
+    if not hints["has_deposit_hint"]:
+        questions.append("Уточнить сумму залога, условия удержания и возврата.")
+    if not (hints["has_commission_hint"] or hints["has_no_commission_hint"]):
+        questions.append("Уточнить, есть ли комиссия агенту и в каком размере.")
+    return list(dict.fromkeys(questions))
+
+
+def _flat_rent_report_md(
+    *,
+    external_id: str,
+    score: int,
+    verdict: str,
+    facts: dict,
+    risks: dict,
+    questions: dict,
+) -> str:
+    risk_lines = [item["description"] for item in risks["items"]] or [
+        "Критичных детерминированных рисков не найдено."
+    ]
+    good_lines = _flat_rent_good_lines(facts=facts, risks=risks)
+    floor_info = facts["floor_info"]
+    floor = (
+        f"{floor_info['floor']}/{floor_info['total_floors']}"
+        if floor_info["floor"] is not None
+        else "не указан"
+    )
+    hints = facts["rental_terms_hints"]
+    return "\n".join(
+        [
+            f"# Анализ аренды квартиры {external_id}",
+            "",
+            "## Вердикт",
+            "",
+            f"{verdict}, score {score}/100.",
+            "Вердикт flat-rent-v0 определяется только по score thresholds: "
+            "strong >= 75, medium >= 55, weak >= 35, review < 35.",
+            "",
+            "## Кратко",
+            "",
+            _flat_rent_summary(facts=facts, score=score, verdict=verdict),
+            "",
+            "## Факты",
+            "",
+            f"* Тип квартиры: {facts['detected_flat_type']}",
+            f"* Аренда в месяц: {_fmt_money(facts['price'])}",
+            f"* Площадь: {_fmt_area(facts['area_m2'])}",
+            f"* Аренда за м²: {_fmt_money(facts['rent_per_m2'])}",
+            f"* Адрес: {facts['address'] or 'не указан'}",
+            f"* Этаж: {floor}",
+            f"* Свежесть: {facts['freshness_status']}",
+            f"* Мебель/техника: мебель={_fmt_bool(hints['has_furniture_hint'])}, техника={_fmt_bool(hints['has_appliances_hint'])}",
+            f"* Залог/комиссия/КУ: залог={_fmt_bool(hints['has_deposit_hint'])}, комиссия={_fmt_bool(hints['has_commission_hint'])}, без комиссии={_fmt_bool(hints['has_no_commission_hint'])}, КУ={_fmt_bool(hints['has_utilities_hint'])}",
+            "",
+            "## Что хорошо",
+            "",
+            *[f"* {line}" for line in good_lines],
+            "",
+            "## Риски",
+            "",
+            *[f"* {line}" for line in risk_lines],
+            "",
+            "## Что уточнить перед звонком",
+            "",
+            *[f"* {item}" for item in questions["items"]],
+            "",
+            "## Подходит для",
+            "",
+            f"* {_flat_rent_suitable_for(facts=facts)}",
+        ]
+    )
+
+
+def _flat_rent_summary(*, facts: dict, score: int, verdict: str) -> str:
+    title = facts["title"] or "Квартира без названия"
+    return f"{title}. Детерминированный профиль flat-rent-v0 оценил объявление как {verdict} ({score}/100) только по уже сохранённым данным объявления. Пороги аренды за м² — простые допущения v0, а не рыночная оценка."
+
+
+def _flat_rent_good_lines(*, facts: dict, risks: dict) -> list[str]:
+    flags = set(risks["flags"])
+    hints = facts["rental_terms_hints"]
+    lines: list[str] = []
+    if facts["freshness_status"] in {"fresh", "recent"}:
+        lines.append("Объявление попадает в целевое окно свежести 72 часа.")
+    if facts["target_fit"]["price_fit"] is True:
+        lines.append("Аренда не выше целевого бюджета v0.")
+    if facts["target_fit"]["area_fit"] is True:
+        lines.append("Площадь в целевом диапазоне v0.")
+    if facts["detected_flat_type"] != "unknown":
+        lines.append("Тип квартиры удалось определить из текста объявления.")
+    if hints["has_no_commission_hint"]:
+        lines.append("Есть hint об отсутствии комиссии.")
+    if hints["has_furniture_hint"] or hints["has_appliances_hint"]:
+        lines.append("Есть hint о мебели или технике.")
+    if not lines and flags:
+        lines.append("Плюсы требуют ручной проверки из-за неполных или рискованных данных.")
+    return lines or ["Базовые факты заполнены, явных v0-рисков нет."]
+
+
+def _flat_rent_suitable_for(*, facts: dict) -> str:
+    hints = facts["rental_terms_hints"]
+    flat_type = facts["detected_flat_type"]
+    if hints["has_short_term_hint"]:
+        return "временная аренда"
+    if flat_type in {"studio", "one_room"}:
+        return "один человек / пара / долгосрочная аренда"
+    if flat_type in {"two_room", "three_room", "multi_room"}:
+        return "пара / семья / долгосрочная аренда"
+    if hints["has_long_term_hint"]:
+        return "долгосрочная аренда"
+    return "неизвестно"
+
+
+def _fmt_bool(value: bool) -> str:
+    return "да" if value else "нет"

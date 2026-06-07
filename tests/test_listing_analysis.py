@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from app import cli
 from app.analysis.provider import (
     CommercialRentDeterministicAnalysisProvider,
+    FlatRentDeterministicAnalysisProvider,
     FlatSaleDeterministicAnalysisProvider,
     ListingAnalysisResult,
     _flat_verdict,
@@ -938,3 +939,236 @@ def test_global_alerted_selection_is_analysis_version_aware(db_session):
     assert analyses[0].listing_external_id == "versioned-global-1"
     assert analyses[0].analysis_version == "commercial-rent-v1"
     assert analyses[0].context_key == "global"
+
+
+def _flat_rent_result(**kwargs):
+    now = datetime.now(UTC)
+    description = kwargs.pop("description", "")
+    snapshot_enabled = kwargs.pop("snapshot", True)
+    listing = Listing(
+        external_id=kwargs.pop("external_id", "rent-1"),
+        url=kwargs.pop("url", "https://www.avito.ru/item/rent-1"),
+        title=kwargs.pop(
+            "title",
+            "1-к квартира 40 м² 8/15 эт. залог без комиссии КУ мебель техника",
+        ),
+        price=kwargs.pop("price", 60_000),
+        address=kwargs.pop("address", "Санкт-Петербург, Невский проспект"),
+        area_m2=kwargs.pop("area_m2", 40.0),
+        published_label=kwargs.pop("published_label", "сегодня"),
+        published_at=kwargs.pop("published_at", now - timedelta(hours=2)),
+        **kwargs,
+    )
+    snapshot = None
+    if snapshot_enabled:
+        snapshot = ListingSnapshot(
+            id=1,
+            external_id=listing.external_id,
+            title=listing.title,
+            price=listing.price,
+            published_label=listing.published_label,
+            published_at=listing.published_at,
+            payload_json={"description": description},
+        )
+    return FlatRentDeterministicAnalysisProvider().analyze(
+        listing=listing, snapshot=snapshot, input_hash="hash"
+    )
+
+
+def test_flat_rent_provider_metadata():
+    result = _flat_rent_result()
+
+    assert result.model_provider == "deterministic"
+    assert result.model_name == "flat-rent-rules-v0"
+    provider = FlatRentDeterministicAnalysisProvider()
+    assert provider.profile == "flat_rent"
+    assert provider.analysis_version == "flat-rent-v0"
+
+
+def test_flat_rent_rent_per_m2_calculation():
+    result = _flat_rent_result(price=75_000, area_m2=30)
+
+    assert result.facts_json["rent_per_m2"] == 2500
+
+
+def test_flat_rent_detects_flat_type_markers():
+    cases = [
+        ("Квартира-студия 25 м² 3/12 эт.", "studio"),
+        ("1 к квартира 35 м² 4/9 эт.", "one_room"),
+        ("2-комн. квартира 55 м² 5/10 эт.", "two_room"),
+        ("трёхкомнатная квартира 70 м² 6/12 эт.", "three_room"),
+        ("Квартира 2/12 эт. без комнатного маркера", "unknown"),
+    ]
+
+    for title, expected in cases:
+        assert _flat_rent_result(title=title).facts_json["detected_flat_type"] == expected
+
+
+def test_flat_rent_floor_parsing_variants():
+    first = _flat_rent_result(title="1-к квартира 30 м² 1/11 эт.").facts_json[
+        "floor_info"
+    ]
+    last = _flat_rent_result(title="1-к квартира 30 м² 6/6 эт.").facts_json[
+        "floor_info"
+    ]
+    middle = _flat_rent_result(title="1-к квартира 30 м² 8/15 эт.").facts_json[
+        "floor_info"
+    ]
+    unknown = _flat_rent_result(title="1-к квартира 30 м² этаж не указан").facts_json[
+        "floor_info"
+    ]
+
+    assert first == {
+        "floor": 1,
+        "total_floors": 11,
+        "is_first_floor": True,
+        "is_last_floor": False,
+    }
+    assert last["is_last_floor"] is True
+    assert middle["floor"] == 8
+    assert middle["is_first_floor"] is False
+    assert middle["is_last_floor"] is False
+    assert unknown["floor"] is None
+
+
+def test_flat_rent_freshness_statuses():
+    now = datetime.now(UTC)
+
+    assert _flat_rent_result(published_at=now - timedelta(hours=23)).facts_json[
+        "freshness_status"
+    ] == "fresh"
+    assert _flat_rent_result(published_at=now - timedelta(hours=48)).facts_json[
+        "freshness_status"
+    ] == "recent"
+    assert _flat_rent_result(published_at=now - timedelta(hours=73)).facts_json[
+        "freshness_status"
+    ] == "stale"
+    assert _flat_rent_result(published_at=None).facts_json["freshness_status"] == "unknown"
+
+
+def test_flat_rent_target_fit():
+    good = _flat_rent_result(price=80_000, area_m2=45).facts_json["target_fit"]
+    partial = _flat_rent_result(price=120_000, area_m2=45).facts_json["target_fit"]
+    unknown = _flat_rent_result(price=None, area_m2=None, published_at=None).facts_json[
+        "target_fit"
+    ]
+
+    assert good["area_fit"] is True
+    assert good["price_fit"] is True
+    assert good["freshness_fit"] is True
+    assert good["overall"] == "good"
+    assert partial["price_fit"] is False
+    assert partial["overall"] == "partial"
+    assert unknown["overall"] == "unknown"
+
+
+def test_flat_rent_rental_term_hints():
+    result = _flat_rent_result(
+        description=(
+            "залог комиссия коммунальные счетчики мебель диван техника холодильник "
+            "стиральная можно с кошкой с детьми длительный срок"
+        ),
+    )
+    hints = result.facts_json["rental_terms_hints"]
+    no_commission = _flat_rent_result(description="без комиссии").facts_json[
+        "rental_terms_hints"
+    ]
+    short_term = _flat_rent_result(description="посуточно на сутки").facts_json[
+        "rental_terms_hints"
+    ]
+
+    assert hints["has_deposit_hint"] is True
+    assert hints["has_commission_hint"] is True
+    assert no_commission["has_no_commission_hint"] is True
+    assert hints["has_utilities_hint"] is True
+    assert hints["has_furniture_hint"] is True
+    assert hints["has_appliances_hint"] is True
+    assert hints["has_pets_hint"] is True
+    assert hints["has_children_hint"] is True
+    assert hints["has_long_term_hint"] is True
+    assert short_term["has_short_term_hint"] is True
+
+
+def test_flat_rent_risk_flags():
+    flags = _flat_rent_result(
+        title="1-к квартира 20 м² 1/10 эт. посуточно",
+        price=120_000,
+        area_m2=20,
+        published_at=None,
+        description="посуточно",
+    ).risks_json["flags"]
+    expensive_flags = _flat_rent_result(price=120_000, area_m2=20).risks_json["flags"]
+    last_flags = _flat_rent_result(title="1-к квартира 40 м² 6/6 эт.").risks_json[
+        "flags"
+    ]
+
+    assert "over_budget" in flags
+    assert "first_floor" in flags
+    assert "short_term_rent" in flags
+    assert "missing_published_at" in flags
+    assert "expensive_rent_per_m2" in expensive_flags
+    assert "last_floor" in last_flags
+
+
+def test_flat_rent_score_is_clamped_to_0_and_100():
+    low = _flat_rent_result(
+        title="Квартира без данных посуточно",
+        price=500_000,
+        area_m2=5,
+        address="",
+        published_at=datetime.now(UTC) - timedelta(days=30),
+        snapshot=False,
+    )
+
+    assert 0 <= low.score <= 100
+    assert 0 <= _flat_rent_result().score <= 100
+
+
+def test_flat_rent_verdict_thresholds():
+    assert _flat_verdict(score=75) == "strong"
+    assert _flat_verdict(score=55) == "medium"
+    assert _flat_verdict(score=35) == "weak"
+    assert _flat_verdict(score=34) == "review"
+
+
+def test_flat_rent_report_contains_russian_sections():
+    report = _flat_rent_result().report_md
+
+    assert "## Вердикт" in report
+    assert "## Факты" in report
+    assert "## Риски" in report
+    assert "## Что уточнить перед звонком" in report
+
+
+def test_get_analysis_provider_supports_flat_rent():
+    provider = get_analysis_provider("flat_rent")
+
+    assert isinstance(provider, FlatRentDeterministicAnalysisProvider)
+    assert provider.profile == "flat_rent"
+
+
+def test_analyze_search_matches_uses_flat_rent_profile(db_session):
+    search = _search(
+        db_session,
+        name="flat-rent",
+        filters_json={"analysis_profile": "flat_rent"},
+    )
+    _listing(
+        db_session,
+        external_id="flat-rent-1",
+        title="1-к квартира 42 м² 8/15 эт.",
+        price=65_000,
+        area_m2=42,
+    )
+    ListingSearchMatchRepository(db_session).upsert_match(search.id, "flat-rent-1")
+
+    service = ListingAnalysisService(
+        db_session,
+        provider=get_analysis_provider(resolve_search_analysis_profile(search)),
+    )
+    analyses = service.analyze_search_matches(search.id, limit=20)
+
+    assert len(analyses) == 1
+    assert analyses[0].profile == "flat_rent"
+    assert analyses[0].analysis_version == "flat-rent-v0"
+    assert analyses[0].facts_json["detected_flat_type"] == "one_room"
