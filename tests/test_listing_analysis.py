@@ -320,6 +320,12 @@ def test_commercial_rent_sublease_partial_area_risk_flags():
     assert "sublease_or_partial_area_ambiguity" in result.risks_json["flags"]
 
 
+def test_commercial_rent_normal_place_phrase_does_not_trigger_partial_area_risk():
+    result = _commercial_result(description="Проходимое место рядом с метро")
+
+    assert "sublease_or_partial_area_ambiguity" not in result.risks_json["flags"]
+
+
 def test_commercial_rent_warehouse_or_production_risk_for_service_use():
     warehouse = _commercial_result(title="Склад 60 м²")
     production = _commercial_result(title="Производство 60 м²")

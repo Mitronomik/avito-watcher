@@ -294,10 +294,11 @@ class CommercialRentDeterministicAnalysisProvider:
                 "субаренда",
                 "часть помещения",
                 "часть площади",
-                "место",
                 "островок",
                 "отдельное рабочее место",
+                "рабочее место",
                 "помещение внутри",
+                "место внутри",
             ),
         ):
             flags.append("sublease_or_partial_area_ambiguity")
