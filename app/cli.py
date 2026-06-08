@@ -17,7 +17,9 @@ from app.parsers.proxy_manager import ProxyManager
 from app.parsers.proxy_url import validate_proxy_urls
 from app.db.init_db import init_db
 from app.db.session import SessionLocal
+from app.repositories.agent_task_repository import AgentTaskRepository
 from app.repositories.search_repository import SearchRepository
+from app.services.agent_task_runner import AgentTaskRunner
 from app.services.monitor_service import MonitorService, runtime_diagnostics
 
 
@@ -587,6 +589,22 @@ def cmd_analyze_all_active_searches(args) -> None:
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def cmd_run_agent_tasks(args) -> None:
+    init_db()
+    with SessionLocal() as db:
+        runner = AgentTaskRunner(AgentTaskRepository(db))
+        result = runner.run_pending(
+            limit=args.limit,
+            task_type=args.task_type,
+            dry_run=args.dry_run,
+        )
+        if args.dry_run or not result.get("ok", False):
+            db.rollback()
+        else:
+            db.commit()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def cmd_admin_server(args) -> None:
     from app.main import create_app
 
@@ -675,6 +693,15 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_all_active.add_argument("--profile", default="")
     analyze_all_active.add_argument("--dry-run", action="store_true")
     analyze_all_active.set_defaults(func=cmd_analyze_all_active_searches)
+
+    run_agent_tasks = sub.add_parser(
+        "run-agent-tasks",
+        help="Process pending AgentTask rows manually with safe no-op handlers",
+    )
+    run_agent_tasks.add_argument("--limit", type=int, default=10)
+    run_agent_tasks.add_argument("--task-type", required=False)
+    run_agent_tasks.add_argument("--dry-run", action="store_true")
+    run_agent_tasks.set_defaults(func=cmd_run_agent_tasks)
 
     return parser
 
