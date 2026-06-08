@@ -30,6 +30,17 @@ class NoopAgentTaskHandler:
         )
 
 
+class MissingAgentTaskHandler:
+    def handle(self, task: AgentTask) -> AgentTaskHandlerResult:
+        return AgentTaskHandlerResult(
+            status="skipped",
+            result_json={
+                "reason": "no_handler_registered",
+                "task_type": task.task_type,
+            },
+        )
+
+
 class AgentTaskRunner:
     def __init__(
         self,
@@ -38,7 +49,7 @@ class AgentTaskRunner:
     ) -> None:
         self.repository = repository
         self.handlers = handlers or {}
-        self.noop_handler = NoopAgentTaskHandler()
+        self.missing_handler = MissingAgentTaskHandler()
 
     def run_pending(
         self,
@@ -83,7 +94,7 @@ class AgentTaskRunner:
             result["processed"] += 1
             try:
                 self.repository.mark_running(task)
-                handler = self.handlers.get(task.task_type, self.noop_handler)
+                handler = self.handlers.get(task.task_type, self.missing_handler)
                 handler_result = handler.handle(task)
                 if handler_result.status == "success":
                     self.repository.mark_success(task, handler_result.result_json)

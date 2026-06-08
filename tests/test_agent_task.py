@@ -8,7 +8,11 @@ from app import cli
 from app.models.agent_task import AgentTask
 from app.models.listing_analysis import ListingAnalysis
 from app.repositories.agent_task_repository import AgentTaskRepository
-from app.services.agent_task_runner import AgentTaskHandlerResult, AgentTaskRunner
+from app.services.agent_task_runner import (
+    AgentTaskHandlerResult,
+    AgentTaskRunner,
+    NoopAgentTaskHandler,
+)
 from app.services.agent_task_service import AgentTaskService
 
 
@@ -206,9 +210,10 @@ def _task(repo: AgentTaskRepository, dedupe_key: str, task_type: str = "manual_r
 
 def test_agent_task_runner_noop_success(db_session):
     repo = AgentTaskRepository(db_session)
-    task = _task(repo, "runner:noop:1")
+    task = _task(repo, "runner:noop:1", task_type="noop")
+    runner = AgentTaskRunner(repo, handlers={"noop": NoopAgentTaskHandler()})
 
-    result = AgentTaskRunner(repo).run_pending(limit=10)
+    result = runner.run_pending(limit=10)
 
     assert result["processed"] == 1
     assert result["succeeded"] == 1
@@ -230,12 +235,29 @@ def test_agent_task_runner_dry_run_does_not_change_status(db_session):
     assert task.finished_at is None
 
 
+def test_agent_task_runner_missing_handler_skips_unregistered_task_type(db_session):
+    repo = AgentTaskRepository(db_session)
+    task = _task(repo, "runner:missing:1", task_type="review_copilot")
+
+    result = AgentTaskRunner(repo).run_pending(limit=10)
+
+    assert result["processed"] == 1
+    assert result["succeeded"] == 0
+    assert result["skipped"] == 1
+    assert task.status == "skipped"
+    assert task.result_json == {
+        "reason": "no_handler_registered",
+        "task_type": "review_copilot",
+    }
+
+
 def test_agent_task_runner_filters_by_task_type(db_session):
     repo = AgentTaskRepository(db_session)
     manual_task = _task(repo, "runner:filter:manual", task_type="manual_review")
     other_task = _task(repo, "runner:filter:other", task_type="review_listing")
+    runner = AgentTaskRunner(repo, handlers={"manual_review": NoopAgentTaskHandler()})
 
-    result = AgentTaskRunner(repo).run_pending(limit=10, task_type="manual_review")
+    result = runner.run_pending(limit=10, task_type="manual_review")
 
     assert result["processed"] == 1
     assert result["succeeded"] == 1
@@ -257,7 +279,13 @@ def test_agent_task_runner_continues_after_handler_failure(db_session):
     repo = AgentTaskRepository(db_session)
     failed_task = _task(repo, "runner:fail:1", task_type="failing_task")
     success_task = _task(repo, "runner:fail:2", task_type="manual_review")
-    runner = AgentTaskRunner(repo, handlers={"failing_task": FailingAgentTaskHandler()})
+    runner = AgentTaskRunner(
+        repo,
+        handlers={
+            "failing_task": FailingAgentTaskHandler(),
+            "manual_review": NoopAgentTaskHandler(),
+        },
+    )
 
     result = runner.run_pending(limit=10)
 
@@ -306,9 +334,9 @@ def test_cli_run_agent_tasks_dry_run_outputs_pending_without_changes(
     assert task.status == "pending"
 
 
-def test_cli_run_agent_tasks_processes_noop_task(db_session, monkeypatch, capsys):
+def test_cli_run_agent_tasks_skips_task_without_registered_handler(db_session, monkeypatch, capsys):
     repo = AgentTaskRepository(db_session)
-    task = _task(repo, "cli:noop:1")
+    task = _task(repo, "cli:missing:1", task_type="review_copilot")
     db_session.commit()
     _prepare_agent_task_cli_db(monkeypatch, db_session)
 
@@ -318,8 +346,13 @@ def test_cli_run_agent_tasks_processes_noop_task(db_session, monkeypatch, capsys
     db_session.refresh(task)
     assert output["ok"] is True
     assert output["processed"] == 1
-    assert output["succeeded"] == 1
-    assert task.status == "success"
+    assert output["succeeded"] == 0
+    assert output["skipped"] == 1
+    assert task.status == "skipped"
+    assert task.result_json == {
+        "reason": "no_handler_registered",
+        "task_type": "review_copilot",
+    }
 
 
 def test_cli_run_agent_tasks_rejects_non_positive_limit(db_session, monkeypatch, capsys):
