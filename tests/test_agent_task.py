@@ -1,8 +1,18 @@
-from sqlalchemy import select
+from argparse import Namespace
+import json
 
+from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
+
+from app import cli
 from app.models.agent_task import AgentTask
 from app.models.listing_analysis import ListingAnalysis
 from app.repositories.agent_task_repository import AgentTaskRepository
+from app.services.agent_task_runner import (
+    AgentTaskHandlerResult,
+    AgentTaskRunner,
+    NoopAgentTaskHandler,
+)
 from app.services.agent_task_service import AgentTaskService
 
 
@@ -183,3 +193,178 @@ def test_payload_extra_cannot_override_identity_fields(db_session):
 def test_alembic_env_imports_agent_task():
     with open("alembic/env.py") as env_file:
         assert "from app.models.agent_task import AgentTask" in env_file.read()
+
+
+def _task(repo: AgentTaskRepository, dedupe_key: str, task_type: str = "manual_review") -> AgentTask:
+    return repo.create_or_get_task(
+        task_type=task_type,
+        dedupe_key=dedupe_key,
+        priority=50,
+        listing_external_id=f"listing-{dedupe_key}",
+        listing_analysis_id=1,
+        search_job_id=123,
+        context_key="search:123",
+        payload_json={"dedupe_key": dedupe_key},
+    )
+
+
+def test_agent_task_runner_noop_success(db_session):
+    repo = AgentTaskRepository(db_session)
+    task = _task(repo, "runner:noop:1", task_type="noop")
+    runner = AgentTaskRunner(repo, handlers={"noop": NoopAgentTaskHandler()})
+
+    result = runner.run_pending(limit=10)
+
+    assert result["processed"] == 1
+    assert result["succeeded"] == 1
+    assert task.status == "success"
+    assert task.started_at is not None
+    assert task.finished_at is not None
+    assert task.result_json["handler"] == "noop"
+
+
+def test_agent_task_runner_dry_run_does_not_change_status(db_session):
+    repo = AgentTaskRepository(db_session)
+    task = _task(repo, "runner:dry:1")
+
+    result = AgentTaskRunner(repo).run_pending(limit=10, dry_run=True)
+
+    assert result["pending"] == 1
+    assert task.status == "pending"
+    assert task.started_at is None
+    assert task.finished_at is None
+
+
+def test_agent_task_runner_missing_handler_skips_unregistered_task_type(db_session):
+    repo = AgentTaskRepository(db_session)
+    task = _task(repo, "runner:missing:1", task_type="review_copilot")
+
+    result = AgentTaskRunner(repo).run_pending(limit=10)
+
+    assert result["processed"] == 1
+    assert result["succeeded"] == 0
+    assert result["skipped"] == 1
+    assert task.status == "skipped"
+    assert task.result_json == {
+        "reason": "no_handler_registered",
+        "task_type": "review_copilot",
+    }
+
+
+def test_agent_task_runner_filters_by_task_type(db_session):
+    repo = AgentTaskRepository(db_session)
+    manual_task = _task(repo, "runner:filter:manual", task_type="manual_review")
+    other_task = _task(repo, "runner:filter:other", task_type="review_listing")
+    runner = AgentTaskRunner(repo, handlers={"manual_review": NoopAgentTaskHandler()})
+
+    result = runner.run_pending(limit=10, task_type="manual_review")
+
+    assert result["processed"] == 1
+    assert result["succeeded"] == 1
+    assert manual_task.status == "success"
+    assert other_task.status == "pending"
+
+
+class FailingAgentTaskHandler:
+    def handle(self, task: AgentTask) -> AgentTaskHandlerResult:
+        raise RuntimeError(f"boom {task.id}")
+
+
+class SkippingAgentTaskHandler:
+    def handle(self, task: AgentTask) -> AgentTaskHandlerResult:
+        return AgentTaskHandlerResult(status="skipped", result_json={"reason": "not needed"})
+
+
+def test_agent_task_runner_continues_after_handler_failure(db_session):
+    repo = AgentTaskRepository(db_session)
+    failed_task = _task(repo, "runner:fail:1", task_type="failing_task")
+    success_task = _task(repo, "runner:fail:2", task_type="manual_review")
+    runner = AgentTaskRunner(
+        repo,
+        handlers={
+            "failing_task": FailingAgentTaskHandler(),
+            "manual_review": NoopAgentTaskHandler(),
+        },
+    )
+
+    result = runner.run_pending(limit=10)
+
+    assert result["failed"] == 1
+    assert result["succeeded"] == 1
+    assert failed_task.status == "failed"
+    assert failed_task.error_type == "RuntimeError"
+    assert success_task.status == "success"
+
+
+def test_agent_task_runner_skipped_result(db_session):
+    repo = AgentTaskRepository(db_session)
+    task = _task(repo, "runner:skip:1", task_type="skipping_task")
+    runner = AgentTaskRunner(repo, handlers={"skipping_task": SkippingAgentTaskHandler()})
+
+    result = runner.run_pending(limit=10)
+
+    assert result["skipped"] == 1
+    assert task.status == "skipped"
+    assert task.result_json == {"reason": "not needed"}
+
+
+def _prepare_agent_task_cli_db(monkeypatch, db_session):
+    SessionLocal = sessionmaker(
+        bind=db_session.get_bind(), autoflush=False, autocommit=False
+    )
+    monkeypatch.setattr(cli, "init_db", lambda: None)
+    monkeypatch.setattr(cli, "SessionLocal", SessionLocal)
+
+
+def test_cli_run_agent_tasks_dry_run_outputs_pending_without_changes(
+    db_session, monkeypatch, capsys
+):
+    repo = AgentTaskRepository(db_session)
+    task = _task(repo, "cli:dry:1")
+    db_session.commit()
+    _prepare_agent_task_cli_db(monkeypatch, db_session)
+
+    cli.cmd_run_agent_tasks(Namespace(limit=10, task_type=None, dry_run=True))
+
+    output = json.loads(capsys.readouterr().out)
+    db_session.refresh(task)
+    assert output["ok"] is True
+    assert output["dry_run"] is True
+    assert output["pending"] == 1
+    assert task.status == "pending"
+
+
+def test_cli_run_agent_tasks_skips_task_without_registered_handler(db_session, monkeypatch, capsys):
+    repo = AgentTaskRepository(db_session)
+    task = _task(repo, "cli:missing:1", task_type="review_copilot")
+    db_session.commit()
+    _prepare_agent_task_cli_db(monkeypatch, db_session)
+
+    cli.cmd_run_agent_tasks(Namespace(limit=10, task_type=None, dry_run=False))
+
+    output = json.loads(capsys.readouterr().out)
+    db_session.refresh(task)
+    assert output["ok"] is True
+    assert output["processed"] == 1
+    assert output["succeeded"] == 0
+    assert output["skipped"] == 1
+    assert task.status == "skipped"
+    assert task.result_json == {
+        "reason": "no_handler_registered",
+        "task_type": "review_copilot",
+    }
+
+
+def test_cli_run_agent_tasks_rejects_non_positive_limit(db_session, monkeypatch, capsys):
+    repo = AgentTaskRepository(db_session)
+    task = _task(repo, "cli:limit:1")
+    db_session.commit()
+    _prepare_agent_task_cli_db(monkeypatch, db_session)
+
+    cli.cmd_run_agent_tasks(Namespace(limit=0, task_type=None, dry_run=False))
+
+    output = json.loads(capsys.readouterr().out)
+    db_session.refresh(task)
+    assert output["ok"] is False
+    assert output["error_type"] == "validation_error"
+    assert task.status == "pending"
