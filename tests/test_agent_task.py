@@ -237,7 +237,7 @@ def test_agent_task_runner_dry_run_does_not_change_status(db_session):
 
 def test_agent_task_runner_missing_handler_skips_unregistered_task_type(db_session):
     repo = AgentTaskRepository(db_session)
-    task = _task(repo, "runner:missing:1", task_type="review_copilot")
+    task = _task(repo, "runner:missing:1", task_type="unregistered_task")
 
     result = AgentTaskRunner(repo).run_pending(limit=10)
 
@@ -247,7 +247,7 @@ def test_agent_task_runner_missing_handler_skips_unregistered_task_type(db_sessi
     assert task.status == "skipped"
     assert task.result_json == {
         "reason": "no_handler_registered",
-        "task_type": "review_copilot",
+        "task_type": "unregistered_task",
     }
 
 
@@ -336,7 +336,7 @@ def test_cli_run_agent_tasks_dry_run_outputs_pending_without_changes(
 
 def test_cli_run_agent_tasks_skips_task_without_registered_handler(db_session, monkeypatch, capsys):
     repo = AgentTaskRepository(db_session)
-    task = _task(repo, "cli:missing:1", task_type="review_copilot")
+    task = _task(repo, "cli:missing:1", task_type="unregistered_task")
     db_session.commit()
     _prepare_agent_task_cli_db(monkeypatch, db_session)
 
@@ -351,7 +351,7 @@ def test_cli_run_agent_tasks_skips_task_without_registered_handler(db_session, m
     assert task.status == "skipped"
     assert task.result_json == {
         "reason": "no_handler_registered",
-        "task_type": "review_copilot",
+        "task_type": "unregistered_task",
     }
 
 

@@ -19,7 +19,7 @@ from app.db.init_db import init_db
 from app.db.session import SessionLocal
 from app.repositories.agent_task_repository import AgentTaskRepository
 from app.repositories.search_repository import SearchRepository
-from app.services.agent_task_runner import AgentTaskRunner
+from app.services.agent_task_runner import AgentTaskRunner, build_default_agent_task_handlers
 from app.services.monitor_service import MonitorService, runtime_diagnostics
 
 
@@ -592,7 +592,10 @@ def cmd_analyze_all_active_searches(args) -> None:
 def cmd_run_agent_tasks(args) -> None:
     init_db()
     with SessionLocal() as db:
-        runner = AgentTaskRunner(AgentTaskRepository(db))
+        runner = AgentTaskRunner(
+            AgentTaskRepository(db),
+            handlers=build_default_agent_task_handlers(db),
+        )
         result = runner.run_pending(
             limit=args.limit,
             task_type=args.task_type,
@@ -696,7 +699,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_agent_tasks = sub.add_parser(
         "run-agent-tasks",
-        help="Process pending AgentTask rows manually with safe no-op handlers",
+        help="Process pending AgentTask rows manually",
     )
     run_agent_tasks.add_argument("--limit", type=int, default=10)
     run_agent_tasks.add_argument("--task-type", required=False)

@@ -41,6 +41,15 @@ class MissingAgentTaskHandler:
         )
 
 
+def build_default_agent_task_handlers(db) -> dict[str, AgentTaskHandler]:
+    from app.agents.review_copilot import (
+        REVIEW_COPILOT_TASK_TYPE,
+        ReviewCopilotAgentTaskHandler,
+    )
+
+    return {REVIEW_COPILOT_TASK_TYPE: ReviewCopilotAgentTaskHandler(db)}
+
+
 class AgentTaskRunner:
     def __init__(
         self,
