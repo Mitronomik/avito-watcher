@@ -17,6 +17,7 @@ from app.parsers.errors import ParserError, ParserErrorType
 
 
 def test_create_app_default_admin_routes_disabled():
+    assert settings.admin_ui_enabled is False
     app = create_app()
     assert not any(route.path == "/admin/searches" for route in app.routes)
 
