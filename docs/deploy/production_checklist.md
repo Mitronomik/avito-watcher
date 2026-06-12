@@ -299,6 +299,33 @@ Verify alert delivery on enabled channels:
 - Google Sheets: webhook receives row with listing payload (if enabled). For the production Google Sheets + LLM summary contour, use the [Google Sheets alerts with LLM summary runbook](google_sheets_llm_runbook.md).
 - Email: message arrives with listing summary/content (if enabled). Keep email dormant unless a separate rollout explicitly enables it.
 
+Useful SQL smoke checks after deploy:
+
+```sql
+select channel,
+       count(*) as sent_count,
+       min(id) as first_id,
+       max(id) as last_id,
+       min(created_at) as first_created_at,
+       max(created_at) as last_created_at
+from alerts_sent
+group by channel
+order by channel;
+```
+
+```sql
+select channel,
+       count(*) as alerts_without_current_match
+from alerts_sent a
+where not exists (
+  select 1
+  from listing_search_matches m
+  where m.listing_external_id = a.listing_external_id
+)
+group by channel
+order by channel;
+```
+
 ## Admin checks after deploy
 
 Verify operational status in admin/API:

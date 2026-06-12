@@ -515,8 +515,8 @@ def test_cli_analyze_alerted_listings_works_with_limit(db_session, monkeypatch, 
     assert output["analyses"][0]["listing_external_id"] == "cli-ext-0"
 
 
-def test_alerted_listing_query_does_not_require_alert_created_at(db_session):
-    assert not hasattr(AlertSent, "created_at")
+def test_alerted_listing_query_uses_alerts_sent_dedupe_not_created_at_ordering(db_session):
+    assert hasattr(AlertSent, "created_at")
     _listing(db_session)
     _alert(db_session)
 

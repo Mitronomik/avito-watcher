@@ -18,6 +18,7 @@ from app.db.session import SessionLocal
 from app.models.search_job import SearchJob
 from app.models.listing_analysis import ListingAnalysis
 from app.models.listing_snapshot import ListingSnapshot
+from app.models.listing_search_match import ListingSearchMatch
 from app.notifiers.composite import CompositeNotifier
 from app.notifiers.email import EmailNotifier
 from app.notifiers.google_sheets_webhook import GoogleSheetsWebhookNotifier
@@ -599,29 +600,51 @@ class MonitorService:
             return "failed", analysis, True
         return "skipped", analysis, True
 
+    @staticmethod
+    def _empty_delivery_result() -> dict[str, list[str]]:
+        return {
+            "attempted": [],
+            "successful": [],
+            "skipped": [],
+            "failed": [],
+            "unknown": [],
+        }
+
+    def _pending_alert_channels(
+        self, alert_repo: AlertRepository, card: ListingCard
+    ) -> list[str]:
+        notifier_channels = getattr(self.notifier, "channels", [self.notifier])
+        pending_channels = []
+        for channel in notifier_channels:
+            channel_name = channel.channel_name
+            dedupe_key = f"{channel_name}:new:{card.external_id}"
+            if not alert_repo.exists_by_dedupe_key(dedupe_key):
+                pending_channels.append(channel_name)
+        return pending_channels
+
+    def _has_current_search_match(
+        self, db: Session, listing_external_id: str, search_job_id: int | None
+    ) -> bool:
+        query = db.query(ListingSearchMatch).filter(
+            ListingSearchMatch.listing_external_id == listing_external_id
+        )
+        if search_job_id is not None:
+            query = query.filter(ListingSearchMatch.search_job_id == search_job_id)
+        return query.first() is not None
+
     async def _deliver_pending_alerts(
         self,
         alert_repo: AlertRepository,
         card: ListingCard,
         message: str,
         payload: dict,
+        pending_channels: list[str] | None = None,
     ) -> dict[str, list[str]]:
-        notifier_channels = getattr(self.notifier, "channels", [self.notifier])
-        channel_names = [ch.channel_name for ch in notifier_channels]
-        pending_channels = []
-        for channel_name in channel_names:
-            dedupe_key = f"{channel_name}:new:{card.external_id}"
-            if not alert_repo.exists_by_dedupe_key(dedupe_key):
-                pending_channels.append(channel_name)
+        if pending_channels is None:
+            pending_channels = self._pending_alert_channels(alert_repo, card)
 
         if not pending_channels:
-            return {
-                "attempted": [],
-                "successful": [],
-                "skipped": [],
-                "failed": [],
-                "unknown": [],
-            }
+            return self._empty_delivery_result()
 
         channels = getattr(self.notifier, "channels", [self.notifier])
         if all(hasattr(channel, "send_listing_alert") for channel in channels):
@@ -933,6 +956,15 @@ class MonitorService:
         delivery_skipped_by_channel = {channel: 0 for channel in configured_channels}
         delivery_failed_by_channel = {channel: 0 for channel in configured_channels}
         delivery_unknown_by_channel = {channel: 0 for channel in configured_channels}
+        alert_delivery_listing_candidate_ids: set[str] = set()
+        alert_delivery_channel_candidates_total = 0
+        pending_alert_dedupe_keys: set[str] = set()
+        alert_delivery_attempted_total = 0
+        alert_delivery_succeeded_total = 0
+        alert_delivery_failed_total = 0
+        alert_delivery_skipped_no_current_match = 0
+        alert_delivery_blocked_by_bulk_guard = 0
+        pending_alerts: list[dict] = []
 
         def upsert_search_match_for_persisted_listing(
             external_id: str,
@@ -976,6 +1008,60 @@ class MonitorService:
             else:
                 deterministic_analysis_skipped += 1
             return analysis
+
+
+        def queue_pending_alert(card: ListingCard, message: str, payload: dict) -> None:
+            nonlocal alert_delivery_channel_candidates_total
+            pending_channels = []
+            for channel_name in self._pending_alert_channels(alert_repo, card):
+                dedupe_key = f"{channel_name}:new:{card.external_id}"
+                if dedupe_key in pending_alert_dedupe_keys:
+                    continue
+                pending_alert_dedupe_keys.add(dedupe_key)
+                pending_channels.append(channel_name)
+            alert_delivery_channel_candidates_total += len(pending_channels)
+            if not pending_channels:
+                return
+            alert_delivery_listing_candidate_ids.add(card.external_id)
+            pending_alerts.append(
+                {
+                    "card": card,
+                    "message": message,
+                    "payload": payload,
+                    "pending_channels": pending_channels,
+                }
+            )
+
+        def record_delivery(delivery: dict[str, list[str]]) -> None:
+            nonlocal alerted
+            nonlocal alert_delivery_attempted_total
+            nonlocal alert_delivery_succeeded_total
+            nonlocal alert_delivery_failed_total
+            alert_delivery_attempted_total += len(delivery["attempted"])
+            alert_delivery_succeeded_total += len(delivery["successful"])
+            alert_delivery_failed_total += len(delivery["failed"])
+            for channel in delivery["attempted"]:
+                delivery_attempted_by_channel[channel] = (
+                    delivery_attempted_by_channel.get(channel, 0) + 1
+                )
+            for channel in delivery["successful"]:
+                delivery_success_by_channel[channel] = (
+                    delivery_success_by_channel.get(channel, 0) + 1
+                )
+            for channel in delivery["skipped"]:
+                delivery_skipped_by_channel[channel] = (
+                    delivery_skipped_by_channel.get(channel, 0) + 1
+                )
+            for channel in delivery["failed"]:
+                delivery_failed_by_channel[channel] = (
+                    delivery_failed_by_channel.get(channel, 0) + 1
+                )
+            for channel in delivery["unknown"]:
+                delivery_unknown_by_channel[channel] = (
+                    delivery_unknown_by_channel.get(channel, 0) + 1
+                )
+            if delivery["successful"]:
+                alerted += 1
 
         def apply_current_search_filters(card: ListingCard, now: datetime) -> bool:
             nonlocal filtered_by_rules
@@ -1076,29 +1162,7 @@ class MonitorService:
                     continue
 
                 message, payload = retry_context
-                delivery = await self._deliver_pending_alerts(alert_repo, card, message, payload)
-                for channel in delivery["attempted"]:
-                    delivery_attempted_by_channel[channel] = (
-                        delivery_attempted_by_channel.get(channel, 0) + 1
-                    )
-                for channel in delivery["successful"]:
-                    delivery_success_by_channel[channel] = (
-                        delivery_success_by_channel.get(channel, 0) + 1
-                    )
-                for channel in delivery["skipped"]:
-                    delivery_skipped_by_channel[channel] = (
-                        delivery_skipped_by_channel.get(channel, 0) + 1
-                    )
-                for channel in delivery["failed"]:
-                    delivery_failed_by_channel[channel] = (
-                        delivery_failed_by_channel.get(channel, 0) + 1
-                    )
-                for channel in delivery["unknown"]:
-                    delivery_unknown_by_channel[channel] = (
-                        delivery_unknown_by_channel.get(channel, 0) + 1
-                    )
-                if delivery["successful"]:
-                    alerted += 1
+                queue_pending_alert(card, message, payload)
 
                 continue
 
@@ -1163,29 +1227,7 @@ class MonitorService:
                 retry_context = self._retry_context_from_snapshot(db, card, search_name, analysis)
                 if retry_context is not None:
                     message, payload = retry_context
-                    delivery = await self._deliver_pending_alerts(alert_repo, card, message, payload)
-                    for channel in delivery["attempted"]:
-                        delivery_attempted_by_channel[channel] = (
-                            delivery_attempted_by_channel.get(channel, 0) + 1
-                        )
-                    for channel in delivery["successful"]:
-                        delivery_success_by_channel[channel] = (
-                            delivery_success_by_channel.get(channel, 0) + 1
-                        )
-                    for channel in delivery["skipped"]:
-                        delivery_skipped_by_channel[channel] = (
-                            delivery_skipped_by_channel.get(channel, 0) + 1
-                        )
-                    for channel in delivery["failed"]:
-                        delivery_failed_by_channel[channel] = (
-                            delivery_failed_by_channel.get(channel, 0) + 1
-                        )
-                    for channel in delivery["unknown"]:
-                        delivery_unknown_by_channel[channel] = (
-                            delivery_unknown_by_channel.get(channel, 0) + 1
-                        )
-                    if delivery["successful"]:
-                        alerted += 1
+                    queue_pending_alert(card, message, payload)
                 existing_by_external_id[card.external_id] = listing
                 continue
 
@@ -1273,29 +1315,50 @@ class MonitorService:
                 analysis=analysis,
             )
 
-            delivery = await self._deliver_pending_alerts(alert_repo, card, message, payload)
-            for channel in delivery["attempted"]:
-                delivery_attempted_by_channel[channel] = (
-                    delivery_attempted_by_channel.get(channel, 0) + 1
+            queue_pending_alert(card, message, payload)
+
+        alert_delivery_listing_candidates_total = len(alert_delivery_listing_candidate_ids)
+        if (
+            settings.alert_delivery_bulk_guard_enabled
+            and alert_delivery_listing_candidates_total > settings.alert_delivery_max_new_per_cycle
+        ):
+            alert_delivery_blocked_by_bulk_guard = alert_delivery_listing_candidates_total
+            logger.warning(
+                "Alert delivery batch blocked by bulk guard",
+                extra={
+                    "reason": "bulk_guard",
+                    "listing_candidate_count": alert_delivery_listing_candidates_total,
+                    "channel_delivery_candidate_count": alert_delivery_channel_candidates_total,
+                    "threshold": settings.alert_delivery_max_new_per_cycle,
+                    "channels": configured_channels,
+                    "search_job_id": search_job_id,
+                    "search_name": search_name,
+                },
+            )
+        else:
+            for pending_alert in pending_alerts:
+                card = pending_alert["card"]
+                pending_channels = pending_alert["pending_channels"]
+                if not self._has_current_search_match(db, card.external_id, search_job_id):
+                    alert_delivery_skipped_no_current_match += len(pending_channels)
+                    logger.warning(
+                        "Alert delivery skipped because listing has no current search match",
+                        extra={
+                            "reason": "no_current_search_match",
+                            "listing_external_id": card.external_id,
+                            "search_job_id": search_job_id,
+                            "channels": pending_channels,
+                        },
+                    )
+                    continue
+                delivery = await self._deliver_pending_alerts(
+                    alert_repo,
+                    card,
+                    pending_alert["message"],
+                    pending_alert["payload"],
+                    pending_channels=pending_channels,
                 )
-            for channel in delivery["successful"]:
-                delivery_success_by_channel[channel] = (
-                    delivery_success_by_channel.get(channel, 0) + 1
-                )
-            for channel in delivery["skipped"]:
-                delivery_skipped_by_channel[channel] = (
-                    delivery_skipped_by_channel.get(channel, 0) + 1
-                )
-            for channel in delivery["failed"]:
-                delivery_failed_by_channel[channel] = (
-                    delivery_failed_by_channel.get(channel, 0) + 1
-                )
-            for channel in delivery["unknown"]:
-                delivery_unknown_by_channel[channel] = (
-                    delivery_unknown_by_channel.get(channel, 0) + 1
-                )
-            if delivery["successful"]:
-                alerted += 1
+                record_delivery(delivery)
 
         filtered = filtered_by_rules + filtered_by_publication_date
         delivery_unsuccessful_by_channel = {
@@ -1335,6 +1398,14 @@ class MonitorService:
             "delivery_failed_by_channel": delivery_failed_by_channel,
             "delivery_unknown_by_channel": delivery_unknown_by_channel,
             "delivery_unsuccessful_by_channel": delivery_unsuccessful_by_channel,
+            "alert_delivery_listing_candidates_total": alert_delivery_listing_candidates_total,
+            "alert_delivery_channel_candidates_total": alert_delivery_channel_candidates_total,
+            "alert_delivery_candidates_total": alert_delivery_channel_candidates_total,
+            "alert_delivery_attempted_total": alert_delivery_attempted_total,
+            "alert_delivery_succeeded_total": alert_delivery_succeeded_total,
+            "alert_delivery_failed_total": alert_delivery_failed_total,
+            "alert_delivery_skipped_no_current_match": alert_delivery_skipped_no_current_match,
+            "alert_delivery_blocked_by_bulk_guard": alert_delivery_blocked_by_bulk_guard,
         }
 
     def run_once(self, search_job_id: int) -> dict:
