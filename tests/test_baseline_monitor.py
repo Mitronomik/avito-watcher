@@ -4,9 +4,11 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from app.analysis.provider import get_analysis_provider
 from app.analysis.service import ListingAnalysisService
+from app.core.config import settings
 from app.models.alert_sent import AlertSent
 from app.models.listing import Listing
 from app.models.listing_analysis import ListingAnalysis
@@ -3489,3 +3491,187 @@ def test_retry_delivery_payload_includes_existing_analysis_when_available(
     assert payload["analysis_profile"] == "commercial_rent"
     assert payload["analysis_status"] == "success"
     assert payload["analysis_input_hash"] == existing_analysis.input_hash
+
+
+def test_alert_sent_dedupe_key_uniqueness_preserved(db_session):
+    first = AlertSent(
+        listing_external_id="uniq",
+        channel="telegram",
+        dedupe_key="telegram:new:uniq",
+    )
+    duplicate = AlertSent(
+        listing_external_id="uniq",
+        channel="telegram",
+        dedupe_key="telegram:new:uniq",
+    )
+    db_session.add(first)
+    db_session.flush()
+    db_session.add(duplicate)
+
+    try:
+        db_session.flush()
+    except IntegrityError:
+        db_session.rollback()
+    else:
+        raise AssertionError("duplicate alert dedupe_key was accepted")
+
+
+def test_successful_delivery_records_created_at_and_preserves_dedupe(db_session):
+    search = make_search(db_session)
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=FakeNotifier(),
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    row = db_session.scalar(select(AlertSent).where(AlertSent.dedupe_key == "telegram:new:2"))
+    assert row is not None
+    assert row.created_at is not None
+    assert result["alert_delivery_candidates_total"] == 1
+    assert result["alert_delivery_attempted_total"] == 1
+    assert result["alert_delivery_succeeded_total"] == 1
+
+    second = run(
+        MonitorService(
+            parser=FakeParser([[card("1"), card("2")]]),
+            scorer=FakeScorer(),
+            notifier=FakeNotifier(),
+        ),
+        db_session,
+        search,
+    )
+    assert second["alert_delivery_candidates_total"] == 0
+    assert scalar_count(db_session, AlertSent) == 1
+
+
+def test_failed_delivery_does_not_create_alert_sent(db_session):
+    class FailingNotifier(FakeNotifier):
+        async def send_listing_alert(self, message: str, payload: dict | None = None):
+            self.messages.append(message)
+            self.payloads.append(payload)
+            return False
+
+    search = make_search(db_session)
+    notifier = FailingNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=notifier,
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["delivery_skipped_by_channel"] == {"telegram": 1}
+    assert result["alert_delivery_candidates_total"] == 1
+    assert scalar_count(db_session, AlertSent) == 0
+
+
+def test_current_match_guard_allows_delivery_when_match_exists(db_session):
+    search = make_search(db_session)
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=notifier,
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["alert_delivery_skipped_no_current_match"] == 0
+    assert result["alert_delivery_succeeded_total"] == 1
+    assert scalar_count(db_session, AlertSent) == 1
+    assert len(notifier.messages) == 1
+
+
+def test_current_match_guard_skips_delivery_without_current_match(db_session, caplog):
+    search = make_search(db_session)
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=notifier,
+    )
+    service._has_current_search_match = lambda db, listing_external_id, search_job_id: False
+
+    run(service, db_session, search)
+    with caplog.at_level(logging.WARNING):
+        result = run(service, db_session, search)
+
+    assert result["alert_delivery_candidates_total"] == 1
+    assert result["alert_delivery_attempted_total"] == 0
+    assert result["alert_delivery_skipped_no_current_match"] == 1
+    assert scalar_count(db_session, AlertSent) == 0
+    assert notifier.messages == []
+    assert "no current search match" in caplog.text
+
+
+def test_bulk_guard_allows_delivery_below_threshold(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "alert_delivery_bulk_guard_enabled", True)
+    monkeypatch.setattr(settings, "alert_delivery_max_new_per_cycle", 2)
+    search = make_search(db_session)
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2")]]),
+        scorer=FakeScorer(),
+        notifier=notifier,
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["alert_delivery_candidates_total"] == 1
+    assert result["alert_delivery_blocked_by_bulk_guard"] == 0
+    assert result["alert_delivery_succeeded_total"] == 1
+    assert scalar_count(db_session, AlertSent) == 1
+
+
+def test_bulk_guard_blocks_large_batch_without_attempt_or_sent_rows(
+    db_session, monkeypatch, caplog
+):
+    monkeypatch.setattr(settings, "alert_delivery_bulk_guard_enabled", True)
+    monkeypatch.setattr(settings, "alert_delivery_max_new_per_cycle", 1)
+    search = make_search(db_session)
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2"), card("3")]]),
+        scorer=FakeScorer(),
+        notifier=notifier,
+    )
+
+    run(service, db_session, search)
+    with caplog.at_level(logging.WARNING):
+        result = run(service, db_session, search)
+
+    assert result["alert_delivery_candidates_total"] == 2
+    assert result["alert_delivery_blocked_by_bulk_guard"] == 2
+    assert result["alert_delivery_attempted_total"] == 0
+    assert result["delivery_attempted_by_channel"] == {"telegram": 0}
+    assert scalar_count(db_session, AlertSent) == 0
+    assert notifier.messages == []
+    assert "bulk guard" in caplog.text
+
+
+def test_bulk_guard_disabled_preserves_existing_delivery_behavior(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "alert_delivery_bulk_guard_enabled", False)
+    monkeypatch.setattr(settings, "alert_delivery_max_new_per_cycle", 1)
+    search = make_search(db_session)
+    notifier = FakeNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("1")], [card("1"), card("2"), card("3")]]),
+        scorer=FakeScorer(),
+        notifier=notifier,
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["alert_delivery_candidates_total"] == 2
+    assert result["alert_delivery_blocked_by_bulk_guard"] == 0
+    assert result["alert_delivery_attempted_total"] == 2
+    assert scalar_count(db_session, AlertSent) == 2
+    assert len(notifier.messages) == 2

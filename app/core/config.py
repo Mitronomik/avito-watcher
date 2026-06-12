@@ -67,6 +67,8 @@ class Settings(BaseSettings):
     google_sheets_webhook_timeout_sec: int = 15
     jsonl_outbox_enabled: bool = True
     jsonl_outbox_path: str = "./data/alerts.jsonl"
+    alert_delivery_bulk_guard_enabled: bool = True
+    alert_delivery_max_new_per_cycle: int = 50
     monitor_worker_lock_path: str = "./data/monitor_worker.lock"
     monitor_worker_status_path: str = "./data/worker_status.json"
     monitor_worker_stale_after_seconds: int = 180
