@@ -8,6 +8,9 @@ if os.environ.get("RUN_ALEMBIC_SMOKE") != "1":
 else:
     os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
+# Force admin UI off before app.core.config.settings can be imported so
+# local .env values such as ADMIN_UI_ENABLED=true cannot affect tests.
+os.environ["ADMIN_UI_ENABLED"] = "false"
 
 _TEST_ISOLATED_ENV_VARS = (
     "ALERT_CHANNELS",
@@ -56,6 +59,7 @@ from app.models.search_job import SearchJob  # noqa: F401
 def isolate_runtime_env(monkeypatch):
     for env_var in _TEST_ISOLATED_ENV_VARS:
         monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setenv("ADMIN_UI_ENABLED", "false")
 
 
 @pytest.fixture
