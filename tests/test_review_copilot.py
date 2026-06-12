@@ -216,6 +216,32 @@ def test_review_copilot_success_writes_result_json_only_and_has_no_side_effects(
     assert "secret" not in client.calls[0]["user_prompt"]
 
 
+
+def test_review_copilot_preflight_missing_api_key_fails_without_provider_call(db_session):
+    _, analysis, _ = _seed_listing_analysis(db_session)
+    task = _task(db_session, {"analysis_id": analysis.id})
+    client = FakeReviewCopilotClient()
+    config = ReviewCopilotRuntimeConfig(
+        enabled=True,
+        provider="openai_compatible",
+        base_url="http://llm.local",
+        api_key="",
+        model="review-model",
+        prompt_version="review-copilot-v1",
+        timeout_sec=5,
+        max_retries=0,
+    )
+
+    result = _run_task(db_session, task, client, config=config)
+
+    assert result["failed"] == 1
+    assert task.status == "failed"
+    assert task.error_message == "review_copilot_config_missing_api_key"
+    assert "secret" not in task.error_message
+    assert task.result_json == {}
+    assert client.calls == []
+
+
 def test_review_copilot_preflight_missing_model_fails_without_provider_call(db_session):
     _, analysis, _ = _seed_listing_analysis(db_session)
     task = _task(db_session, {"analysis_id": analysis.id})

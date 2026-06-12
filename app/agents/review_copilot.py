@@ -200,6 +200,8 @@ class ReviewCopilotAgentTaskHandler:
             )
         if not self.config.base_url.strip():
             raise ReviewCopilotProviderError("LLM base URL is required for ReviewCopilot")
+        if not self.config.api_key.strip():
+            raise ReviewCopilotProviderError("review_copilot_config_missing_api_key")
         if not self.config.model.strip():
             raise ReviewCopilotProviderError("LLM model is required for ReviewCopilot")
         if not self.config.prompt_version.strip():
