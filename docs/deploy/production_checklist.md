@@ -9,6 +9,7 @@ For the first production rollout, keep the watcher core-path simple and stable:
   - `SCORING_ENABLED=false`
   - `LLM_PROVIDER=off`
   - `LLM_SHADOW_MODE=true`
+  - `LLM_REVIEW_COPILOT_ENABLED=false`
 - Item-page details enrichment off by default:
   - `SCRAPE_ENRICH_ITEM_PAGE_DETAILS=false`
 - Keep JSONL enabled as an audit trail.
@@ -56,7 +57,7 @@ Verify resolved values for app/worker match intended production values:
 - `PROXY_URLS`
 - `ALERT_CHANNELS`
 - Google Sheets (`GOOGLE_SHEETS_WEBHOOK_*`) and email (`SMTP_*`, `EMAIL_*`) vars
-- LLM vars (`SCORING_ENABLED`, `LLM_PROVIDER`, `LLM_*`)
+- LLM vars (`SCORING_ENABLED`, `LLM_PROVIDER`, `LLM_*`, including `LLM_REVIEW_COPILOT_ENABLED=false` unless explicitly testing AgentTask shadow review)
 
 Do **not** proceed if `postgres:postgres`, placeholder secrets, or unexpected defaults remain.
 

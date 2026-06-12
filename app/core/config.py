@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     llm_retry_delay_sec: float = 1.0
     llm_shadow_mode: bool = True
     llm_prompt_version: str = "listing-summary-v1"
+    llm_review_copilot_enabled: bool = False
+    llm_review_copilot_provider: Literal["openai_compatible"] = "openai_compatible"
+    llm_review_copilot_model: str = ""
+    llm_review_copilot_prompt_version: str = "review-copilot-v1"
+    llm_review_copilot_timeout_sec: int = 60
+    llm_review_copilot_max_retries: int = 2
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     api_key: str = ""
