@@ -699,7 +699,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_agent_tasks = sub.add_parser(
         "run-agent-tasks",
-        help="Process pending AgentTask rows manually with safe no-op handlers",
+        help="Process pending AgentTask rows manually",
     )
     run_agent_tasks.add_argument("--limit", type=int, default=10)
     run_agent_tasks.add_argument("--task-type", required=False)

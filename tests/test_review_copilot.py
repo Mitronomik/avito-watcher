@@ -116,9 +116,20 @@ def _task(db_session, payload: dict, *, external_id: str | None = "8125374391") 
     return task
 
 
-def _run_task(db_session, task: AgentTask, client: FakeReviewCopilotClient, *, enabled: bool = True) -> dict:
+def _run_task(
+    db_session,
+    task: AgentTask,
+    client: FakeReviewCopilotClient,
+    *,
+    enabled: bool = True,
+    config: ReviewCopilotRuntimeConfig | None = None,
+) -> dict:
     repo = AgentTaskRepository(db_session)
-    handler = ReviewCopilotAgentTaskHandler(db_session, config=_config(enabled), client=client)
+    handler = ReviewCopilotAgentTaskHandler(
+        db_session,
+        config=config or _config(enabled),
+        client=client,
+    )
     return AgentTaskRunner(repo, handlers={REVIEW_COPILOT_TASK_TYPE: handler}).run_pending(limit=10)
 
 
@@ -203,6 +214,54 @@ def test_review_copilot_success_writes_result_json_only_and_has_no_side_effects(
     assert len(client.calls) == 1
     assert "api_key" not in client.calls[0]["user_prompt"]
     assert "secret" not in client.calls[0]["user_prompt"]
+
+
+def test_review_copilot_preflight_missing_model_fails_without_provider_call(db_session):
+    _, analysis, _ = _seed_listing_analysis(db_session)
+    task = _task(db_session, {"analysis_id": analysis.id})
+    client = FakeReviewCopilotClient()
+    config = ReviewCopilotRuntimeConfig(
+        enabled=True,
+        provider="openai_compatible",
+        base_url="http://llm.local",
+        api_key="secret",
+        model="",
+        prompt_version="review-copilot-v1",
+        timeout_sec=5,
+        max_retries=0,
+    )
+
+    result = _run_task(db_session, task, client, config=config)
+
+    assert result["failed"] == 1
+    assert task.status == "failed"
+    assert "LLM model is required" in task.error_message
+    assert task.result_json == {}
+    assert client.calls == []
+
+
+def test_review_copilot_preflight_missing_base_url_fails_without_provider_call(db_session):
+    _, analysis, _ = _seed_listing_analysis(db_session)
+    task = _task(db_session, {"analysis_id": analysis.id})
+    client = FakeReviewCopilotClient()
+    config = ReviewCopilotRuntimeConfig(
+        enabled=True,
+        provider="openai_compatible",
+        base_url="",
+        api_key="secret",
+        model="review-model",
+        prompt_version="review-copilot-v1",
+        timeout_sec=5,
+        max_retries=0,
+    )
+
+    result = _run_task(db_session, task, client, config=config)
+
+    assert result["failed"] == 1
+    assert task.status == "failed"
+    assert "LLM base URL is required" in task.error_message
+    assert task.result_json == {}
+    assert client.calls == []
 
 
 def test_review_copilot_invalid_json_fails_without_result(db_session):

@@ -174,6 +174,7 @@ class ReviewCopilotAgentTaskHandler:
                     "prompt_version": self.config.prompt_version,
                 },
             )
+        self._preflight_config()
 
         listing, analysis = self._resolve_listing_and_analysis(task)
         system_prompt = build_review_copilot_system_prompt()
@@ -192,11 +193,19 @@ class ReviewCopilotAgentTaskHandler:
         )
         return AgentTaskHandlerResult(status="success", result_json=result.model_dump())
 
-    def _make_client(self) -> OpenAICompatibleReviewCopilotClient:
+    def _preflight_config(self) -> None:
         if self.config.provider != "openai_compatible":
             raise ReviewCopilotProviderError(
                 f"Unsupported ReviewCopilot provider: {self.config.provider}"
             )
+        if not self.config.base_url.strip():
+            raise ReviewCopilotProviderError("LLM base URL is required for ReviewCopilot")
+        if not self.config.model.strip():
+            raise ReviewCopilotProviderError("LLM model is required for ReviewCopilot")
+        if not self.config.prompt_version.strip():
+            raise ReviewCopilotProviderError("LLM prompt version is required for ReviewCopilot")
+
+    def _make_client(self) -> OpenAICompatibleReviewCopilotClient:
         return OpenAICompatibleReviewCopilotClient(self.config)
 
     def _resolve_listing_and_analysis(self, task: AgentTask) -> tuple[Listing, ListingAnalysis]:
