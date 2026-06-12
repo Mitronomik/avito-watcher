@@ -3530,7 +3530,8 @@ def test_successful_delivery_records_created_at_and_preserves_dedupe(db_session)
     row = db_session.scalar(select(AlertSent).where(AlertSent.dedupe_key == "telegram:new:2"))
     assert row is not None
     assert row.created_at is not None
-    assert result["alert_delivery_candidates_total"] == 1
+    assert result["alert_delivery_listing_candidates_total"] == 1
+    assert result["alert_delivery_channel_candidates_total"] == 1
     assert result["alert_delivery_attempted_total"] == 1
     assert result["alert_delivery_succeeded_total"] == 1
 
@@ -3543,7 +3544,8 @@ def test_successful_delivery_records_created_at_and_preserves_dedupe(db_session)
         db_session,
         search,
     )
-    assert second["alert_delivery_candidates_total"] == 0
+    assert second["alert_delivery_listing_candidates_total"] == 0
+    assert second["alert_delivery_channel_candidates_total"] == 0
     assert scalar_count(db_session, AlertSent) == 1
 
 
@@ -3566,7 +3568,8 @@ def test_failed_delivery_does_not_create_alert_sent(db_session):
     result = run(service, db_session, search)
 
     assert result["delivery_skipped_by_channel"] == {"telegram": 1}
-    assert result["alert_delivery_candidates_total"] == 1
+    assert result["alert_delivery_listing_candidates_total"] == 1
+    assert result["alert_delivery_channel_candidates_total"] == 1
     assert scalar_count(db_session, AlertSent) == 0
 
 
@@ -3602,7 +3605,8 @@ def test_current_match_guard_skips_delivery_without_current_match(db_session, ca
     with caplog.at_level(logging.WARNING):
         result = run(service, db_session, search)
 
-    assert result["alert_delivery_candidates_total"] == 1
+    assert result["alert_delivery_listing_candidates_total"] == 1
+    assert result["alert_delivery_channel_candidates_total"] == 1
     assert result["alert_delivery_attempted_total"] == 0
     assert result["alert_delivery_skipped_no_current_match"] == 1
     assert scalar_count(db_session, AlertSent) == 0
@@ -3624,7 +3628,8 @@ def test_bulk_guard_allows_delivery_below_threshold(db_session, monkeypatch):
     run(service, db_session, search)
     result = run(service, db_session, search)
 
-    assert result["alert_delivery_candidates_total"] == 1
+    assert result["alert_delivery_listing_candidates_total"] == 1
+    assert result["alert_delivery_channel_candidates_total"] == 1
     assert result["alert_delivery_blocked_by_bulk_guard"] == 0
     assert result["alert_delivery_succeeded_total"] == 1
     assert scalar_count(db_session, AlertSent) == 1
@@ -3647,7 +3652,8 @@ def test_bulk_guard_blocks_large_batch_without_attempt_or_sent_rows(
     with caplog.at_level(logging.WARNING):
         result = run(service, db_session, search)
 
-    assert result["alert_delivery_candidates_total"] == 2
+    assert result["alert_delivery_listing_candidates_total"] == 2
+    assert result["alert_delivery_channel_candidates_total"] == 2
     assert result["alert_delivery_blocked_by_bulk_guard"] == 2
     assert result["alert_delivery_attempted_total"] == 0
     assert result["delivery_attempted_by_channel"] == {"telegram": 0}
@@ -3670,8 +3676,94 @@ def test_bulk_guard_disabled_preserves_existing_delivery_behavior(db_session, mo
     run(service, db_session, search)
     result = run(service, db_session, search)
 
-    assert result["alert_delivery_candidates_total"] == 2
+    assert result["alert_delivery_listing_candidates_total"] == 2
+    assert result["alert_delivery_channel_candidates_total"] == 2
     assert result["alert_delivery_blocked_by_bulk_guard"] == 0
     assert result["alert_delivery_attempted_total"] == 2
     assert scalar_count(db_session, AlertSent) == 2
     assert len(notifier.messages) == 2
+
+
+def test_bulk_guard_counts_unique_listings_not_channels_under_threshold(
+    db_session, monkeypatch
+):
+    class Channel:
+        def __init__(self, name: str):
+            self.channel_name = name
+            self.calls = 0
+
+        async def send_listing_alert(self, message: str, payload: dict | None = None):
+            self.calls += 1
+            return True
+
+    class TwoChannelNotifier:
+        def __init__(self):
+            self.jsonl = Channel("jsonl")
+            self.sheets = Channel("google_sheets")
+            self.channels = [self.jsonl, self.sheets]
+
+    monkeypatch.setattr(settings, "alert_delivery_bulk_guard_enabled", True)
+    monkeypatch.setattr(settings, "alert_delivery_max_new_per_cycle", 50)
+    new_cards = [card(str(index)) for index in range(1, 26)]
+    search = make_search(db_session)
+    notifier = TwoChannelNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("baseline")], [card("baseline"), *new_cards]]),
+        scorer=FakeScorer(),
+        notifier=notifier,
+    )
+
+    run(service, db_session, search)
+    result = run(service, db_session, search)
+
+    assert result["alert_delivery_listing_candidates_total"] == 25
+    assert result["alert_delivery_channel_candidates_total"] == 50
+    assert result["alert_delivery_blocked_by_bulk_guard"] == 0
+    assert result["alert_delivery_attempted_total"] == 50
+    assert result["alert_delivery_succeeded_total"] == 50
+    assert notifier.jsonl.calls == 25
+    assert notifier.sheets.calls == 25
+    assert scalar_count(db_session, AlertSent) == 50
+
+
+def test_bulk_guard_blocks_51_unique_listings_with_two_channels(
+    db_session, monkeypatch, caplog
+):
+    class Channel:
+        def __init__(self, name: str):
+            self.channel_name = name
+            self.calls = 0
+
+        async def send_listing_alert(self, message: str, payload: dict | None = None):
+            self.calls += 1
+            return True
+
+    class TwoChannelNotifier:
+        def __init__(self):
+            self.jsonl = Channel("jsonl")
+            self.sheets = Channel("google_sheets")
+            self.channels = [self.jsonl, self.sheets]
+
+    monkeypatch.setattr(settings, "alert_delivery_bulk_guard_enabled", True)
+    monkeypatch.setattr(settings, "alert_delivery_max_new_per_cycle", 50)
+    new_cards = [card(str(index)) for index in range(1, 52)]
+    search = make_search(db_session)
+    notifier = TwoChannelNotifier()
+    service = MonitorService(
+        parser=FakeParser([[card("baseline")], [card("baseline"), *new_cards]]),
+        scorer=FakeScorer(),
+        notifier=notifier,
+    )
+
+    run(service, db_session, search)
+    with caplog.at_level(logging.WARNING):
+        result = run(service, db_session, search)
+
+    assert result["alert_delivery_listing_candidates_total"] == 51
+    assert result["alert_delivery_channel_candidates_total"] == 102
+    assert result["alert_delivery_blocked_by_bulk_guard"] == 51
+    assert result["alert_delivery_attempted_total"] == 0
+    assert notifier.jsonl.calls == 0
+    assert notifier.sheets.calls == 0
+    assert scalar_count(db_session, AlertSent) == 0
+    assert "bulk guard" in caplog.text

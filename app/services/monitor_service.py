@@ -956,7 +956,9 @@ class MonitorService:
         delivery_skipped_by_channel = {channel: 0 for channel in configured_channels}
         delivery_failed_by_channel = {channel: 0 for channel in configured_channels}
         delivery_unknown_by_channel = {channel: 0 for channel in configured_channels}
-        alert_delivery_candidates_total = 0
+        alert_delivery_listing_candidate_ids: set[str] = set()
+        alert_delivery_channel_candidates_total = 0
+        pending_alert_dedupe_keys: set[str] = set()
         alert_delivery_attempted_total = 0
         alert_delivery_succeeded_total = 0
         alert_delivery_failed_total = 0
@@ -1009,11 +1011,18 @@ class MonitorService:
 
 
         def queue_pending_alert(card: ListingCard, message: str, payload: dict) -> None:
-            nonlocal alert_delivery_candidates_total
-            pending_channels = self._pending_alert_channels(alert_repo, card)
-            alert_delivery_candidates_total += len(pending_channels)
+            nonlocal alert_delivery_channel_candidates_total
+            pending_channels = []
+            for channel_name in self._pending_alert_channels(alert_repo, card):
+                dedupe_key = f"{channel_name}:new:{card.external_id}"
+                if dedupe_key in pending_alert_dedupe_keys:
+                    continue
+                pending_alert_dedupe_keys.add(dedupe_key)
+                pending_channels.append(channel_name)
+            alert_delivery_channel_candidates_total += len(pending_channels)
             if not pending_channels:
                 return
+            alert_delivery_listing_candidate_ids.add(card.external_id)
             pending_alerts.append(
                 {
                     "card": card,
@@ -1308,16 +1317,18 @@ class MonitorService:
 
             queue_pending_alert(card, message, payload)
 
+        alert_delivery_listing_candidates_total = len(alert_delivery_listing_candidate_ids)
         if (
             settings.alert_delivery_bulk_guard_enabled
-            and alert_delivery_candidates_total > settings.alert_delivery_max_new_per_cycle
+            and alert_delivery_listing_candidates_total > settings.alert_delivery_max_new_per_cycle
         ):
-            alert_delivery_blocked_by_bulk_guard = alert_delivery_candidates_total
+            alert_delivery_blocked_by_bulk_guard = alert_delivery_listing_candidates_total
             logger.warning(
                 "Alert delivery batch blocked by bulk guard",
                 extra={
                     "reason": "bulk_guard",
-                    "candidate_count": alert_delivery_candidates_total,
+                    "listing_candidate_count": alert_delivery_listing_candidates_total,
+                    "channel_delivery_candidate_count": alert_delivery_channel_candidates_total,
                     "threshold": settings.alert_delivery_max_new_per_cycle,
                     "channels": configured_channels,
                     "search_job_id": search_job_id,
@@ -1387,7 +1398,9 @@ class MonitorService:
             "delivery_failed_by_channel": delivery_failed_by_channel,
             "delivery_unknown_by_channel": delivery_unknown_by_channel,
             "delivery_unsuccessful_by_channel": delivery_unsuccessful_by_channel,
-            "alert_delivery_candidates_total": alert_delivery_candidates_total,
+            "alert_delivery_listing_candidates_total": alert_delivery_listing_candidates_total,
+            "alert_delivery_channel_candidates_total": alert_delivery_channel_candidates_total,
+            "alert_delivery_candidates_total": alert_delivery_channel_candidates_total,
             "alert_delivery_attempted_total": alert_delivery_attempted_total,
             "alert_delivery_succeeded_total": alert_delivery_succeeded_total,
             "alert_delivery_failed_total": alert_delivery_failed_total,
