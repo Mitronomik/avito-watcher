@@ -39,6 +39,15 @@ class Settings(BaseSettings):
     llm_listing_detail_extraction_schema_version: str = (
         "listing-detail-extraction-schema-v1"
     )
+    llm_data_quality_agent_enabled: bool = False
+    llm_data_quality_agent_prompt_version: str = "data-quality-agent-v1"
+    llm_data_quality_agent_schema_version: str = "data-quality-assessment-schema-v1"
+    llm_data_quality_agent_max_input_chars: int = 14000
+    llm_data_quality_agent_rag_enabled: bool = False
+    llm_data_quality_agent_rag_limit: int = 5
+    llm_data_quality_agent_rag_max_chars: int = 4000
+    llm_data_quality_agent_rag_query_max_chars: int = 1000
+    llm_data_quality_agent_rag_note_types: str = "rulebook,false_positive,domain_note"
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     api_key: str = ""
