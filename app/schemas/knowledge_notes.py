@@ -187,3 +187,5 @@ class KnowledgeNoteSearchResult(BaseModel):
     tags_json: list[str]
     priority: int
     lexical_score: int
+    source: str | None = None
+    source_ref: str | None = None

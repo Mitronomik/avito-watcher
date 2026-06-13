@@ -154,10 +154,10 @@ def test_retrieval_has_no_side_effects_on_core_tables(db_session):
     assert db_session.query(ListingSearchMatch).count() == counts_before["matches"]
 
 
-def test_pr8_boundaries_do_not_integrate_knowledge_retrieval():
+def test_pr9_boundaries_only_review_copilot_integrates_knowledge_retrieval():
     forbidden = "KnowledgeRetrievalService"
 
-    assert forbidden not in inspect.getsource(review_copilot)
+    assert forbidden in inspect.getsource(review_copilot)
     assert forbidden not in inspect.getsource(monitor_service)
     assert forbidden not in inspect.getsource(analysis_service)
 
