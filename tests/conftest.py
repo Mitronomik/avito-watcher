@@ -61,6 +61,7 @@ from app.models.knowledge_note import KnowledgeNote  # noqa: F401
 from app.models.listing import Listing  # noqa: F401
 from app.models.listing_snapshot import ListingSnapshot  # noqa: F401
 from app.models.listing_detail_snapshot import ListingDetailSnapshot  # noqa: F401
+from app.models.listing_enrichment import ListingEnrichment  # noqa: F401
 from app.models.search_job import SearchJob  # noqa: F401
 
 

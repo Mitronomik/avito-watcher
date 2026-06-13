@@ -10,8 +10,10 @@ from app.repositories.agent_task_repository import AgentTaskRepository
 
 @dataclass(frozen=True)
 class AgentTaskHandlerResult:
-    status: Literal["success", "skipped"] = "success"
+    status: Literal["success", "skipped", "failed"] = "success"
     result_json: dict | None = None
+    error_type: str | None = None
+    error_message: str | None = None
 
 
 class AgentTaskHandler(Protocol):
@@ -47,7 +49,17 @@ def build_default_agent_task_handlers(db) -> dict[str, AgentTaskHandler]:
         ReviewCopilotAgentTaskHandler,
     )
 
-    return {REVIEW_COPILOT_TASK_TYPE: ReviewCopilotAgentTaskHandler(db)}
+    from app.agents.listing_detail_extraction import (
+        LISTING_DETAIL_EXTRACTION_TASK_TYPE,
+        ListingDetailExtractionAgentTaskHandler,
+    )
+
+    return {
+        REVIEW_COPILOT_TASK_TYPE: ReviewCopilotAgentTaskHandler(db),
+        LISTING_DETAIL_EXTRACTION_TASK_TYPE: ListingDetailExtractionAgentTaskHandler(
+            db
+        ),
+    }
 
 
 class AgentTaskRunner:
@@ -111,8 +123,17 @@ class AgentTaskRunner:
                 elif handler_result.status == "skipped":
                     self.repository.mark_skipped(task, handler_result.result_json)
                     result["skipped"] += 1
+                elif handler_result.status == "failed":
+                    self.repository.mark_failed(
+                        task,
+                        handler_result.error_type or "agent_task_failed",
+                        handler_result.error_message or "Agent task handler failed",
+                    )
+                    result["failed"] += 1
                 else:
-                    raise ValueError(f"Unsupported agent task handler status: {handler_result.status}")
+                    raise ValueError(
+                        f"Unsupported agent task handler status: {handler_result.status}"
+                    )
             except Exception as exc:
                 self.repository.mark_failed(task, exc.__class__.__name__, str(exc))
                 result["failed"] += 1

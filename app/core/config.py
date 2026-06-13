@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     llm_review_copilot_rag_max_chars: int = 4000
     llm_review_copilot_rag_query_max_chars: int = 1000
     llm_review_copilot_rag_note_types: str = "rulebook,false_positive,domain_note"
+    llm_listing_detail_extraction_enabled: bool = False
+    llm_listing_detail_extraction_max_input_chars: int = 12000
+    llm_listing_detail_extraction_prompt_version: str = "listing-detail-extraction-v1"
+    llm_listing_detail_extraction_schema_version: str = (
+        "listing-detail-extraction-schema-v1"
+    )
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     api_key: str = ""
