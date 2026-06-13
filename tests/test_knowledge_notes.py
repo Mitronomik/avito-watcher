@@ -1,6 +1,6 @@
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 from app.db.base import Base
 from app.models.knowledge_note import KnowledgeNote
@@ -33,6 +33,33 @@ def test_knowledge_note_model_is_registered_and_table_has_expected_shape(db_sess
     assert "ix_knowledge_notes_profile" in indexes
     assert "ix_knowledge_notes_is_active" in indexes
     assert "ix_knowledge_notes_priority" in indexes
+
+
+def test_direct_sql_insert_gets_server_defaults(db_session):
+    result = db_session.execute(
+        text(
+            """
+            INSERT INTO knowledge_notes (note_type, title, body_md)
+            VALUES (:note_type, :title, :body_md)
+            """
+        ),
+        {
+            "note_type": "rulebook",
+            "title": "Manual SQL seed",
+            "body_md": "Body from a direct SQL seed.",
+        },
+    )
+    db_session.flush()
+
+    note = db_session.get(KnowledgeNote, result.lastrowid)
+
+    assert note.profile == "global"
+    assert note.priority == 0
+    assert note.is_active is True
+    assert note.tags_json == []
+    assert note.metadata_json == {}
+    assert note.created_at is not None
+    assert note.updated_at is not None
 
 
 def test_create_get_and_defaults(db_session):
