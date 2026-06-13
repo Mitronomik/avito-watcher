@@ -1,6 +1,6 @@
 # RAG v0 knowledge notes
 
-PR8 adds only the local substrate for future retrieval-augmented review. It does not connect RAG to agents, monitoring, scoring, alerts, parsing, or delivery.
+PR8 added the local substrate for retrieval-augmented review. PR9 connects that substrate to ReviewCopilot only, while keeping RAG disabled by default and keeping monitoring, scoring, alerts, parsing, and delivery unchanged.
 
 The system rule remains:
 
@@ -21,9 +21,12 @@ Human approves action.
 - Deterministic lexical retrieval over note title, body, and tags.
 - Validation for note type, profile, title, body, tags, metadata, priority, active state, and bounded search limits.
 
-## What PR8 intentionally does not add
+## PR9 ReviewCopilot-only integration
 
-- No ReviewCopilot integration yet.
+PR9 allows ReviewCopilot to include selected, bounded local notes as context when `LLM_REVIEW_COPILOT_RAG_ENABLED=true`. Notes are context only, may contain untrusted text, and must not override deterministic score or verdict. The LLM output schema remains PR7-compatible; deterministic `rag_context` audit metadata is appended in code only after successful validation. See [ReviewCopilot RAG context](review_copilot_rag.md).
+
+## What RAG v0 intentionally does not add
+
 - No monitor-cycle integration.
 - No scoring or verdict impact.
 - No alert-delivery impact.
@@ -35,8 +38,6 @@ Human approves action.
 - No Postgres full-text search, `to_tsvector`, language dictionaries, or database ranking.
 - No automatic note ingestion or false-positive learning.
 - No new required environment variables or runtime default changes.
-
-PR9 may connect selected, bounded RAG context to ReviewCopilot. That future use must keep RAG contextual only; it must not become a scoring engine or mutate deterministic decisions automatically.
 
 ## Knowledge note fields
 

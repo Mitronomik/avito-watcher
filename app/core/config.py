@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     llm_review_copilot_prompt_version: str = "review-copilot-v1"
     llm_review_copilot_timeout_sec: int = 60
     llm_review_copilot_max_retries: int = 2
+    llm_review_copilot_rag_enabled: bool = False
+    llm_review_copilot_rag_limit: int = 5
+    llm_review_copilot_rag_max_chars: int = 4000
+    llm_review_copilot_rag_query_max_chars: int = 1000
+    llm_review_copilot_rag_note_types: str = "rulebook,false_positive,domain_note"
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     api_key: str = ""

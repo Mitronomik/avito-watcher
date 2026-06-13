@@ -148,6 +148,8 @@ def _to_search_result(note: KnowledgeNote, lexical_score: int, tokens: list[str]
         tags_json=list(note.tags_json or []),
         priority=note.priority,
         lexical_score=lexical_score,
+        source=note.source,
+        source_ref=note.source_ref,
     )
 
 
