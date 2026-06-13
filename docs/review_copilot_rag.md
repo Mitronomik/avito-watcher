@@ -17,7 +17,7 @@ Human approves action.
 - ReviewCopilot RAG remains disabled by default via `LLM_REVIEW_COPILOT_RAG_ENABLED=false`.
 - When explicitly enabled for a controlled manual ReviewCopilot run, ReviewCopilot builds a deterministic local query from stored listing and listing-analysis data.
 - ReviewCopilot retrieves bounded local notes through `KnowledgeRetrievalService.search_notes`.
-- Retrieved notes can be included in the ReviewCopilot prompt under `Local RAG knowledge notes`.
+- Retrieved notes can be included in the ReviewCopilot prompt under `Local RAG knowledge notes`; if retrieval returns zero notes, the prompt section is omitted and only zero-note audit metadata is persisted.
 - The LLM output schema remains the strict PR7 ReviewCopilot schema and does not include `rag_context`.
 - After valid LLM output, code appends deterministic `rag_context` audit metadata to `agent_tasks.result_json` when RAG is enabled.
 

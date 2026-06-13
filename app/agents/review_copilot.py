@@ -278,11 +278,12 @@ class ReviewCopilotAgentTaskHandler:
             analysis=analysis,
             query_max_chars=self.config.rag_query_max_chars,
         )
+        rag_note_types = _parse_rag_note_types(self.config.rag_note_types)
         base_metadata: dict[str, Any] = {
             "enabled": True,
             "query": query,
             "profile": analysis.profile,
-            "note_types": list(self.config.rag_note_types),
+            "note_types": rag_note_types,
             "limit": self.config.rag_limit,
             "max_chars": self.config.rag_max_chars,
             "query_max_chars": self.config.rag_query_max_chars,
@@ -298,11 +299,14 @@ class ReviewCopilotAgentTaskHandler:
             notes = self._make_knowledge_retrieval_service().search_notes(
                 query=query,
                 profile=analysis.profile,
-                note_types=list(self.config.rag_note_types),
+                note_types=rag_note_types,
                 limit=self.config.rag_limit,
             )
         except Exception as exc:  # noqa: BLE001 - explicit RAG must fail closed.
             raise ReviewCopilotRagRetrievalError("review_copilot_rag_retrieval_failed") from exc
+
+        if not notes:
+            return ReviewCopilotRagContext(prompt_section=None, metadata=base_metadata)
 
         prompt_section, metadata_notes, truncated = build_review_copilot_rag_prompt_section(
             notes=notes,

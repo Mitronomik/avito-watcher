@@ -161,7 +161,7 @@ def test_rag_enabled_retrieves_notes_adds_prompt_section_and_audit_metadata(db_s
         db_session,
         task,
         client,
-        _config(rag_enabled=True, rag_limit=2, rag_note_types=["rulebook", "domain_note"]),
+        _config(rag_enabled=True, rag_limit=2, rag_note_types=["RULEBOOK", "DOMAIN_NOTE"]),
         service,
     )
 
@@ -319,9 +319,11 @@ def test_rag_enabled_empty_notes_succeeds_with_zero_metadata(db_session):
 
     assert result["succeeded"] == 1
     assert len(service.calls) == 1
-    assert "Local RAG knowledge notes" in client.calls[0]["user_prompt"]
+    assert "Local RAG knowledge notes" not in client.calls[0]["user_prompt"]
+    assert "local_rag_knowledge_notes" not in client.calls[0]["user_prompt"]
     assert task.result_json["rag_context"]["matched_count"] == 0
     assert task.result_json["rag_context"]["included_count"] == 0
+    assert task.result_json["rag_context"]["truncated"] is False
     assert task.result_json["rag_context"]["notes"] == []
 
 
