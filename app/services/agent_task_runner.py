@@ -53,12 +53,17 @@ def build_default_agent_task_handlers(db) -> dict[str, AgentTaskHandler]:
         LISTING_DETAIL_EXTRACTION_TASK_TYPE,
         ListingDetailExtractionAgentTaskHandler,
     )
+    from app.agents.data_quality_agent import (
+        DATA_QUALITY_AGENT_TASK_TYPE,
+        DataQualityAgentTaskHandler,
+    )
 
     return {
         REVIEW_COPILOT_TASK_TYPE: ReviewCopilotAgentTaskHandler(db),
         LISTING_DETAIL_EXTRACTION_TASK_TYPE: ListingDetailExtractionAgentTaskHandler(
             db
         ),
+        DATA_QUALITY_AGENT_TASK_TYPE: DataQualityAgentTaskHandler(db),
     }
 
 
