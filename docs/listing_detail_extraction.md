@@ -23,6 +23,18 @@ What it does not do:
 
 The feature flag `LLM_LISTING_DETAIL_EXTRACTION_ENABLED` defaults to `false`. When disabled, the manual task is skipped, the provider is not called, and no enrichment row is created. Optional settings are `LLM_LISTING_DETAIL_EXTRACTION_MAX_INPUT_CHARS`, `LLM_LISTING_DETAIL_EXTRACTION_PROMPT_VERSION`, and `LLM_LISTING_DETAIL_EXTRACTION_SCHEMA_VERSION`.
 
-Failure modes are surfaced on the AgentTask: disabled extraction, invalid payload, missing usable snapshot, provider failure, invalid JSON, or schema validation failure. Failed and skipped attempts do not create successful enrichment rows and do not block later retries.
+Failure modes are surfaced on the AgentTask: disabled extraction, provider disabled, unsupported provider, invalid payload, missing usable snapshot, provider failure, invalid JSON, or schema validation failure. Failed and skipped attempts do not create successful enrichment rows and do not block later retries.
+
+Provider behavior:
+
+- PR11 uses only the implemented OpenAI-compatible extraction client.
+- If `LLM_PROVIDER=off`, extraction fails closed with `listing_detail_extraction_provider_disabled`.
+- If `LLM_PROVIDER` is unsupported by PR11 extraction, including `ollama`, extraction fails closed with `listing_detail_extraction_provider_unsupported`.
+- There is no silent provider fallback. PR11 does not introduce a generic LLM provider framework; provider abstraction/unification can be handled in a later PR.
+
+Storage and retry behavior:
+
+- `listing_enrichments` is generic storage only in PR11. PR11 does not introduce a generic enrichment framework.
+- The unique extraction identity constraint is acceptable in PR11 because failed/skipped enrichment rows are not created. Failed/skipped attempts are represented through AgentTask status/error/result and do not block later successful retry.
 
 PR12/DataQualityAgent may later compare deterministic clean data with extracted facts, but PR11 stores extraction evidence only.

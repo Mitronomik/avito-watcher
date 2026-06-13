@@ -171,6 +171,10 @@ def test_missing_snapshot_and_malformed_output_fail(monkeypatch, db_session):
         "app.services.listing_detail_extraction.settings.llm_listing_detail_extraction_enabled",
         True,
     )
+    monkeypatch.setattr(
+        "app.services.listing_detail_extraction.settings.llm_provider",
+        "openai_compatible",
+    )
     client = FakeClient()
     _task(db_session, {"snapshot_id": 999})
     runner = AgentTaskRunner(
@@ -256,3 +260,123 @@ def test_failed_attempt_does_not_block_later_retry(monkeypatch, db_session):
     assert result["succeeded"] == 1
     assert succeeding.calls == 1
     assert db_session.scalar(select(func.count()).select_from(ListingEnrichment)) == 1
+
+
+def test_service_fails_closed_when_provider_off(monkeypatch, db_session):
+    monkeypatch.setattr(
+        "app.services.listing_detail_extraction.settings.llm_listing_detail_extraction_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        "app.services.listing_detail_extraction.settings.llm_provider", "off"
+    )
+    snap = _snapshot(db_session)
+    client = FakeClient()
+
+    def fail_if_instantiated():
+        raise AssertionError("client must not be instantiated when provider is off")
+
+    monkeypatch.setattr(
+        "app.services.listing_detail_extraction.OpenAICompatibleExtractionClient",
+        fail_if_instantiated,
+    )
+    service = ListingDetailExtractionService(db_session, client=None)
+    try:
+        service.extract(snapshot_id=snap.id)
+    except Exception as exc:
+        assert (
+            getattr(exc, "error_type", "")
+            == "listing_detail_extraction_provider_disabled"
+        )
+    else:
+        raise AssertionError("provider disabled should fail closed")
+    assert client.calls == 0
+    assert db_session.scalar(select(func.count()).select_from(ListingEnrichment)) == 0
+
+
+def test_service_fails_closed_when_provider_unsupported(monkeypatch, db_session):
+    monkeypatch.setattr(
+        "app.services.listing_detail_extraction.settings.llm_listing_detail_extraction_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        "app.services.listing_detail_extraction.settings.llm_provider", "ollama"
+    )
+    snap = _snapshot(db_session)
+    client = FakeClient()
+
+    def fail_if_instantiated():
+        raise AssertionError(
+            "client must not be instantiated for unsupported providers"
+        )
+
+    monkeypatch.setattr(
+        "app.services.listing_detail_extraction.OpenAICompatibleExtractionClient",
+        fail_if_instantiated,
+    )
+    service = ListingDetailExtractionService(db_session, client=None)
+    try:
+        service.extract(snapshot_id=snap.id)
+    except Exception as exc:
+        assert (
+            getattr(exc, "error_type", "")
+            == "listing_detail_extraction_provider_unsupported"
+        )
+    else:
+        raise AssertionError("unsupported provider should fail closed")
+    assert client.calls == 0
+    assert db_session.scalar(select(func.count()).select_from(ListingEnrichment)) == 0
+
+
+def test_agent_task_fails_when_provider_off(monkeypatch, db_session):
+    monkeypatch.setattr(
+        "app.services.listing_detail_extraction.settings.llm_listing_detail_extraction_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        "app.services.listing_detail_extraction.settings.llm_provider", "off"
+    )
+    snap = _snapshot(db_session)
+    client = FakeClient()
+    task = _task(db_session, {"snapshot_id": snap.id})
+    runner = AgentTaskRunner(
+        AgentTaskRepository(db_session),
+        handlers={
+            LISTING_DETAIL_EXTRACTION_TASK_TYPE: ListingDetailExtractionAgentTaskHandler(
+                db_session, ListingDetailExtractionService(db_session, client)
+            )
+        },
+    )
+    result = runner.run_pending(limit=10)
+    assert result["failed"] == 1
+    assert client.calls == 0
+    assert task.status == "failed"
+    assert task.error_type == "listing_detail_extraction_provider_disabled"
+    assert db_session.scalar(select(func.count()).select_from(ListingEnrichment)) == 0
+
+
+def test_agent_task_fails_when_provider_unsupported(monkeypatch, db_session):
+    monkeypatch.setattr(
+        "app.services.listing_detail_extraction.settings.llm_listing_detail_extraction_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        "app.services.listing_detail_extraction.settings.llm_provider", "ollama"
+    )
+    snap = _snapshot(db_session)
+    client = FakeClient()
+    task = _task(db_session, {"snapshot_id": snap.id})
+    runner = AgentTaskRunner(
+        AgentTaskRepository(db_session),
+        handlers={
+            LISTING_DETAIL_EXTRACTION_TASK_TYPE: ListingDetailExtractionAgentTaskHandler(
+                db_session, ListingDetailExtractionService(db_session, client)
+            )
+        },
+    )
+    result = runner.run_pending(limit=10)
+    assert result["failed"] == 1
+    assert client.calls == 0
+    assert task.status == "failed"
+    assert task.error_type == "listing_detail_extraction_provider_unsupported"
+    assert db_session.scalar(select(func.count()).select_from(ListingEnrichment)) == 0

@@ -359,11 +359,7 @@ class ListingDetailExtractionService:
                 "listing_detail_extraction_invalid_payload",
             )
         snapshot = self._load_snapshot(snapshot_id, listing_external_id)
-        provider = (
-            settings.llm_provider
-            if settings.llm_provider != "off"
-            else "openai_compatible"
-        )
+        provider = self._resolve_provider()
         model = settings.llm_model
         prompt_version = settings.llm_listing_detail_extraction_prompt_version
         schema_version = settings.llm_listing_detail_extraction_schema_version
@@ -439,6 +435,21 @@ class ListingDetailExtractionService:
             finished_at=now,
         )
         return ExtractionResult(row, created)
+
+    @staticmethod
+    def _resolve_provider() -> str:
+        provider = settings.llm_provider
+        if provider == "off":
+            raise ListingDetailExtractionError(
+                "LLM provider is disabled for listing detail extraction",
+                "listing_detail_extraction_provider_disabled",
+            )
+        if provider != "openai_compatible":
+            raise ListingDetailExtractionError(
+                f"Unsupported LLM provider for listing detail extraction: {provider}",
+                "listing_detail_extraction_provider_unsupported",
+            )
+        return provider
 
     def _load_snapshot(
         self, snapshot_id: int | None, listing_external_id: str | None
