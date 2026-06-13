@@ -12,6 +12,15 @@ from bs4 import BeautifulSoup
 PARSER_VERSION = "listing-detail-v1"
 VOLATILE_QUERY_PREFIXES = ("utm_",)
 VOLATILE_QUERY_KEYS = {"context", "src", "from", "localPriority", "cd", "iid", "x", "p"}
+
+_CONTACT_REDACTION = "[redacted_contact]"
+_EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
+_PHONE_PATTERN = re.compile(r"(?<!\w)(?:\+?\d[\d\s().-]{6,}\d)(?!\w)")
+_CONTACT_PAIR_PATTERN = re.compile(
+    r"\b(?:telegram|телеграм|whatsapp|ватсап|wa|contact|контакт|phone|телефон|email|почта)\b\s*[:=@-]?\s*(?:\+?\d[\d\s().-]{5,}\d|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|@[A-Z0-9_]{3,})",
+    re.I,
+)
+
 LIMITS = {
     "title": 300,
     "description_text": 10_000,
@@ -74,6 +83,17 @@ def canonicalize_url(url: str | None) -> tuple[str | None, str | None]:
         query.append((key, value))
     canonical = urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, urlencode(sorted(query)), ""))
     return canonical, parts.netloc.lower() or None
+
+
+def redact_contact_like_text(value: str | None) -> str:
+    """Redact obvious contact-like values before text is persisted."""
+    text = normalize_whitespace(value)
+    if not text:
+        return ""
+    text = _CONTACT_PAIR_PATTERN.sub(_CONTACT_REDACTION, text)
+    text = _EMAIL_PATTERN.sub(_CONTACT_REDACTION, text)
+    text = _PHONE_PATTERN.sub(_CONTACT_REDACTION, text)
+    return normalize_whitespace(text)
 
 
 def _bounded(value: str, field_name: str, truncated: list[str]) -> str:
@@ -180,19 +200,19 @@ def parse_listing_detail_html(html: str, source_url: str | None = None) -> Parse
             canonical_url=canonical_url,
             source_host=source_host,
             title=_bounded(title, "title", truncated),
-            description_text=_bounded(description, "description_text", truncated),
+            description_text=_bounded(redact_contact_like_text(description), "description_text", truncated),
             address_text=_bounded(address, "address_text", truncated),
             metro_text=_bounded(metro, "metro_text", truncated),
             price_text=_bounded(price, "price_text", truncated),
             area_text=_bounded(area, "area_text", truncated),
             published_label=_bounded(published, "published_label", truncated),
-            seller_name=_bounded(seller, "seller_name", truncated),
+            seller_name=_bounded(redact_contact_like_text(seller), "seller_name", truncated),
             seller_type=_bounded(seller_type, "seller_type", truncated),
             category=_bounded(category, "category", truncated),
             attributes_json=attrs,
             facts_json=facts,
             photos_count=photos,
-            raw_text_excerpt=_bounded(text, "raw_text_excerpt", truncated),
+            raw_text_excerpt=_bounded(redact_contact_like_text(text), "raw_text_excerpt", truncated),
             truncated_fields=sorted(set(truncated))[:50],
             warnings=warnings[:50],
         )

@@ -116,6 +116,32 @@ def test_service_persists_idempotently_returns_result_and_no_side_effects(db_ses
     provider.assert_not_called()
 
 
+def test_service_redacts_contact_like_free_text_before_persistence(db_session):
+    html = """
+    <html><body>
+    <h1>Safe title</h1>
+    <div data-marker="item-view/item-description">
+      Phone +7 900 123 45 67, email synthetic@example.test, Telegram @synthetic_handle.
+    </div>
+    <div data-marker="seller-info/name">Seller +7 900 123 45 67</div>
+    </body></html>
+    """
+    result = ListingDetailEnrichmentService(db_session).persist_from_html(
+        listing_external_id="ext-redact",
+        html=html,
+        source_kind="fixture",
+    )
+    db_session.commit()
+
+    snapshot = db_session.get(ListingDetailSnapshot, result.snapshot_id)
+    assert snapshot is not None
+    assert "[redacted_contact]" in snapshot.description_text
+    for raw in ("+7 900 123 45 67", "synthetic@example.test", "@synthetic_handle"):
+        assert raw not in snapshot.description_text
+        assert raw not in snapshot.raw_text_excerpt
+        assert raw not in snapshot.seller_name
+
+
 def test_service_changed_content_creates_new_snapshot(db_session):
     service = ListingDetailEnrichmentService(db_session)
     one = service.persist_from_html(listing_external_id="ext-3", html=HTML, source_kind="fixture")

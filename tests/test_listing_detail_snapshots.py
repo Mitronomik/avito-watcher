@@ -6,12 +6,20 @@ from app.repositories.listing_detail_snapshots import ListingDetailSnapshotRepos
 
 def test_model_registered_and_table_shape(db_session):
     assert "listing_detail_snapshots" in Base.metadata.tables
-    columns = {column["name"] for column in inspect(db_session.bind).get_columns("listing_detail_snapshots")}
+    inspected_columns = inspect(db_session.bind).get_columns("listing_detail_snapshots")
+    columns = {column["name"] for column in inspected_columns}
     for name in ("listing_external_id", "source_kind", "fetch_status", "parse_status", "content_hash", "raw_text_excerpt"):
         assert name in columns
     indexes = {idx["name"] for idx in inspect(db_session.bind).get_indexes("listing_detail_snapshots")}
     assert "ix_listing_detail_snapshots_listing_external_id" in indexes
     assert "ix_listing_detail_snapshots_parse_status" in indexes
+    listing_id_column = next(column for column in inspected_columns if column["name"] == "listing_id")
+    listing_external_id_column = next(column for column in inspected_columns if column["name"] == "listing_external_id")
+    assert listing_id_column["nullable"] is True
+    assert listing_external_id_column["nullable"] is False
+    assert inspect(db_session.bind).get_foreign_keys("listing_detail_snapshots") == []
+    constraints = inspect(db_session.bind).get_check_constraints("listing_detail_snapshots")
+    assert not any("fetch_status" in str(c.get("sqltext")) or "parse_status" in str(c.get("sqltext")) for c in constraints)
     uniques = inspect(db_session.bind).get_unique_constraints("listing_detail_snapshots")
     assert any(u["name"] == "uq_listing_detail_snapshots_external_hash" for u in uniques)
 
