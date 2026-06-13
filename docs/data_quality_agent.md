@@ -23,7 +23,9 @@ When enabled, local RAG retrieval reads only active `knowledge_notes` with bound
 
 ## Failure modes
 
-The handler fails/skips without creating enrichment rows for disabled feature flag, provider off, unsupported provider, missing listing, too-thin input, RAG retrieval failure, provider error, malformed JSON, schema validation failures, forbidden decision-like output, and invalid `recommended_rule_patch` content.
+Manual payload ids (`listing_analysis_id`, `snapshot_id`, and `extraction_enrichment_id`) are accepted only when they belong to the requested `listing_external_id` and pass status/type constraints. Mismatched or unusable explicit ids fail closed before provider call and do not create new enrichment rows.
+
+The handler fails/skips without creating enrichment rows for disabled feature flag, provider off, unsupported provider, missing listing, mismatched explicit payload ids, too-thin input, RAG retrieval failure, provider error, malformed JSON, schema validation failures, forbidden decision-like output, and invalid `recommended_rule_patch` content.
 
 ## Controlled production smoke
 

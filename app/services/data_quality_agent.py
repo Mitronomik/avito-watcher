@@ -626,7 +626,13 @@ class DataQualityAgentService:
 
     def _analysis(self, external_id, analysis_id):
         if analysis_id:
-            return self.db.get(ListingAnalysis, analysis_id)
+            analysis = self.db.get(ListingAnalysis, analysis_id)
+            if analysis is None or analysis.listing_external_id != external_id:
+                raise DataQualityAgentError(
+                    "Listing analysis not found or mismatched",
+                    "data_quality_analysis_not_found_or_mismatched",
+                )
+            return analysis
         return self.db.scalar(
             select(ListingAnalysis)
             .where(ListingAnalysis.listing_external_id == external_id)
@@ -635,7 +641,17 @@ class DataQualityAgentService:
 
     def _snapshot(self, external_id, snapshot_id):
         if snapshot_id:
-            return self.db.get(ListingDetailSnapshot, snapshot_id)
+            snapshot = self.db.get(ListingDetailSnapshot, snapshot_id)
+            if (
+                snapshot is None
+                or snapshot.listing_external_id != external_id
+                or snapshot.parse_status not in {"success", "partial"}
+            ):
+                raise DataQualityAgentError(
+                    "Listing detail snapshot not found or mismatched",
+                    "data_quality_snapshot_not_found_or_mismatched",
+                )
+            return snapshot
         return self.db.scalar(
             select(ListingDetailSnapshot)
             .where(
@@ -649,11 +665,31 @@ class DataQualityAgentService:
 
     def _extraction(self, listing, extraction_id):
         if extraction_id:
-            return self.db.get(ListingEnrichment, extraction_id)
+            extraction = self.db.get(ListingEnrichment, extraction_id)
+            listing_id_matches = (
+                extraction is not None
+                and extraction.listing_id is not None
+                and extraction.listing_id == listing.id
+            )
+            external_id_matches = (
+                extraction is not None
+                and extraction.listing_external_id == listing.external_id
+            )
+            if (
+                extraction is None
+                or not (listing_id_matches or external_id_matches)
+                or extraction.enrichment_type != "llm_listing_detail_extraction"
+                or extraction.status != "success"
+            ):
+                raise DataQualityAgentError(
+                    "Listing detail extraction enrichment not found or mismatched",
+                    "data_quality_extraction_not_found_or_mismatched",
+                )
+            return extraction
         return self.db.scalar(
             select(ListingEnrichment)
             .where(
-                ListingEnrichment.listing_id == listing.id,
+                ListingEnrichment.listing_external_id == listing.external_id,
                 ListingEnrichment.enrichment_type == "llm_listing_detail_extraction",
                 ListingEnrichment.status == "success",
             )
