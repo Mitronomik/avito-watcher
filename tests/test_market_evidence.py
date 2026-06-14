@@ -190,6 +190,46 @@ def test_low_confidence_stored_non_reusable_and_source_url_normalization(db_sess
     ) == normalize_source_url("https://example.com/path?b=1")
 
 
+def test_invalid_asset_type_in_finding_fails_ingestion(db_session):
+    result = valid_result()
+    result["findings"][0]["asset_type"] = "warehouse"
+    task = make_task(db_session, result)
+    with pytest.raises(MarketEvidenceError) as exc:
+        MarketEvidenceService(db_session).ingest_agent_task(task.id)
+    assert exc.value.error_type == "market_evidence_invalid_asset_type"
+
+
+def test_invalid_deal_type_in_finding_fails_ingestion(db_session):
+    result = valid_result()
+    result["findings"][0]["deal_type"] = "leasehold"
+    task = make_task(db_session, result)
+    with pytest.raises(MarketEvidenceError) as exc:
+        MarketEvidenceService(db_session).ingest_agent_task(task.id)
+    assert exc.value.error_type == "market_evidence_invalid_deal_type"
+
+
+def test_missing_asset_type_and_deal_type_normalize_to_unknown(db_session):
+    task = make_task(db_session)
+    MarketEvidenceService(db_session).ingest_agent_task(task.id)
+    finding = (
+        db_session.query(MarketEvidenceItem).filter_by(evidence_type="finding").one()
+    )
+    assert finding.asset_type == "unknown"
+    assert finding.deal_type == "unknown"
+
+
+def test_valid_comparable_candidate_still_ingests(db_session):
+    task = make_task(db_session)
+    MarketEvidenceService(db_session).ingest_agent_task(task.id)
+    comp = (
+        db_session.query(MarketEvidenceItem)
+        .filter_by(evidence_type="comparable_candidate")
+        .one()
+    )
+    assert comp.asset_type == "commercial"
+    assert comp.deal_type == "rent"
+
+
 def test_cascade_delete_run_deletes_items(db_session):
     task = make_task(db_session)
     MarketEvidenceService(db_session).ingest_agent_task(task.id)

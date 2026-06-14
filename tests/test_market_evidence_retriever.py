@@ -80,3 +80,23 @@ def test_retrieval_by_profile_asset_deal_location_and_order(db_session):
         location_text=" SPb ",
     )
     assert [i.content_hash for i in out][:3] == ["best", "newer", "older"]
+
+
+def test_retrieval_orders_confidence_before_expires_at_for_non_expired_items(
+    db_session,
+):
+    now = datetime.now(UTC).replace(tzinfo=None)
+    add_item(
+        db_session,
+        content_hash="low-long-ttl",
+        confidence=0.6,
+        expires_at=now + timedelta(days=30),
+    )
+    add_item(
+        db_session,
+        content_hash="high-short-ttl",
+        confidence=0.9,
+        expires_at=now + timedelta(days=1),
+    )
+    out = MarketEvidenceRetriever(db_session).retrieve(limit=2)
+    assert [i.content_hash for i in out] == ["high-short-ttl", "low-long-ttl"]

@@ -10,7 +10,12 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.agent_task import AgentTask
-from app.models.market_evidence import ALLOWED_EVIDENCE_TYPES, MarketEvidenceItem
+from app.models.market_evidence import (
+    ALLOWED_EVIDENCE_TYPES,
+    ALLOWED_MARKET_ASSET_TYPES,
+    ALLOWED_MARKET_DEAL_TYPES,
+    MarketEvidenceItem,
+)
 from app.repositories.market_evidence import MarketEvidenceRepository
 from app.services.research_agent import (
     DEFAULT_RESEARCH_PROFILE,
@@ -78,6 +83,28 @@ def _norm_text(value: object) -> str:
     return " ".join(("" if value is None else str(value)).lower().split())
 
 
+def clean_asset_type(value: object) -> str:
+    if value in (None, ""):
+        return "unknown"
+    if value not in ALLOWED_MARKET_ASSET_TYPES:
+        raise MarketEvidenceError(
+            "Invalid market evidence asset_type",
+            "market_evidence_invalid_asset_type",
+        )
+    return str(value)
+
+
+def clean_deal_type(value: object) -> str:
+    if value in (None, ""):
+        return "unknown"
+    if value not in ALLOWED_MARKET_DEAL_TYPES:
+        raise MarketEvidenceError(
+            "Invalid market evidence deal_type",
+            "market_evidence_invalid_deal_type",
+        )
+    return str(value)
+
+
 def content_hash(payload: dict) -> str:
     stable = {k: payload.get(k) for k in sorted(payload)}
     return hashlib.sha256(
@@ -108,6 +135,8 @@ class MarketEvidenceService:
                 "Task is not successful", "market_evidence_task_not_success"
             )
         raw = (task.result_json or {}).get("result", task.result_json or {})
+        if isinstance(raw, dict):
+            self._validate_raw_asset_deal_fields(raw)
         try:
             result = validate_research_agent_response(
                 raw,
@@ -193,6 +222,23 @@ class MarketEvidenceService:
             expires_at.isoformat(),
         )
 
+    def _validate_raw_asset_deal_fields(self, raw: dict) -> None:
+        for name in [
+            "findings",
+            "comparable_candidates",
+            "risks",
+            "opportunities",
+            "market_assumptions_to_verify",
+        ]:
+            values = raw.get(name, [])
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                clean_asset_type(item.get("asset_type"))
+                clean_deal_type(item.get("deal_type"))
+
     def _source(self, sources: list[dict], indexes: list[int]) -> dict | None:
         if not indexes:
             return None
@@ -227,10 +273,12 @@ class MarketEvidenceService:
         norm_url = normalize_source_url((source or {}).get("url"))
         loc = item.get("location_text")
         location_key = _norm_text(loc) if loc else None
+        asset_type = clean_asset_type(item.get("asset_type"))
+        deal_type = clean_deal_type(item.get("deal_type"))
         hash_payload = {
             "evidence_type": evidence_type,
-            "asset_type": item.get("asset_type") or "unknown",
-            "deal_type": item.get("deal_type") or "unknown",
+            "asset_type": asset_type,
+            "deal_type": deal_type,
             "location": location_key,
             "claim": item.get("claim")
             or item.get("assumption")
@@ -254,8 +302,8 @@ class MarketEvidenceService:
             "evidence_type": evidence_type,
             "research_profile": result.get("research_profile")
             or DEFAULT_RESEARCH_PROFILE,
-            "asset_type": item.get("asset_type") or "unknown",
-            "deal_type": item.get("deal_type") or "unknown",
+            "asset_type": asset_type,
+            "deal_type": deal_type,
             "location_text": loc,
             "location_key": location_key,
             "title": (source or {}).get("title"),

@@ -87,11 +87,15 @@ class MarketEvidenceRepository:
                 (MarketEvidenceItem.expires_at.is_(None))
                 | (MarketEvidenceItem.expires_at > now)
             )
-        stmt = stmt.order_by(
-            MarketEvidenceItem.is_reusable.desc(),
-            MarketEvidenceItem.expires_at.desc().nullsfirst(),
-            MarketEvidenceItem.confidence.desc().nullslast(),
-            MarketEvidenceItem.checked_at.desc(),
-            MarketEvidenceItem.id.desc(),
-        ).limit(max(0, min(limit, 100)))
+        order_cols = [MarketEvidenceItem.is_reusable.desc()]
+        if include_expired and now is not None:
+            order_cols.append((MarketEvidenceItem.expires_at > now).desc())
+        order_cols.extend(
+            [
+                MarketEvidenceItem.confidence.desc().nullslast(),
+                MarketEvidenceItem.checked_at.desc(),
+                MarketEvidenceItem.id.desc(),
+            ]
+        )
+        stmt = stmt.order_by(*order_cols).limit(max(0, min(limit, 100)))
         return list(self.db.scalars(stmt).all())
