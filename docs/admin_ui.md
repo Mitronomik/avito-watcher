@@ -159,3 +159,59 @@ PR19b does not mutate listings, listing analyses, deterministic score/verdict, s
 5. Create a review through the form with a smoke note prefix such as `pr19b-smoke-2026-06-14`; verify `human_reviews +1`, `human_review_actions` increments, and forbidden tables remain unchanged.
 6. Update the same review and verify the same `human_reviews` row is updated, `review_context_key` and `listing_analysis_id` remain unchanged, and actions increment.
 7. Remove smoke review/action rows by the smoke note prefix and verify smoke counts return to zero.
+
+## Read-only evidence, agents and outcome analytics pages
+
+PR19c adds read-only Admin UI visibility pages for market evidence, agent tasks, and human outcome analytics.
+
+Available pages:
+
+- `/admin/evidence` — shows recent **Исследования рынка** (`market_research_runs`) and **Рыночные ориентиры / аналоги** (`market_evidence_items`) in bounded tables.
+- `/admin/evidence/runs/{run_id}` — shows one market research run, metadata, and a bounded list of its evidence items.
+- `/admin/agents` — shows recent **Задачи агентов** (`agent_tasks`) in a bounded table.
+- `/admin/agents/{task_id}` — shows one agent task, metadata, error fields, input payload, and result payload.
+- `/admin/outcome-analytics` — shows **Аналитика решений** using the existing PR18b `HumanOutcomeAnalyticsService` read model.
+
+These pages are visibility/read-model pages only. They add no POST mutation routes and provide no run, refresh, retry, cancel, approve, edit, delete, score override, verdict override, calibration, delivery, Telegram/email, research, agent, scheduler, LLM, or external integration actions. GET requests must not mutate listings, analyses, alerts, searches, evidence, agent tasks, knowledge notes, enrichments, snapshots, human reviews/actions, or investment decisions.
+
+Authentication follows the existing Admin UI read boundary: each page requires the read admin key through `X-API-Key` or the configured read-key mechanism. Write and technical-write keys are not required for these read-only pages. Query-string `api_key` remains disabled by default through `ADMIN_UI_ALLOW_QUERY_API_KEY=false`.
+
+Query parameter bounds:
+
+- `limit`: integer from 1 to 200; default 50.
+- `period_days`: integer from 1 to 365; default 30.
+- `max_examples`: integer from 0 to 50; default 10.
+- `run_id` and `task_id`: positive integer path parameters.
+- `search_job_id`: optional positive integer on `/admin/outcome-analytics`.
+- `as_of`: optional ISO datetime with timezone on `/admin/outcome-analytics`.
+
+Invalid parameters return a clear 400 response rather than causing an unbounded query or a 500 error.
+
+Raw JSON and payload policy:
+
+- Raw run details, evidence JSON, agent input payload, agent result payload, and analytics detail structures are collapsed behind `<details>` by default.
+- Text and JSON are HTML-escaped, redacted, and truncated using the existing Admin UI helpers.
+- Secret-like keys such as tokens, API keys, passwords, authorization headers, cookies, and webhooks are redacted.
+- External links are clickable only for safe `http` and `https` URLs, with `target="_blank"` and `rel="noopener noreferrer"`; unsafe schemes such as `javascript:`, `data:`, and `file:` are displayed as escaped plain text.
+
+No migration is expected for PR19c. The pages read existing PR15/PR18b tables and services.
+
+### Production smoke plan for PR19c
+
+1. Check `/health`.
+2. Check Alembic:
+
+   ```bash
+   alembic heads
+   alembic current
+   ```
+
+   Expected: no new PR19c migration; Alembic head is unchanged from current main after PR19b.
+
+3. Snapshot DB counts before GET requests for: `listings`, `listing_analyses`, `alerts_sent`, `search_jobs`, `market_research_runs`, `market_evidence_items`, `agent_tasks`, `knowledge_notes`, `listing_enrichments`, `listing_detail_snapshots`, `human_reviews`, `human_review_actions`, and `investment_decisions`.
+4. GET `/admin/evidence`, `/admin/agents`, and `/admin/outcome-analytics` with the read key.
+5. If sample IDs exist, GET `/admin/evidence/runs/{run_id}` and `/admin/agents/{task_id}`.
+6. Snapshot the same DB counts after GET requests.
+7. Confirm all counts are unchanged.
+8. Confirm no worker, agent, research, delivery, LLM, or external integration task was triggered.
+9. Confirm worker/app logs contain no new errors after deploy.

@@ -11,8 +11,8 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import APIKeyHeader
-from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, or_, select
+from sqlalchemy.orm import Session, raiseload
 
 from app.cli import _build_parser, _parser_stats_snapshot
 from app.core.config import settings
@@ -20,6 +20,10 @@ from app.db.session import get_db
 from app.models.listing import Listing
 from app.models.listing_analysis import ListingAnalysis
 from app.models.human_review import HUMAN_VERDICTS, NEXT_ACTIONS, OUTCOME_STATUSES, HumanReviewAction
+from app.models.agent_task import AgentTask
+from app.models.market_evidence import MarketEvidenceItem, MarketResearchRun
+from app.schemas.outcome_analytics import OutcomeAnalyticsRequest
+from app.services.outcome_analytics import HumanOutcomeAnalyticsService
 from app.parsers.errors import ParserError
 from app.repositories.search_repository import SearchRepository
 from app.services.monitor_service import MonitorService, runtime_diagnostics
@@ -35,13 +39,13 @@ UI_TEXT = {
     "ru": {
         "nav.dashboard": "Панель", "nav.listings": "Объекты", "nav.searches": "Поиски",
         "nav.alerts": "Уведомления", "nav.analyses": "Анализы", "nav.system": "Состояние",
-        "nav.technical": "Технический режим", "dashboard.title": "Панель оператора",
+        "nav.technical": "Технический режим", "nav.evidence": "Рыночные данные", "nav.agents": "Агенты", "nav.outcome_analytics": "Аналитика решений", "dashboard.title": "Панель оператора",
         "no_data": "Нет данных", "technical.details": "Технические детали",
     },
     "en": {
         "nav.dashboard": "Dashboard", "nav.listings": "Listings", "nav.searches": "Searches",
         "nav.alerts": "Alerts", "nav.analyses": "Analyses", "nav.system": "System status",
-        "nav.technical": "Technical mode", "dashboard.title": "Operator dashboard",
+        "nav.technical": "Technical mode", "nav.evidence": "Evidence", "nav.agents": "Agents", "nav.outcome_analytics": "Outcome analytics", "dashboard.title": "Operator dashboard",
         "no_data": "No data", "technical.details": "Technical details",
     },
 }
@@ -272,7 +276,7 @@ def _keywords(value: str) -> list[str] | None:
 
 
 def _admin_nav() -> str:
-    links = [("/admin", "nav.dashboard"), ("/admin/listings", "nav.listings"), ("/admin/searches", "nav.searches"), ("/admin/alerts", "nav.alerts"), ("/admin/listing-analyses", "nav.analyses"), ("/admin/technical", "nav.technical")]
+    links = [("/admin", "nav.dashboard"), ("/admin/listings", "nav.listings"), ("/admin/searches", "nav.searches"), ("/admin/alerts", "nav.alerts"), ("/admin/listing-analyses", "nav.analyses"), ("/admin/evidence", "nav.evidence"), ("/admin/agents", "nav.agents"), ("/admin/outcome-analytics", "nav.outcome_analytics"), ("/admin/technical", "nav.technical")]
     return "<nav>" + " · ".join(f"<a href='{href}'>{html.escape(_t(key))}</a>" for href, key in links) + "</nav>"
 
 def _render_page(title: str, body: str) -> HTMLResponse:
@@ -395,6 +399,33 @@ def _safe_external_link(url: str | None, label: str = "open") -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return html.escape(raw)
     return f"<a href='{_html_attr(raw)}' target='_blank' rel='noopener noreferrer'>{html.escape(label)}</a>"
+
+
+def _bounded_int(value: object, name: str, default: int, minimum: int, maximum: int) -> int:
+    if value in (None, ""):
+        return default
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"{name} must be an integer") from exc
+    if parsed < minimum or parsed > maximum:
+        raise HTTPException(status_code=400, detail=f"{name} must be between {minimum} and {maximum}")
+    return parsed
+
+
+def _positive_path_int(value: int, name: str) -> int:
+    if value < 1:
+        raise HTTPException(status_code=400, detail=f"{name} must be a positive integer")
+    return value
+
+
+def _json_details(title: str, value: object) -> str:
+    return f"<details><summary>{html.escape(title)}</summary><pre>{redact_admin_json(value)}</pre></details>"
+
+
+def _kv_table(pairs: list[tuple[str, object]]) -> str:
+    rows = ''.join(f"<tr><th>{html.escape(k)}</th><td>{html.escape(_truncate(v, 500))}</td></tr>" for k, v in pairs)
+    return f"<table>{rows}</table>"
 
 
 def _latest_successful_analysis(db: Session, listing: Listing) -> ListingAnalysis | None:
@@ -618,6 +649,101 @@ def dashboard(db: Session = Depends(get_db)):
         "<a href='/admin/alerts'>Уведомления</a> · <a href='/admin/technical'>Состояние системы и технический режим</a></p>"
     )
     return _render_page(_t('dashboard.title'), body)
+
+
+@router.get('/evidence', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
+def admin_evidence(request: Request, db: Session = Depends(get_db), limit: str | None = Query(default=None)):
+    api_key = request.query_params.get('api_key')
+    effective_limit = _bounded_int(limit, 'limit', 50, 1, 200)
+    runs = db.scalars(select(MarketResearchRun).options(raiseload(MarketResearchRun.evidence_items)).order_by(MarketResearchRun.created_at.desc(), MarketResearchRun.id.desc()).limit(effective_limit)).all()
+    run_ids = [run.id for run in runs]
+    item_counts = dict(db.execute(select(MarketEvidenceItem.run_id, func.count(MarketEvidenceItem.id)).where(MarketEvidenceItem.run_id.in_(run_ids)).group_by(MarketEvidenceItem.run_id)).all()) if run_ids else {}
+    items = db.scalars(select(MarketEvidenceItem).order_by(MarketEvidenceItem.created_at.desc(), MarketEvidenceItem.id.desc()).limit(effective_limit)).all()
+    run_rows = []
+    for run in runs:
+        count = item_counts.get(run.id, 0)
+        run_rows.append(f"<tr><td>{run.id}<br><a href='{_html_attr(_admin_url(f'/admin/evidence/runs/{run.id}', api_key))}'>детали</a></td><td>{html.escape(run.listing_external_id or '—')}</td><td>{html.escape(run.research_profile or '—')}</td><td>{html.escape(run.provider or '—')}</td><td>{html.escape(run.status or '—')}</td><td>{display_datetime(run.created_at)}</td><td>{display_datetime(run.checked_at)}</td><td>{count}</td><td>{_json_details('Показать технические данные', {'query_plan_json': run.query_plan_json, 'sources_json': run.sources_json, 'limitations_json': run.limitations_json, 'summary': run.summary})}</td></tr>")
+    item_rows = []
+    for item in items:
+        item_rows.append(f"<tr><td>{item.id}</td><td>{item.run_id}</td><td>{html.escape(item.listing_external_id or '—')}</td><td>{html.escape(item.evidence_type or '—')}</td><td>{html.escape(_truncate(item.source_publisher or item.source_title or '—', 80))}</td><td>{html.escape(_truncate(item.title or item.claim or item.description or '—', 160))}</td><td>{html.escape(str(item.price_rub or '—'))}</td><td>{html.escape(str(item.area_m2 or '—'))}</td><td>{html.escape(str(item.rent_rub_per_month or '—'))}</td><td>{_safe_external_link(item.source_url, 'open')}</td><td>{display_datetime(item.created_at)}</td><td>{display_boolean(item.is_reusable)}</td><td>{_json_details('Показать технические данные', item.evidence_json)}</td></tr>")
+    form = f"<form method='get' action='{_html_attr(_admin_url('/admin/evidence', api_key))}'><input type='hidden' name='api_key' value='{_html_attr(api_key)}'><label>limit<input name='limit' type='number' min='1' max='200' value='{effective_limit}'></label><button>Apply</button></form>"
+    body = f"<h1>Рыночные данные</h1><p class='preview'>Read-only: no research runs, refreshes, edits, or deletes are available.</p>{form}<section class='section'><h2>Исследования рынка</h2><table><tr><th>id</th><th>listing_external_id</th><th>profile</th><th>provider</th><th>status</th><th>created_at</th><th>checked_at</th><th>items</th><th>details</th></tr>{''.join(run_rows)}</table></section><section class='section'><h2>Рыночные ориентиры / аналоги</h2><table><tr><th>id</th><th>run_id</th><th>listing_external_id</th><th>type</th><th>source</th><th>title / text</th><th>price</th><th>area</th><th>rent</th><th>url</th><th>created_at</th><th>usable</th><th>details</th></tr>{''.join(item_rows)}</table></section>"
+    return _render_page('Рыночные данные', body)
+
+
+@router.get('/evidence/runs/{run_id}', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
+def admin_evidence_run(request: Request, run_id: int, db: Session = Depends(get_db), limit: str | None = Query(default=None)):
+    api_key = request.query_params.get('api_key')
+    run_id = _positive_path_int(run_id, 'run_id')
+    effective_limit = _bounded_int(limit, 'limit', 50, 1, 200)
+    run = db.get(MarketResearchRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail='Market research run not found')
+    items = db.scalars(select(MarketEvidenceItem).where(MarketEvidenceItem.run_id == run_id).order_by(MarketEvidenceItem.created_at.desc(), MarketEvidenceItem.id.desc()).limit(effective_limit)).all()
+    item_rows = ''.join(f"<tr><td>{i.id}</td><td>{html.escape(i.evidence_type or '—')}</td><td>{html.escape(_truncate(i.title or i.claim or i.description or '—', 180))}</td><td>{_safe_external_link(i.source_url, 'open')}</td><td>{html.escape(str(i.confidence or '—'))}</td><td>{display_boolean(i.is_reusable)}</td><td>{_json_details('Показать технические данные', i.evidence_json)}</td></tr>" for i in items)
+    meta = _kv_table([('id', run.id), ('agent_task_id', run.agent_task_id), ('listing_external_id', run.listing_external_id), ('listing_analysis_id', run.listing_analysis_id), ('research_profile', run.research_profile), ('status', run.status), ('provider', run.provider), ('model', run.model), ('schema_version', run.schema_version), ('prompt_version', run.prompt_version), ('confidence', run.confidence), ('checked_at', run.checked_at), ('expires_at', run.expires_at), ('created_at', run.created_at), ('updated_at', run.updated_at)])
+    details = _json_details('Показать технические данные', {'summary': run.summary, 'query_plan_json': run.query_plan_json, 'sources_json': run.sources_json, 'limitations_json': run.limitations_json, 'input_hash': run.input_hash, 'output_hash': run.output_hash})
+    body = f"<h1>Исследование рынка #{run.id}</h1><p><a href='{_html_attr(_admin_url('/admin/evidence', api_key))}'>Назад к рыночным данным</a></p><p class='preview'>Read-only detail page. No run, refresh, research, edit, or delete action is available.</p><section class='section'><h2>Метаданные</h2>{meta}{details}</section><section class='section'><h2>Рыночные ориентиры / аналоги</h2><table><tr><th>id</th><th>type</th><th>title / text</th><th>url</th><th>confidence</th><th>usable</th><th>details</th></tr>{item_rows}</table></section>"
+    return _render_page('Исследование рынка', body)
+
+
+@router.get('/agents', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
+def admin_agents(request: Request, db: Session = Depends(get_db), limit: str | None = Query(default=None)):
+    api_key = request.query_params.get('api_key')
+    effective_limit = _bounded_int(limit, 'limit', 50, 1, 200)
+    tasks = db.scalars(select(AgentTask).order_by(AgentTask.created_at.desc(), AgentTask.id.desc()).limit(effective_limit)).all()
+    rows = ''.join(f"<tr><td>{t.id}<br><a href='{_html_attr(_admin_url(f'/admin/agents/{t.id}', api_key))}'>детали</a></td><td>{html.escape(t.task_type or '—')}</td><td>{html.escape(t.status or '—')}</td><td>{html.escape(t.error_type or '—')}</td><td>{display_datetime(t.created_at)}</td><td>{display_datetime(t.started_at)}</td><td>{display_datetime(t.finished_at)}</td><td>{html.escape(t.listing_external_id or '—')}</td><td>{html.escape(str(t.search_job_id or '—'))}</td><td>{_json_details('Показать технические данные', {'payload_json': t.payload_json, 'result_json': t.result_json, 'error_message': t.error_message})}</td></tr>" for t in tasks)
+    form = f"<form method='get' action='{_html_attr(_admin_url('/admin/agents', api_key))}'><input type='hidden' name='api_key' value='{_html_attr(api_key)}'><label>limit<input name='limit' type='number' min='1' max='200' value='{effective_limit}'></label><button>Apply</button></form>"
+    body = f"<h1>Задачи агентов</h1><p class='preview'>Read-only: no run, retry, cancel, approve, or rerun actions are available.</p>{form}<table><tr><th>id</th><th>task_type</th><th>status</th><th>error_type</th><th>created_at</th><th>started_at</th><th>completed_at</th><th>listing_external_id</th><th>search_id</th><th>details</th></tr>{rows}</table>"
+    return _render_page('Задачи агентов', body)
+
+
+@router.get('/agents/{task_id}', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
+def admin_agent_detail(task_id: int, db: Session = Depends(get_db)):
+    task_id = _positive_path_int(task_id, 'task_id')
+    task = db.get(AgentTask, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail='Agent task not found')
+    meta = _kv_table([('id', task.id), ('task_type', task.task_type), ('status', task.status), ('priority', task.priority), ('listing_external_id', task.listing_external_id), ('listing_analysis_id', task.listing_analysis_id), ('search_job_id', task.search_job_id), ('context_key', task.context_key), ('dedupe_key', task.dedupe_key), ('error_type', task.error_type), ('error_message', redact_admin_value(task.error_message, 'error_message')), ('created_at', task.created_at), ('updated_at', task.updated_at), ('started_at', task.started_at), ('completed_at', task.finished_at)])
+    body = f"<h1>Задача агента #{task.id}</h1><p class='preview'>Read-only detail page. No run, retry, cancel, approve, or rerun action is available.</p><section class='section'><h2>Метаданные</h2>{meta}</section><section class='section'>{_json_details('input payload', task.payload_json)}{_json_details('result payload', task.result_json)}</section>"
+    return _render_page('Задача агента', body)
+
+
+def _dict_table(data: dict) -> str:
+    if not data:
+        return '<p>Нет данных</p>'
+    return '<table>' + ''.join(f"<tr><th>{html.escape(str(k))}</th><td>{html.escape(str(v))}</td></tr>" for k, v in data.items()) + '</table>'
+
+
+@router.get('/outcome-analytics', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
+def admin_outcome_analytics(
+    request: Request,
+    db: Session = Depends(get_db),
+    period_days: str | None = Query(default=None),
+    max_examples: str | None = Query(default=None),
+    search_job_id: str | None = Query(default=None),
+    as_of: str | None = Query(default=None),
+):
+    api_key = request.query_params.get('api_key')
+    period = _bounded_int(period_days, 'period_days', 30, 1, 365)
+    examples_limit = _bounded_int(max_examples, 'max_examples', 10, 0, 50)
+    search_ids = None
+    if search_job_id not in (None, ''):
+        search_ids = [_bounded_int(search_job_id, 'search_job_id', 1, 1, 2_147_483_647)]
+    as_of_dt = None
+    if as_of:
+        try:
+            as_of_dt = datetime.fromisoformat(as_of.replace('Z', '+00:00'))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail='as_of must be an ISO datetime') from exc
+        if as_of_dt.tzinfo is None:
+            raise HTTPException(status_code=400, detail='as_of must include timezone')
+    req = OutcomeAnalyticsRequest(period_days=period, as_of=as_of_dt, search_job_ids=search_ids, max_examples_per_section=examples_limit)
+    report = HumanOutcomeAnalyticsService(db).build_report(req)
+    form = f"<form method='get' action='{_html_attr(_admin_url('/admin/outcome-analytics', api_key))}'><input type='hidden' name='api_key' value='{_html_attr(api_key)}'><label>period_days<input name='period_days' type='number' min='1' max='365' value='{period}'></label><label>max_examples<input name='max_examples' type='number' min='0' max='50' value='{examples_limit}'></label><label>search_job_id<input name='search_job_id' type='number' value='{_html_attr(search_job_id or '')}'></label><label>as_of<input name='as_of' value='{_html_attr(as_of or '')}'></label><button>Apply</button></form>"
+    examples = report.examples.model_dump(mode='json') if hasattr(report.examples, 'model_dump') else {}
+    body = f"<h1>Аналитика решений</h1><p class='preview'>Read-only report from existing PR18b outcome analytics service. This page does not persist analytics or update reviews/scoring.</p>{form}<section class='section'><h2>Период</h2>{_kv_table(list(report.period.model_dump().items()))}</section><section class='section'><h2>Totals</h2>{_kv_table(list(report.totals.model_dump().items()))}</section><section class='section'><h2>Human verdict counts</h2>{_dict_table(report.human_verdict_counts)}</section><section class='section'><h2>Outcome status counts</h2>{_dict_table(report.outcome_status_counts)}</section><section class='section'><h2>Investment decision counts</h2>{_json_details('Показать технические данные', report.decision_counts.model_dump())}</section><section class='section'><h2>Score bucket stats</h2>{_json_details('Показать технические данные', {k: v.model_dump() for k, v in report.score_bucket_stats.items()})}</section><section class='section'><h2>Analysis alignment</h2>{_json_details('Показать технические данные', report.analysis_alignment)}</section><section class='section'><h2>Risk flag stats</h2>{_json_details('Показать технические данные', {k: v.model_dump() for k, v in report.risk_flag_stats.items()})}</section><section class='section'><h2>Search stats</h2>{_json_details('Показать технические данные', [s.model_dump() for s in report.search_stats])}</section><section class='section'><h2>Examples</h2>{_json_details('Показать технические данные', examples)}</section><section class='section'><h2>Limitations</h2><ul>{''.join(f'<li>{html.escape(str(x))}</li>' for x in report.limitations)}</ul></section><section class='section'><h2>Hashes</h2>{_kv_table([('request_hash', report.request_hash), ('stats_snapshot_hash', report.stats_snapshot_hash)])}</section>"
+    return _render_page('Аналитика решений', body)
 
 
 @router.get("/technical", response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])

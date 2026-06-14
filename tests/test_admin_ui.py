@@ -1500,3 +1500,210 @@ def test_pr19b_human_review_post_does_not_mutate_forbidden_tables(monkeypatch):
     assert after_forbidden == before_forbidden
     assert after_reviews == before_reviews + 1
     assert after_actions > before_actions
+
+
+def _create_evidence_and_agent(Session):
+    from app.models.agent_task import AgentTask
+    from app.models.market_evidence import MarketEvidenceItem, MarketResearchRun
+
+    with Session() as s:
+        task = AgentTask(
+            task_type="market_research",
+            status="success",
+            dedupe_key="agent-1",
+            listing_external_id="ext-evidence",
+            payload_json={"api_key": "secret", "q": "x"},
+            result_json={"token": "secret", "ok": True},
+            error_message="<script>alert(1)</script>",
+        )
+        s.add(task)
+        s.flush()
+        run = MarketResearchRun(
+            agent_task_id=task.id,
+            listing_external_id="ext-evidence",
+            research_profile="default",
+            status="success",
+            provider="manual",
+            schema_version="v1",
+            summary="summary token secret",
+            query_plan_json=[{"q": "secret"}],
+            sources_json=[{"url": "https://example.com"}],
+            limitations_json=["none"],
+        )
+        s.add(run)
+        s.flush()
+        safe = MarketEvidenceItem(
+            run_id=run.id,
+            listing_external_id="ext-evidence",
+            evidence_type="comparable_candidate",
+            research_profile="default",
+            title="<script>bad</script> Safe item",
+            source_url="https://example.com/item?token=secret",
+            evidence_json={"password": "secret", "text": "value"},
+            content_hash="hash-safe",
+            is_reusable=True,
+        )
+        unsafe = MarketEvidenceItem(
+            run_id=run.id,
+            listing_external_id="ext-evidence",
+            evidence_type="finding",
+            research_profile="default",
+            title="Unsafe URL item",
+            source_url="javascript:alert(1)",
+            evidence_json={"api_key": "secret"},
+            content_hash="hash-unsafe",
+        )
+        s.add_all([safe, unsafe])
+        s.commit()
+        return run.id, task.id
+
+
+def test_pr19c_navigation_and_query_validation(monkeypatch):
+    client, _Session = make_client(monkeypatch)
+    page = client.get("/admin").text
+    assert "/admin/evidence" in page
+    assert "/admin/agents" in page
+    assert "/admin/outcome-analytics" in page
+    for path in [
+        "/admin/evidence?limit=bad",
+        "/admin/evidence?limit=100000",
+        "/admin/agents?limit=bad",
+        "/admin/agents?limit=100000",
+        "/admin/outcome-analytics?period_days=bad",
+        "/admin/outcome-analytics?period_days=100000",
+        "/admin/outcome-analytics?max_examples=100000",
+    ]:
+        assert client.get(path).status_code == 400
+
+
+def test_pr19c_evidence_and_agent_pages_are_read_only_and_safe(monkeypatch):
+    from app.models.agent_task import AgentTask
+    from app.models.market_evidence import MarketEvidenceItem, MarketResearchRun
+
+    client, Session = make_client(monkeypatch)
+    run_id, task_id = _create_evidence_and_agent(Session)
+    before = {}
+    with Session() as s:
+        for model in [MarketResearchRun, MarketEvidenceItem, AgentTask]:
+            before[model.__tablename__] = s.query(model).count()
+
+    evidence = client.get("/admin/evidence")
+    assert evidence.status_code == 200
+    assert "Исследования рынка" in evidence.text
+    assert "Рыночные ориентиры / аналоги" in evidence.text
+    assert "ext-evidence" in evidence.text
+    assert "&lt;script&gt;bad&lt;/script&gt;" in evidence.text
+    assert "href='https://example.com/item?token=secret'" in evidence.text
+    assert "href='javascript:alert(1)'" not in evidence.text
+    assert "[redacted]" in evidence.text
+    assert "<details><summary>Показать технические данные</summary>" in evidence.text
+
+    detail = client.get(f"/admin/evidence/runs/{run_id}")
+    assert detail.status_code == 200
+    assert f"Исследование рынка #{run_id}" in detail.text
+    assert "No run, refresh, research" in detail.text
+    assert "method='post'" not in detail.text.lower()
+
+    agents = client.get("/admin/agents")
+    assert agents.status_code == 200
+    assert "Задачи агентов" in agents.text
+    assert "market_research" in agents.text
+    assert "[redacted]" in agents.text
+    assert "retry" in agents.text  # only explanatory text, not a form
+    assert "method='post'" not in agents.text.lower()
+
+    agent_detail = client.get(f"/admin/agents/{task_id}")
+    assert agent_detail.status_code == 200
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in agent_detail.text
+    assert "[redacted]" in agent_detail.text
+    assert "method='post'" not in agent_detail.text.lower()
+
+    for path in ["/admin/evidence", f"/admin/evidence/runs/{run_id}", "/admin/agents", f"/admin/agents/{task_id}"]:
+        assert client.post(path).status_code in {404, 405}
+
+    with Session() as s:
+        for model in [MarketResearchRun, MarketEvidenceItem, AgentTask]:
+            assert s.query(model).count() == before[model.__tablename__]
+
+
+def test_pr19c_evidence_run_item_count_uses_aggregate_without_relationship_load(monkeypatch):
+    from app.models.market_evidence import MarketEvidenceItem
+
+    client, Session = make_client(monkeypatch)
+    run_id, _task_id = _create_evidence_and_agent(Session)
+    with Session() as s:
+        s.add(
+            MarketEvidenceItem(
+                run_id=run_id,
+                listing_external_id="ext-evidence",
+                evidence_type="risk",
+                research_profile="default",
+                title="Third aggregate-only item",
+                source_url="https://example.com/third",
+                evidence_json={"token": "secret"},
+                content_hash="hash-third",
+            )
+        )
+        s.commit()
+
+    response = client.get("/admin/evidence?limit=1")
+
+    assert response.status_code == 200
+    assert f"/admin/evidence/runs/{run_id}" in response.text
+    assert "<td>3</td><td><details><summary>Показать технические данные</summary>" in response.text
+    assert "Third aggregate-only item" in response.text
+
+
+def test_pr19c_outcome_analytics_uses_service(monkeypatch):
+    from app.schemas.outcome_analytics import (
+        DecisionCounts,
+        OutcomeAnalyticsReport,
+        OutcomeBucketStats,
+        OutcomeExamples,
+        OutcomePeriod,
+        OutcomeTotals,
+        SignalCounts,
+    )
+    from app import admin as admin_module
+
+    client, _Session = make_client(monkeypatch)
+    calls = []
+
+    class FakeService:
+        def __init__(self, db):
+            self.db = db
+
+        def build_report(self, request):
+            calls.append(request)
+            return OutcomeAnalyticsReport(
+                request_hash="request-hash-test",
+                stats_snapshot_hash="stats-hash-test",
+                period=OutcomePeriod(as_of=datetime(2026, 1, 1), period_start=datetime(2025, 12, 2), period_end=datetime(2026, 1, 1), period_days=request.period_days, date_basis="coalesced"),
+                totals=OutcomeTotals(human_reviews_total=7, human_reviews_in_period=5),
+                review_status_counts={"reviewed": 5},
+                human_verdict_counts={"interesting": 3},
+                outcome_status_counts={"watchlist": 2},
+                watchlist_counts={"true": 2},
+                false_positive_counts={},
+                false_negative_counts={},
+                signal_counts=SignalCounts(),
+                decision_counts=DecisionCounts(),
+                analysis_alignment={"by_verdict": {"strong": 1}},
+                score_bucket_stats={"80-100": OutcomeBucketStats(total_reviews=1)},
+                risk_flag_stats={"market_evidence_used": OutcomeBucketStats(total_reviews=1)},
+                search_stats=[],
+                examples=OutcomeExamples(),
+                limitations=["test limitation"],
+            )
+
+    monkeypatch.setattr(admin_module, "HumanOutcomeAnalyticsService", FakeService)
+    resp = client.get("/admin/outcome-analytics?period_days=30&max_examples=3")
+    assert resp.status_code == 200
+    assert len(calls) == 1
+    assert calls[0].period_days == 30
+    assert calls[0].max_examples_per_section == 3
+    assert "Аналитика решений" in resp.text
+    assert "request-hash-test" in resp.text
+    assert "stats-hash-test" in resp.text
+    assert "test limitation" in resp.text
+    assert client.post("/admin/outcome-analytics").status_code in {404, 405}
