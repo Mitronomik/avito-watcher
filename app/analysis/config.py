@@ -18,6 +18,9 @@ class AnalysisConfig:
     max_price_per_m2: float | None = None
     suspicious_total_price: float | None = None
     suspicious_low_price_per_m2: float | None = None
+    investment_purchase_price: float | None = None
+    investment_price_basis: str | None = None
+    investment_allow_listing_price_as_purchase_price: bool = False
     estimated_monthly_rent: float | None = None
     opex_ratio: float | None = None
     opex_monthly: float | None = None
@@ -26,6 +29,8 @@ class AnalysisConfig:
     min_gross_yield: float | None = None
     min_noi_yield: float | None = None
     max_payback_years: float | None = None
+    asset_type: str | None = None
+    deal_type: str | None = None
 
     @classmethod
     def from_search_filters(
@@ -36,7 +41,12 @@ class AnalysisConfig:
             for key in values:
                 if key == "profile" or key not in filters_json:
                     continue
-                coerced = _coerce_number(filters_json[key])
+                if key in _STRING_FIELDS:
+                    coerced = _coerce_string(filters_json[key])
+                elif key in _BOOL_FIELDS:
+                    coerced = _coerce_bool(filters_json[key])
+                else:
+                    coerced = _coerce_number(filters_json[key])
                 if coerced is not _MISSING:
                     values[key] = coerced
         return cls(**values)
@@ -68,6 +78,8 @@ class AnalysisConfig:
 
 
 _MISSING = object()
+_STRING_FIELDS = {"investment_price_basis", "asset_type", "deal_type"}
+_BOOL_FIELDS = {"investment_allow_listing_price_as_purchase_price"}
 
 
 def _profile_defaults(profile: str) -> AnalysisConfig:
@@ -107,9 +119,7 @@ def _profile_defaults(profile: str) -> AnalysisConfig:
 
 
 def _coerce_number(value: Any) -> float | object:
-    if value is None:
-        return _MISSING
-    if isinstance(value, bool):
+    if value is None or isinstance(value, bool):
         return _MISSING
     if isinstance(value, int | float):
         return float(value)
@@ -121,6 +131,23 @@ def _coerce_number(value: Any) -> float | object:
             return float(stripped)
         except ValueError:
             return _MISSING
+    return _MISSING
+
+
+def _coerce_string(value: Any) -> str | object:
+    if value is None or isinstance(value, bool):
+        return _MISSING
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped if stripped else _MISSING
+    return _MISSING
+
+
+def _coerce_bool(value: Any) -> bool | object:
+    if value is None:
+        return _MISSING
+    if isinstance(value, bool):
+        return value
     return _MISSING
 
 
