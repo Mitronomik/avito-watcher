@@ -1434,3 +1434,69 @@ def test_listing_detail_human_review_workflow_and_safety(monkeypatch):
         assert s.scalar(select(func.count()).select_from(HumanReviewAction)) > action_count
         assert s.scalar(select(func.count()).select_from(ListingAnalysis)) == 4
         assert s.scalar(select(func.count()).select_from(Listing)) == 2
+
+
+def test_pr19b_human_review_post_does_not_mutate_forbidden_tables(monkeypatch):
+    client, Session = make_client(monkeypatch, technical_ops_enabled=False, allow_query_api_key=False)
+    monkeypatch.setattr(settings, "admin_ui_read_key", "read-key")
+    monkeypatch.setattr(settings, "admin_ui_write_key", "write-key")
+    listing_id = create_listing(Session, external_id="no-mutation-1", title="No mutation")
+    analysis_id = create_listing_analysis(
+        Session,
+        listing_external_id="no-mutation-1",
+        input_hash="no-mutation-analysis",
+        status="success",
+        score=77,
+        verdict="strong",
+        created_at=datetime(2026, 2, 1),
+    )
+    forbidden_tables = [
+        "listings",
+        "listing_analyses",
+        "alerts_sent",
+        "search_jobs",
+        "agent_tasks",
+        "market_research_runs",
+        "market_evidence_items",
+        "knowledge_notes",
+        "listing_enrichments",
+        "listing_detail_snapshots",
+        "investment_decisions",
+    ]
+
+    def counts(session):
+        return {
+            name: session.scalar(select(func.count()).select_from(Base.metadata.tables[name]))
+            for name in forbidden_tables
+        }
+
+    with Session() as s:
+        before_forbidden = counts(s)
+        before_reviews = s.scalar(select(func.count()).select_from(HumanReview))
+        before_actions = s.scalar(select(func.count()).select_from(HumanReviewAction))
+
+    response = client.post(
+        f"/admin/listings/{listing_id}/human-review",
+        data={
+            "admin_write_key": "write-key",
+            "human_verdict": "interesting",
+            "outcome_status": "watchlist",
+            "next_action": "add_to_watchlist",
+            "watchlist": "true",
+            "notes": "no forbidden mutations regression",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    with Session() as s:
+        after_forbidden = counts(s)
+        after_reviews = s.scalar(select(func.count()).select_from(HumanReview))
+        after_actions = s.scalar(select(func.count()).select_from(HumanReviewAction))
+        review = s.scalars(select(HumanReview)).one()
+        assert review.listing_id == listing_id
+        assert review.listing_analysis_id == analysis_id
+
+    assert after_forbidden == before_forbidden
+    assert after_reviews == before_reviews + 1
+    assert after_actions > before_actions

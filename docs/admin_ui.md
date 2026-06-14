@@ -17,7 +17,7 @@ PR19a adds the operator dashboard at `/admin`, shared navigation/layout, a small
 - `ADMIN_UI_LANGUAGE=ru` uses Russian labels by default. `en` is available for basic navigation labels.
 - `ADMIN_UI_ALLOW_QUERY_API_KEY=false` disables query-string key authentication and prevents new operator links from propagating keys in URLs.
 - `ADMIN_UI_TECHNICAL_OPS_ENABLED=false` hides and blocks technical write operations by default.
-- `ADMIN_UI_READ_KEY`, `ADMIN_UI_WRITE_KEY`, and `ADMIN_UI_TECHNICAL_WRITE_KEY` are admin-specific keys. Existing `API_KEY` is accepted as a fallback only when admin-specific keys are not configured.
+- `ADMIN_UI_READ_KEY`, `ADMIN_UI_WRITE_KEY`, and `ADMIN_UI_TECHNICAL_WRITE_KEY` are admin-specific keys. Existing `API_KEY` is accepted as a fallback only when admin-specific keys are not configured. In production, set `ADMIN_UI_WRITE_KEY` explicitly and separately from the read key so browser form writes require a distinct operator write secret.
 
 No secrets, API keys, webhook URLs, SMTP passwords, Telegram bot tokens, or full environment values should be displayed in the UI. Technical payloads are escaped, bounded, and redacted.
 
