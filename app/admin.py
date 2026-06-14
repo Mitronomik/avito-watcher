@@ -68,6 +68,10 @@ def _redact_obj(value: object, key: str = "") -> object:
         return {str(k): _redact_obj(v, str(k)) for k, v in value.items()}
     if isinstance(value, list):
         return [_redact_obj(v, key) for v in value[:50]]
+    if _SECRET_KEY_RE.search(key or ""):
+        return "[redacted]"
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
     return redact_admin_value(value, key)
 
 def redact_admin_json(value: object) -> str:
@@ -528,7 +532,7 @@ def searches(request: Request, db: Session = Depends(get_db)):
             toggle_label = 'deactivate' if s.is_active else 'activate'
             action_html = (
                 f"<details><summary>Technical actions</summary><div class='note'>These actions can change monitoring behavior. Use only if you understand the effect.</div>"
-                f"<a href='{_admin_url(f'/admin/searches/{s.id}/edit', api_key)}'>edit</a> {open_avito}"
+                f"<code>python3 -m app.cli run-once --search-id {s.id}</code><br><a href='{_admin_url(f'/admin/searches/{s.id}/edit', api_key)}'>edit</a> {open_avito}"
                 f"<form method='post' action='{_admin_url(f'/admin/searches/{s.id}/' + toggle_action, api_key)}'><button>{toggle_label}</button></form>"
                 f"<form method='post' action='{_admin_url(f'/admin/searches/{s.id}/reset-baseline', api_key)}'><button>reset baseline</button></form>"
                 f"<form method='post' action='{_admin_url(f'/admin/searches/{s.id}/run-once', api_key)}'><button>run once</button></form></details>"
@@ -591,7 +595,8 @@ def searches(request: Request, db: Session = Depends(get_db)):
         f"<strong>Last success:</strong> {html.escape(str(last_success or '—'))}<br>"
         f"<strong>Last error:</strong> {html.escape(recent_error)}</p></section>"
     )
-    return _render_page("Поиски", f"<h1>Поиски</h1>{notice}<p class='preview'>Технические операции скрыты и заблокированы по умолчанию.</p>{runtime_block}<table><tr><th>id</th><th>Название / источник</th><th>Статус</th><th>Ошибки</th><th>Последняя ошибка</th><th>Последний успех</th><th>Следующий запуск</th><th>Интервал, сек</th><th>Технические действия</th></tr>{''.join(rows)}</table>")
+    technical_links = (f"<p><a href='{_admin_url('/admin/searches/new', api_key)}'>New search</a> · <a href='{_admin_url('/admin/alerts', api_key)}'>Alerts</a> · <a href='{_admin_url('/admin/listings', api_key)}'>Listings</a> · <a href='{_admin_url('/admin/listing-analyses', api_key)}'>Listing analyses</a></p>" if settings.admin_ui_technical_ops_enabled else "")
+    return _render_page("Поиски", f"<h1>Поиски</h1>{notice}<p class='preview'>Технические операции скрыты и заблокированы по умолчанию.</p>{technical_links}{runtime_block}<table><tr><th>id</th><th>Название / источник</th><th>Статус</th><th>Ошибки</th><th>Последняя ошибка</th><th>Последний успех</th><th>Следующий запуск</th><th>Интервал, сек</th><th>Технические действия</th></tr>{''.join(rows)}</table>")
 
 
 @router.get('/alerts', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
