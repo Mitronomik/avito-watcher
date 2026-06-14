@@ -281,7 +281,7 @@ listings 1520 -> 1521
 alerts_sent 2860 -> 2862
 ```
 
-The final clean read-only smoke was repeated with the worker stopped before the no-side-effects check:
+The final clean read-only GET smoke was repeated with the worker stopped for the baseline and GET-page checks:
 
 ```text
 docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile worker stop worker
@@ -332,7 +332,7 @@ No DB side effects from PR19a GET admin pages.
 PR19a production smoke: CLOSED.
 ```
 
-Worker was restarted after the final smoke:
+Worker was restarted after the final GET-page smoke. A post-GET SQL count was then captured and remained identical to the clean baseline.
 
 ```text
 docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile worker up -d worker
