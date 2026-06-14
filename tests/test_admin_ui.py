@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.core.config import settings
+from app.admin import redact_admin_json, redact_admin_value
 from app.db.base import Base
 from app.main import create_app
 from app.models.listing import Listing
@@ -27,7 +28,16 @@ def test_create_app_with_admin_enabled_includes_admin_routes():
     assert any(route.path == "/admin/searches" for route in app.routes)
 
 
-def make_client(monkeypatch):
+def test_admin_root_disabled_and_enabled_with_header_key(monkeypatch):
+    monkeypatch.setattr(settings, "api_key", "secret")
+    disabled_app = create_app(admin_ui_enabled=False)
+    assert TestClient(disabled_app).get("/admin", headers={"X-API-Key": "secret"}).status_code == 404
+
+    enabled_app = create_app(admin_ui_enabled=True)
+    assert TestClient(enabled_app).get("/admin", headers={"X-API-Key": "secret"}).status_code == 200
+
+
+def make_client(monkeypatch, *, technical_ops_enabled: bool = True, allow_query_api_key: bool = True):
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -39,6 +49,8 @@ def make_client(monkeypatch):
             yield s
 
     monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "admin_ui_technical_ops_enabled", technical_ops_enabled)
+    monkeypatch.setattr(settings, "admin_ui_allow_query_api_key", allow_query_api_key)
     test_app = create_app(admin_ui_enabled=True)
     test_app.dependency_overrides[db_session_module.get_db] = override_db
     return TestClient(test_app), Session
@@ -1130,11 +1142,11 @@ def test_listing_analyses_report_detail_pre_blocks(monkeypatch):
     assert '<details>' in page
     assert '<h4>report_md</h4><pre>### Detailed report' in page
     assert 'Line &amp; more' in page
-    assert '<h4>facts_json</h4><pre>' in page
+    assert '<h4>facts</h4><pre>' in page
     assert '&quot;price&quot;: 100' in page
-    assert '<h4>risks_json</h4><pre>' in page
+    assert '<h4>risks</h4><pre>' in page
     assert '&quot;flood&quot;: false' in page
-    assert '<h4>questions_json</h4><pre>' in page
+    assert '<h4>questions</h4><pre>' in page
     assert 'why selling?' in page
 
 
@@ -1230,3 +1242,44 @@ def test_listing_analyses_page_is_read_only_and_has_no_runtime_side_effects(monk
     assert '>edit<' not in page.lower()
     assert '>run once<' not in page.lower()
     assert 'does not execute, edit, delete, or re-run analyses' in page
+
+
+def test_pr19a_operator_dashboard_and_technical_ops_default(monkeypatch):
+    client, Session = make_client(monkeypatch, technical_ops_enabled=False, allow_query_api_key=False)
+    create_job(Session, name="safe_shell")
+
+    page = client.get("/admin").text
+    assert "Панель оператора" in page
+    assert "filters_json" not in page
+    assert "payload_json" not in page
+    assert "input_hash" not in page
+    assert "api_key=" not in page
+
+    searches_page = client.get("/admin/searches").text
+    assert "safe_shell" in searches_page
+    assert "Технические действия выключены" in searches_page
+    assert "<button>run once</button>" not in searches_page
+    assert "api_key=" not in searches_page
+
+    assert client.get("/admin/searches/new").status_code == 403
+    assert client.get("/admin/searches/1/edit").status_code == 403
+    assert client.post("/admin/searches").status_code == 403
+    assert client.post("/admin/searches/1", data={"name": "safe_shell", "source_url": "https://www.avito.ru/a", "poll_interval_sec": "1"}).status_code == 403
+    assert client.post("/admin/searches/1/activate").status_code == 403
+    assert client.post("/admin/searches/1/deactivate").status_code == 403
+    assert client.post("/admin/searches/1/reset-baseline").status_code == 403
+    assert client.post("/admin/searches/1/run-once").status_code == 403
+
+
+def test_pr19a_query_api_key_disabled_by_default(monkeypatch):
+    client, _ = make_client(monkeypatch, allow_query_api_key=False)
+    monkeypatch.setattr(settings, "api_key", "secret")
+    assert client.get("/admin?api_key=secret").status_code == 403
+    assert client.get("/admin", headers={"X-API-Key": "secret"}).status_code == 200
+
+
+def test_pr19a_redaction_helpers():
+    assert redact_admin_value("secret", "telegram_bot_token") == "[redacted]"
+    rendered = redact_admin_json({"smtp_password": "secret", "url": "https://script.google.com/macros/s/abc/exec"})
+    assert "secret" not in rendered
+    assert "https://script.google.com/.../exec" in rendered

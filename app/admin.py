@@ -29,20 +29,127 @@ FRESHNESS_PRESETS = {"12": 12.0, "24": 24.0, "48": 48.0, "72": 72.0}
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 router = APIRouter(prefix="/admin", tags=["admin"])
 
+UI_TEXT = {
+    "ru": {
+        "nav.dashboard": "Панель", "nav.listings": "Объекты", "nav.searches": "Поиски",
+        "nav.alerts": "Уведомления", "nav.analyses": "Анализы", "nav.system": "Состояние",
+        "nav.technical": "Технический режим", "dashboard.title": "Панель оператора",
+        "no_data": "Нет данных", "technical.details": "Технические детали",
+    },
+    "en": {
+        "nav.dashboard": "Dashboard", "nav.listings": "Listings", "nav.searches": "Searches",
+        "nav.alerts": "Alerts", "nav.analyses": "Analyses", "nav.system": "System status",
+        "nav.technical": "Technical mode", "dashboard.title": "Operator dashboard",
+        "no_data": "No data", "technical.details": "Technical details",
+    },
+}
+_SECRET_KEY_RE = re.compile(r"(key|token|secret|password|webhook|authorization|api_key|smtp_password|telegram_bot_token|google_sheets_webhook_secret)", re.I)
+
+def _lang() -> str:
+    return settings.admin_ui_language if settings.admin_ui_language in UI_TEXT else "ru"
+
+def _t(key: str) -> str:
+    return UI_TEXT.get(_lang(), UI_TEXT["ru"]).get(key, UI_TEXT["en"].get(key, key))
+
+def truncate_admin_text(value: object, limit: int = 500) -> str:
+    text = str(value or "")
+    return text if len(text) <= limit else f"{text[: max(0, limit - 1)]}…"
+
+def redact_admin_value(value: object, key: str = "") -> str:
+    if _SECRET_KEY_RE.search(key or ""):
+        return "[redacted]"
+    text = str(value or "")
+    if "script.google.com" in text:
+        return "https://script.google.com/.../exec"
+    return truncate_admin_text(text, 500)
+
+def _redact_obj(value: object, key: str = "") -> object:
+    if isinstance(value, dict):
+        return {str(k): _redact_obj(v, str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_obj(v, key) for v in value[:50]]
+    if _SECRET_KEY_RE.search(key or ""):
+        return "[redacted]"
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return redact_admin_value(value, key)
+
+def redact_admin_json(value: object) -> str:
+    return html.escape(json.dumps(_redact_obj(value or {}), ensure_ascii=False, indent=2, sort_keys=True))
+
+def display_boolean(value: object, lang: str | None = None) -> str:
+    ru = (lang or _lang()) == "ru"
+    return ("Да" if value else "Нет") if ru else ("Yes" if value else "No")
+
+def _display_mapped(value: object, mapping: dict[str, str], lang: str | None = None) -> str:
+    text = str(value or "")
+    if not text:
+        return "—"
+    if text in mapping:
+        return mapping[text]
+    prefix = "Неизвестный статус" if (lang or _lang()) == "ru" else "Unknown status"
+    return f"{prefix}: {html.escape(text)}"
+
+def display_verdict(value: object, lang: str | None = None) -> str:
+    return _display_mapped(value, {"strong": "Интересно", "review": "Нужно проверить", "weak": "Слабый объект", "reject": "Отклонено", "error": "Ошибка"}, lang)
+
+def display_review_status(value: object, lang: str | None = None) -> str:
+    return _display_mapped(value, {"needs_review": "Требует проверки", "approved": "Одобрено", "rejected": "Отклонено", "false_positive": "Ложное срабатывание"}, lang)
+
+def display_outcome_status(value: object, lang: str | None = None) -> str:
+    return display_review_status(value, lang)
+
+def display_risk_flag(value: object, lang: str | None = None) -> str:
+    return _display_mapped(value, {"missing_area": "Не указана площадь", "stale_publication": "Объявление может быть старым", "suspicious_low_price_per_m2": "Подозрительно низкая цена за м²", "market_evidence_used": "Использованы рыночные ориентиры"}, lang)
+
+def display_money(value: object) -> str:
+    return "—" if value in (None, "") else f"{value} ₽"
+
+def display_area(value: object) -> str:
+    return "—" if value in (None, "") else f"{value} м²"
+
+def display_datetime(value: object) -> str:
+    return "—" if not value else html.escape(str(value))
+
+
+def _configured_read_key() -> str:
+    return settings.admin_ui_read_key or settings.admin_ui_write_key or settings.admin_ui_technical_write_key or settings.api_key
+
+def _configured_write_key() -> str:
+    return settings.admin_ui_write_key or settings.admin_ui_read_key or settings.api_key
+
+def _configured_technical_key() -> str:
+    return settings.admin_ui_technical_write_key or settings.admin_ui_write_key or settings.api_key
+
+def _request_key_ok(key_header: str | None, api_key_qs: str | None, expected: str) -> bool:
+    if not expected:
+        return True
+    if key_header == expected:
+        return True
+    return bool(settings.admin_ui_allow_query_api_key and api_key_qs == expected)
 
 def _require_admin_api_key(
     key_header: str | None = Security(_api_key_header),
     api_key_qs: str | None = Query(default=None, alias="api_key"),
 ) -> None:
-    if not settings.api_key:
+    expected = _configured_read_key()
+    if _request_key_ok(key_header, api_key_qs, expected):
         return
-    if key_header == settings.api_key or api_key_qs == settings.api_key:
-        return
-    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key")
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid admin key")
 
+def _require_technical_write(
+    key_header: str | None = Security(_api_key_header),
+    api_key_qs: str | None = Query(default=None, alias="api_key"),
+) -> None:
+    if not settings.admin_ui_technical_ops_enabled:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Technical operations are disabled")
+    expected = _configured_technical_key()
+    if _request_key_ok(key_header, api_key_qs, expected):
+        return
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid technical admin key")
 
 def _admin_url(path: str, api_key: str | None) -> str:
-    if not api_key:
+    if not api_key or not settings.admin_ui_allow_query_api_key:
         return path
     return _append_query_param(path, "api_key", api_key)
 
@@ -121,12 +228,13 @@ def _keywords(value: str) -> list[str] | None:
     return items or None
 
 
+def _admin_nav() -> str:
+    links = [("/admin", "nav.dashboard"), ("/admin/listings", "nav.listings"), ("/admin/searches", "nav.searches"), ("/admin/alerts", "nav.alerts"), ("/admin/listing-analyses", "nav.analyses"), ("/admin/technical", "nav.technical")]
+    return "<nav>" + " · ".join(f"<a href='{href}'>{html.escape(_t(key))}</a>" for href, key in links) + "</nav>"
+
 def _render_page(title: str, body: str) -> HTMLResponse:
     return HTMLResponse(f"""<!doctype html><html><head><meta charset='utf-8'><title>{html.escape(title)}</title>
-<style>body{{font-family:Arial,sans-serif;max-width:1100px;margin:1rem auto;padding:0 1rem}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccc;padding:.4rem;vertical-align:top}}input,textarea,select{{width:100%;padding:.35rem}}.row{{margin:.4rem 0}}.section{{border:1px solid #dfe3e8;border-radius:.4rem;padding:.7rem .8rem;margin:.7rem 0;background:#fafbfc}}.section h3{{margin:.1rem 0 .6rem 0}}.checkbox input{{width:auto;margin-right:.35rem}}.actions form{{display:inline-block;margin:.1rem}}.note{{background:#fff7d6;padding:.5rem;border:1px solid #e2c86f}}.error{{background:#ffdede;padding:.5rem;border:1px solid #d66}}.badge{{display:inline-block;padding:.12rem .4rem;border-radius:.35rem;font-size:.8rem;font-weight:600;margin:.08rem .15rem .08rem 0}}.badge-green{{background:#d9f7e6;color:#115c36;border:1px solid #94d6b1}}.badge-yellow{{background:#fff6d6;color:#745700;border:1px solid #f2d37c}}.badge-red{{background:#ffe1e1;color:#7a1212;border:1px solid #f2a5a5}}.badge-gray{{background:#eceef1;color:#3d4954;border:1px solid #c9ced4}}.preview{{font-size:.88rem;word-break:break-all}}code{{font-size:.84rem}}</style></head><body>{body}</body></html>""")
-
-
-
+<style>body{{font-family:Arial,sans-serif;max-width:1200px;margin:1rem auto;padding:0 1rem;color:#17202a}}nav{{padding:.7rem 0;margin-bottom:1rem;border-bottom:1px solid #dfe3e8}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccc;padding:.4rem;vertical-align:top}}input,textarea,select{{width:100%;padding:.35rem}}.row{{margin:.4rem 0}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:.7rem}}.card,.section{{border:1px solid #dfe3e8;border-radius:.4rem;padding:.7rem .8rem;margin:.7rem 0;background:#fafbfc}}.section h3{{margin:.1rem 0 .6rem 0}}.checkbox input{{width:auto;margin-right:.35rem}}.actions form{{display:inline-block;margin:.1rem}}.note{{background:#fff7d6;padding:.5rem;border:1px solid #e2c86f}}.error{{background:#ffdede;padding:.5rem;border:1px solid #d66}}.badge{{display:inline-block;padding:.12rem .4rem;border-radius:.35rem;font-size:.8rem;font-weight:600;margin:.08rem .15rem .08rem 0}}.badge-green{{background:#d9f7e6;color:#115c36;border:1px solid #94d6b1}}.badge-yellow{{background:#fff6d6;color:#745700;border:1px solid #f2d37c}}.badge-red{{background:#ffe1e1;color:#7a1212;border:1px solid #f2a5a5}}.badge-gray{{background:#eceef1;color:#3d4954;border:1px solid #c9ced4}}.preview{{font-size:.88rem;word-break:break-all;color:#53606b}}code{{font-size:.84rem}}</style></head><body>{_admin_nav()}{body}</body></html>""")
 
 def _render_worker_cycle_status() -> str:
     status = read_worker_status(settings.monitor_worker_status_path)
@@ -351,6 +459,48 @@ def _extract_filters(form: dict[str, str], require_published_at: bool) -> dict:
     return out
 
 
+@router.get("", response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
+def dashboard(db: Session = Depends(get_db)):
+    def count(model):
+        try:
+            return str(db.query(model).count())
+        except Exception:
+            return _t("no_data")
+    cards = [
+        ("Новые объекты", count(Listing)),
+        ("Требуют решения", _t("no_data")),
+        ("Интересные объекты", count(ListingAnalysis)),
+        ("Отправлены эксперту", _t("no_data")),
+        ("Отклонены", _t("no_data")),
+        ("Ошибки мониторинга", _t("no_data")),
+    ]
+    cards_html = "".join(f"<div class='card'><h3>{html.escape(k)}</h3><p>{html.escape(v)}</p></div>" for k, v in cards)
+    body = (
+        f"<h1>{html.escape(_t('dashboard.title'))}</h1>"
+        "<p>Операторская панель показывает состояние системы без изменения данных.</p>"
+        f"<h2>Сегодня</h2><div class='cards'>{cards_html}</div>"
+        "<h2>Быстрые переходы</h2><p><a href='/admin/listings'>Объекты</a> · <a href='/admin/searches'>Поиски</a> · "
+        "<a href='/admin/alerts'>Уведомления</a> · <a href='/admin/technical'>Состояние системы и технический режим</a></p>"
+    )
+    return _render_page(_t('dashboard.title'), body)
+
+
+@router.get("/technical", response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
+def technical():
+    ops = display_boolean(settings.admin_ui_technical_ops_enabled)
+    body = (
+        "<h1>Технический режим</h1>"
+        "<div class='note'>Эти действия могут изменить поведение мониторинга. Используйте только если понимаете эффект.</div>"
+        f"<p><strong>Technical operations:</strong> {ops}<br>"
+        f"<strong>Admin mode:</strong> {html.escape(settings.admin_ui_mode)}<br>"
+        f"<strong>Language:</strong> {html.escape(_lang())}</p>"
+        + ("<p>Технические действия выключены. Чтобы включить, установите <code>ADMIN_UI_TECHNICAL_OPS_ENABLED=true</code>.</p>" if not settings.admin_ui_technical_ops_enabled else "<p>Технические действия включены.</p>")
+        + f"<section class='section'><h2>Состояние worker</h2>{_render_worker_cycle_status()}</section>"
+        "<p><a href='/admin/searches'>Поиски и технические операции поиска</a> · <a href='/admin/listing-analyses'>Список анализов</a></p>"
+    )
+    return _render_page('Технический режим', body)
+
+
 @router.get("/searches", response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
 def searches(request: Request, db: Session = Depends(get_db)):
     api_key = request.query_params.get("api_key")
@@ -377,8 +527,20 @@ def searches(request: Request, db: Session = Depends(get_db)):
             if s.source_url
             else ""
         )
+        if settings.admin_ui_technical_ops_enabled:
+            toggle_action = 'deactivate' if s.is_active else 'activate'
+            toggle_label = 'deactivate' if s.is_active else 'activate'
+            action_html = (
+                f"<details><summary>Technical actions</summary><div class='note'>These actions can change monitoring behavior. Use only if you understand the effect.</div>"
+                f"<code>python3 -m app.cli run-once --search-id {s.id}</code><br><a href='{_admin_url(f'/admin/searches/{s.id}/edit', api_key)}'>edit</a> {open_avito}"
+                f"<form method='post' action='{_admin_url(f'/admin/searches/{s.id}/' + toggle_action, api_key)}'><button>{toggle_label}</button></form>"
+                f"<form method='post' action='{_admin_url(f'/admin/searches/{s.id}/reset-baseline', api_key)}'><button>reset baseline</button></form>"
+                f"<form method='post' action='{_admin_url(f'/admin/searches/{s.id}/run-once', api_key)}'><button>run once</button></form></details>"
+            )
+        else:
+            action_html = "<span class='preview'>Технические действия выключены</span>"
         rows.append(
-            f"<tr><td>{s.id}</td><td>{html.escape(s.name)}<div class='preview'>{source_url_preview}</div></td><td>{html.escape(str((s.filters_json or {}).get('human_title','')))}</td><td>{status_badges}</td><td>{s.fail_count}</td><td class='preview'>{last_error_preview}</td><td>{s.last_success_at or ''}</td><td>{next_run_cell}</td><td>{s.poll_interval_sec}</td><td><code>python3 -m app.cli run-once --search-id {s.id}</code></td><td class='actions'><a href='{_admin_url(f'/admin/searches/{s.id}/edit', api_key)}'>edit</a> {open_avito}<form method='post' action='{_admin_url(f'/admin/searches/{s.id}/{"deactivate" if s.is_active else "activate"}', api_key)}'><button>{'deactivate' if s.is_active else 'activate'}</button></form><form method='post' action='{_admin_url(f'/admin/searches/{s.id}/reset-baseline', api_key)}'><button>reset baseline</button></form><form method='post' action='{_admin_url(f'/admin/searches/{s.id}/run-once', api_key)}'><button>run once</button></form></td></tr>"
+            f"<tr><td>{s.id}</td><td>{html.escape(str((s.filters_json or {}).get('human_title') or s.name))}<div class='preview'>technical name: {html.escape(s.name)} · {source_url_preview}</div></td><td>{status_badges}</td><td>{s.fail_count}</td><td class='preview'>{last_error_preview}</td><td>{display_datetime(s.last_success_at)}</td><td>{next_run_cell}</td><td>{s.poll_interval_sec}</td><td class='actions'>{action_html}</td></tr>"
         )
     notice = ""
     if request.query_params.get("saved") == "1":
@@ -433,7 +595,8 @@ def searches(request: Request, db: Session = Depends(get_db)):
         f"<strong>Last success:</strong> {html.escape(str(last_success or '—'))}<br>"
         f"<strong>Last error:</strong> {html.escape(recent_error)}</p></section>"
     )
-    return _render_page("Searches", f"<h1>Searches</h1>{notice}<p><a href='{_admin_url('/admin/searches/new', api_key)}'>New search</a> · <a href='{_admin_url('/admin/alerts', api_key)}'>Alerts</a> · <a href='{_admin_url('/admin/listings', api_key)}'>Listings</a> · <a href='{_admin_url('/admin/listing-analyses', api_key)}'>Listing analyses</a></p>{runtime_block}<table><tr><th>id</th><th>name / source</th><th>human_title</th><th>status</th><th>fail_count</th><th>last_error</th><th>last_success_at</th><th>next_run_at</th><th>poll_interval_sec</th><th>cli</th><th>actions</th></tr>{''.join(rows)}</table>")
+    technical_links = (f"<p><a href='{_admin_url('/admin/searches/new', api_key)}'>New search</a> · <a href='{_admin_url('/admin/alerts', api_key)}'>Alerts</a> · <a href='{_admin_url('/admin/listings', api_key)}'>Listings</a> · <a href='{_admin_url('/admin/listing-analyses', api_key)}'>Listing analyses</a></p>" if settings.admin_ui_technical_ops_enabled else "")
+    return _render_page("Поиски", f"<h1>Поиски</h1>{notice}<p class='preview'>Технические операции скрыты и заблокированы по умолчанию.</p>{technical_links}{runtime_block}<table><tr><th>id</th><th>Название / источник</th><th>Статус</th><th>Ошибки</th><th>Последняя ошибка</th><th>Последний успех</th><th>Следующий запуск</th><th>Интервал, сек</th><th>Технические действия</th></tr>{''.join(rows)}</table>")
 
 
 @router.get('/alerts', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
@@ -462,7 +625,7 @@ def alerts(request: Request, limit: int = Query(default=50), search_name: str | 
     current_limit = _html_attr(effective_limit)
     current_search = _html_attr(normalized_search_name)
     body = (
-        f"<h1>Alerts</h1><p><a href='{_html_attr(_admin_url('/admin/searches', api_key))}'>Back to searches</a> · <a href='{_html_attr(_admin_url('/admin/listings', api_key))}'>Listings</a> · <a href='{_html_attr(_admin_url('/admin/listing-analyses', api_key))}'>Listing analyses</a></p>"
+        f"<h1>История уведомлений</h1><p><a href='{_html_attr(_admin_url('/admin/searches', api_key))}'>Back to searches</a> · <a href='{_html_attr(_admin_url('/admin/listings', api_key))}'>Listings</a> · <a href='{_html_attr(_admin_url('/admin/listing-analyses', api_key))}'>Listing analyses</a></p>"
         f"<p>JSONL file: <code>{html.escape(settings.jsonl_outbox_path)}</code></p>"
         f"<p>Visible: {len(rows_data)} / Loaded: {total_loaded}</p>{warning}"
         f"<form method='get' action='{_html_attr(form_action)}'><input type='hidden' name='api_key' value='{_html_attr(api_key)}'>"
@@ -475,7 +638,7 @@ def alerts(request: Request, limit: int = Query(default=50), search_name: str | 
 
 
 def _json_pre(value: object) -> str:
-    return html.escape(json.dumps(value or {}, ensure_ascii=False, indent=2, sort_keys=True))
+    return redact_admin_json(value)
 
 
 @router.get('/listing-analyses', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
@@ -541,11 +704,11 @@ def listing_analyses(
                 f"<div>{html.escape(listing.address or '')}</div>{listing_link}"
             )
         details = (
-            "<details><summary>report / details</summary>"
+            "<details><summary>Technical details</summary>"
             f"<h4>report_md</h4><pre>{html.escape(analysis.report_md or '')}</pre>"
-            f"<h4>facts_json</h4><pre>{_json_pre(analysis.facts_json)}</pre>"
-            f"<h4>risks_json</h4><pre>{_json_pre(analysis.risks_json)}</pre>"
-            f"<h4>questions_json</h4><pre>{_json_pre(analysis.questions_json)}</pre>"
+            f"<h4>facts</h4><pre>{_json_pre(analysis.facts_json)}</pre>"
+            f"<h4>risks</h4><pre>{_json_pre(analysis.risks_json)}</pre>"
+            f"<h4>questions</h4><pre>{_json_pre(analysis.questions_json)}</pre>"
             f"<h4>error</h4><pre>error_type: {html.escape(analysis.error_type or '')}\nerror_message: {html.escape(analysis.error_message or '')}</pre>"
             "</details>"
         )
@@ -619,12 +782,12 @@ def listings(request: Request, db: Session = Depends(get_db), limit: int = Query
             f"<td>{html.escape(item.published_label or '')}</td><td>{html.escape(str(item.first_seen_at or ''))}</td><td>{html.escape(str(item.last_seen_at or ''))}</td><td>{open_link}</td></tr>"
         )
     empty = '<p>No listings found yet.</p>' if not rows else ''
-    table = '' if not rows else f"<table><tr><th>id</th><th>external_id</th><th>title</th><th>price</th><th>area_m2</th><th>address</th><th>published_label</th><th>first_seen_at</th><th>last_seen_at</th><th>url</th></tr>{''.join(rows)}</table>"
+    table = '' if not rows else f"<table><tr><th>id</th><th>external_id</th><th>Title</th><th>Price</th><th>Area</th><th>Address</th><th>Publication</th><th>First seen</th><th>Last seen</th><th>Open source</th></tr>{''.join(rows)}</table>"
     form_action = _admin_url('/admin/listings', api_key)
     current_q = _html_attr(query_text)
     current_limit = _html_attr(effective_limit)
     body = (
-        f"<h1>Listings</h1><p><a href='{_html_attr(_admin_url('/admin/searches', api_key))}'>Back to searches</a> · <a href='{_html_attr(_admin_url('/admin/alerts', api_key))}'>Alerts</a> · <a href='{_html_attr(_admin_url('/admin/listing-analyses', api_key))}'>Listing analyses</a></p>"
+        f"<h1>Объекты</h1><p><a href='{_html_attr(_admin_url('/admin/searches', api_key))}'>Back to searches</a> · <a href='{_html_attr(_admin_url('/admin/alerts', api_key))}'>Alerts</a> · <a href='{_html_attr(_admin_url('/admin/listing-analyses', api_key))}'>Listing analyses</a></p>"
         f"<form method='get' action='{_html_attr(form_action)}'><input type='hidden' name='api_key' value='{_html_attr(api_key)}'>"
         f"<div class='row'><label>q<input name='q' value='{current_q}'></label></div>"
         f"<div class='row'><label>published<select name='published'>"
@@ -639,12 +802,14 @@ def listings(request: Request, db: Session = Depends(get_db), limit: int = Query
 
 @router.get('/searches/new', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
 def new_search_form(request: Request):
+    if not settings.admin_ui_technical_ops_enabled:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Technical operations are disabled')
     api_key = request.query_params.get("api_key")
     return_url = _extract_return_url(request) or _admin_url('/admin/searches', api_key)
     return _render_page('New search', f"<h1>New search</h1><form method='post' action='{_admin_url('/admin/searches', api_key)}'>{_job_form(return_url=return_url)}<button type='submit'>Create</button></form>")
 
 
-@router.post('/searches', dependencies=[Depends(_require_admin_api_key)])
+@router.post('/searches', dependencies=[Depends(_require_technical_write)])
 async def create_search(request: Request, db: Session = Depends(get_db)):
     api_key = request.query_params.get("api_key")
     form = await _parse_form(request)
@@ -681,6 +846,8 @@ async def create_search(request: Request, db: Session = Depends(get_db)):
 
 @router.get('/searches/{search_id}/edit', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
 def edit_form(search_id: int, request: Request, db: Session = Depends(get_db)):
+    if not settings.admin_ui_technical_ops_enabled:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Technical operations are disabled')
     api_key = request.query_params.get("api_key")
     job = SearchRepository(db).get(search_id)
     if job is None:
@@ -689,7 +856,7 @@ def edit_form(search_id: int, request: Request, db: Session = Depends(get_db)):
     return _render_page('Edit search', f"<h1>Edit search #{search_id}</h1><form method='post' action='{_admin_url(f'/admin/searches/{search_id}', api_key)}'>{_job_form(job, return_url=return_url)}<button type='submit'>Save</button></form>")
 
 
-@router.post('/searches/{search_id}', dependencies=[Depends(_require_admin_api_key)])
+@router.post('/searches/{search_id}', dependencies=[Depends(_require_technical_write)])
 async def update_search(search_id: int, request: Request, db: Session = Depends(get_db)):
     api_key = request.query_params.get("api_key")
     repo = SearchRepository(db)
@@ -732,7 +899,7 @@ async def update_search(search_id: int, request: Request, db: Session = Depends(
     return _success_redirect(request, api_key, 'updated', form=form)
 
 
-@router.post('/searches/{search_id}/activate', dependencies=[Depends(_require_admin_api_key)])
+@router.post('/searches/{search_id}/activate', dependencies=[Depends(_require_technical_write)])
 def activate(search_id: int, request: Request, db: Session = Depends(get_db)):
     api_key = request.query_params.get("api_key")
     job = SearchRepository(db).get(search_id)
@@ -743,7 +910,7 @@ def activate(search_id: int, request: Request, db: Session = Depends(get_db)):
     return _success_redirect(request, api_key, 'updated')
 
 
-@router.post('/searches/{search_id}/deactivate', dependencies=[Depends(_require_admin_api_key)])
+@router.post('/searches/{search_id}/deactivate', dependencies=[Depends(_require_technical_write)])
 def deactivate(search_id: int, request: Request, db: Session = Depends(get_db)):
     api_key = request.query_params.get("api_key")
     job = SearchRepository(db).get(search_id)
@@ -754,7 +921,7 @@ def deactivate(search_id: int, request: Request, db: Session = Depends(get_db)):
     return _success_redirect(request, api_key, 'updated')
 
 
-@router.post('/searches/{search_id}/reset-baseline', dependencies=[Depends(_require_admin_api_key)])
+@router.post('/searches/{search_id}/reset-baseline', dependencies=[Depends(_require_technical_write)])
 def reset_baseline(search_id: int, request: Request, db: Session = Depends(get_db)):
     api_key = request.query_params.get("api_key")
     job = SearchRepository(db).get(search_id)
@@ -767,7 +934,7 @@ def reset_baseline(search_id: int, request: Request, db: Session = Depends(get_d
     return _success_redirect(request, api_key, 'updated')
 
 
-@router.post('/searches/{search_id}/run-once', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
+@router.post('/searches/{search_id}/run-once', response_class=HTMLResponse, dependencies=[Depends(_require_technical_write)])
 def run_once(search_id: int, request: Request):
     api_key = request.query_params.get("api_key")
     parser_instance = _build_parser()
