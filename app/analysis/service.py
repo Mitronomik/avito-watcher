@@ -1,20 +1,27 @@
 import hashlib
 import inspect
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
 from app.analysis.config import AnalysisConfig
 from app.analysis.provider import AnalysisProvider, DeterministicAnalysisProvider
+from app.analysis.market_comps import (
+    market_evidence_fingerprint,
+    select_market_evidence,
+)
 from app.models.listing import Listing
 from app.models.listing_analysis import ListingAnalysis
 from app.models.listing_snapshot import ListingSnapshot
 from app.models.search_job import SearchJob
 from app.repositories.listing_analysis_repository import ListingAnalysisRepository
 from app.repositories.listing_repository import ListingRepository
-from app.repositories.listing_search_match_repository import ListingSearchMatchRepository
+from app.repositories.listing_search_match_repository import (
+    ListingSearchMatchRepository,
+)
 from app.repositories.search_repository import SearchRepository
+from app.repositories.market_evidence import MarketEvidenceRepository
 
 
 def _dt(value: datetime | None) -> str | None:
@@ -29,9 +36,10 @@ def build_analysis_input(
     analysis_version: str = "mock-v1",
     context_key: str = "global",
     config: AnalysisConfig | None = None,
+    market_evidence_fingerprint_payload: dict | None = None,
 ) -> dict:
     config = config or AnalysisConfig.from_search_filters(profile=profile)
-    return {
+    payload = {
         "profile": profile,
         "analysis_version": analysis_version,
         "context_key": context_key,
@@ -61,6 +69,9 @@ def build_analysis_input(
             "observed_at": _dt(snapshot.observed_at),
         },
     }
+    if market_evidence_fingerprint_payload is not None:
+        payload["market_evidence_fingerprint"] = market_evidence_fingerprint_payload
+    return payload
 
 
 def calculate_input_hash(
@@ -71,6 +82,7 @@ def calculate_input_hash(
     analysis_version: str = "mock-v1",
     context_key: str = "global",
     config: AnalysisConfig | None = None,
+    market_evidence_fingerprint_payload: dict | None = None,
 ) -> str:
     payload = build_analysis_input(
         listing,
@@ -79,6 +91,7 @@ def calculate_input_hash(
         analysis_version=analysis_version,
         context_key=context_key,
         config=config,
+        market_evidence_fingerprint_payload=market_evidence_fingerprint_payload,
     )
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -113,7 +126,9 @@ class ListingAnalysisService:
             analyses.append(self._analyze_existing_listing(listing))
         return analyses
 
-    def analyze_search_matches(self, search_job_id: int, limit: int) -> list[ListingAnalysis]:
+    def analyze_search_matches(
+        self, search_job_id: int, limit: int
+    ) -> list[ListingAnalysis]:
         context_key = f"search:{search_job_id}"
         config = self._config_for_search(search_job_id)
         analyses: list[ListingAnalysis] = []
@@ -213,9 +228,23 @@ class ListingAnalysisService:
         snapshot = self.analysis_repo.get_latest_snapshot_for_listing(
             listing.external_id
         )
-        config = config or AnalysisConfig.from_search_filters(profile=self.provider.profile)
+        config = config or AnalysisConfig.from_search_filters(
+            profile=self.provider.profile
+        )
+        evidence_context = self._select_market_evidence_context(
+            listing=listing, config=config
+        )
+        evidence_fp = (
+            market_evidence_fingerprint(evidence_context)
+            if evidence_context is not None
+            else None
+        )
         input_hash = self._calculate_current_input_hash(
-            listing=listing, snapshot=snapshot, context_key=context_key, config=config
+            listing=listing,
+            snapshot=snapshot,
+            context_key=context_key,
+            config=config,
+            market_evidence_fingerprint_payload=evidence_fp,
         )
         analysis = self.analysis_repo.create_or_update_analysis(
             listing_external_id=listing.external_id,
@@ -237,8 +266,11 @@ class ListingAnalysisService:
                 "snapshot": snapshot,
                 "input_hash": input_hash,
             }
-            if "config" in inspect.signature(self.provider.analyze).parameters:
+            sig = inspect.signature(self.provider.analyze).parameters
+            if "config" in sig:
                 analyze_kwargs["config"] = config
+            if "market_evidence_context" in sig:
+                analyze_kwargs["market_evidence_context"] = evidence_context
             result = self.provider.analyze(**analyze_kwargs)
         except Exception as exc:
             self.analysis_repo.mark_failed(
@@ -268,10 +300,20 @@ class ListingAnalysisService:
         context_key: str,
         config: AnalysisConfig,
         snapshot: ListingSnapshot | None = None,
+        market_evidence_fingerprint_payload: dict | None = None,
     ) -> str:
         if snapshot is None:
             snapshot = self.analysis_repo.get_latest_snapshot_for_listing(
                 listing.external_id
+            )
+        if market_evidence_fingerprint_payload is None:
+            evidence_context = self._select_market_evidence_context(
+                listing=listing, config=config
+            )
+            market_evidence_fingerprint_payload = (
+                market_evidence_fingerprint(evidence_context)
+                if evidence_context is not None
+                else None
             )
         return calculate_input_hash(
             listing,
@@ -280,8 +322,37 @@ class ListingAnalysisService:
             analysis_version=self.provider.analysis_version,
             context_key=context_key,
             config=config,
+            market_evidence_fingerprint_payload=market_evidence_fingerprint_payload,
         )
 
+    def _select_market_evidence_context(
+        self, *, listing: Listing, config: AnalysisConfig
+    ):
+        if config.use_market_evidence is not True or self.provider.profile not in {
+            "commercial_sale_investment",
+            "flat_sale_investment",
+        }:
+            return None
+        as_of = datetime.now(UTC)
+        candidates = MarketEvidenceRepository(self.db).retrieve_items(
+            listing_external_id=listing.external_id,
+            evidence_types=["comparable_candidate"],
+            include_expired=True,
+            include_non_reusable=True,
+            limit=100,
+        )
+        expected_asset = (
+            "commercial"
+            if self.provider.profile == "commercial_sale_investment"
+            else "flat"
+        )
+        return select_market_evidence(
+            candidates=candidates,
+            config=config,
+            expected_asset_type=expected_asset,
+            evidence_retrieval_as_of_datetime=as_of,
+            evidence_retrieval_as_of_date=as_of.date(),
+        )
 
     def _config_for_search(self, search_job_id: int) -> AnalysisConfig:
         search = self.search_repo.get(search_job_id)

@@ -102,3 +102,11 @@ Default retrieval excludes expired, low-confidence, and non-reusable items and o
 8. Clean up temporary smoke rows.
 
 Rollback is the Alembic downgrade for `0013_market_evidence_storage`, which drops `market_evidence_items` and `market_research_runs`.
+
+## PR16 consumption by investment profiles
+
+PR16 consumes SQL-backed market evidence for investment scoring only when explicitly enabled with `use_market_evidence=true`. It does not create or mutate market research runs or evidence items, does not create agent tasks, and does not call external research, LLMs, `ResearchAgent`, embeddings, vector DB, GIS/geocoding, radius, fuzzy, or semantic matching during scoring.
+
+Cross-listing evidence reuse is not implemented. Selection always starts from evidence for the target `listing_external_id`; `market_evidence_location_key` only narrows within that same listing evidence set. Broad city-wide and location-level reuse are future scope.
+
+Eligible rent comps are reusable `comparable_candidate` items for the same listing, matching the investment profile asset type (`commercial` or `flat`), with `deal_type=rent`, source URL, rent metric, confidence above the configured threshold, not expired, and checked within the configured max age. The selected evidence fingerprint is included in the analysis `input_hash`, so selected evidence changes churn the hash while unrelated non-selected evidence does not.
