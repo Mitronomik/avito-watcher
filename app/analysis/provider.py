@@ -1324,7 +1324,6 @@ _INVESTMENT_PROFILE_META = {
             "Уточнить первоначальный CAPEX.",
             "Проверить отдельный вход, мокрую точку, вентиляцию, мощность.",
             "Проверить юридическую возможность целевого использования.",
-            "Проверить, что расчет не использует рыночные comps.",
         ],
     },
     "flat_sale_investment": {
@@ -1337,7 +1336,6 @@ _INVESTMENT_PROFILE_META = {
             "Уточнить ремонт/CAPEX перед сдачей.",
             "Уточнить вакантность между арендаторами.",
             "Проверить, что цена является ценой покупки.",
-            "Проверить, что расчет не использует рыночные comps.",
             "Проверить ликвидность локации и транспортную доступность вручную.",
         ],
     },
@@ -1577,6 +1575,17 @@ class InvestmentAnalysisProvider:
             cap = _strongest_verdict_cap(cap, "weak")
         verdict = _apply_verdict_cap(verdict, cap)
 
+        market_evidence_enabled = config.use_market_evidence is True
+        stored_market_evidence_selected = market_evidence_context is not None and bool(
+            market_evidence_context.items
+        )
+        market_evidence_used_as_rent_source = rent_source == "market_evidence"
+        market_evidence_used_for_comparison = (
+            config.estimated_monthly_rent is not None
+            and market_estimate is not None
+            and market_estimate.monthly_rent is not None
+        )
+
         facts = {
             "investment_profile": self.profile,
             "investment_metrics": {
@@ -1596,10 +1605,17 @@ class InvestmentAnalysisProvider:
                 ),
             },
             "manual_assumptions_only": config.use_market_evidence is not True,
-            "market_comps_used": rent_source == "market_evidence",
+            "market_evidence_enabled": market_evidence_enabled,
+            "stored_market_evidence_selected": stored_market_evidence_selected,
+            "market_evidence_used_as_rent_source": market_evidence_used_as_rent_source,
+            "market_evidence_used_for_comparison": market_evidence_used_for_comparison,
+            "market_comps_used": market_evidence_used_as_rent_source,
             "external_research_used": False,
             "live_external_research_used": False,
-            "stored_market_evidence_used": rent_source == "market_evidence",
+            "stored_market_evidence_used": (
+                market_evidence_used_as_rent_source
+                or market_evidence_used_for_comparison
+            ),
             "market_evidence_origin": "stored_external_research"
             if config.use_market_evidence is True
             else None,
@@ -1611,8 +1627,16 @@ class InvestmentAnalysisProvider:
             "threshold_basis": "gross and NOI thresholds compare against total initial outlay",
         }
         _add_analysis_config_facts(facts, config)
-        questions = {"items": self.base_questions}
         risks = {"flags": list(dict.fromkeys(flags))}
+        questions = {
+            "items": _investment_questions(
+                base_questions=self.base_questions,
+                market_evidence_enabled=market_evidence_enabled,
+                used_as_rent_source=market_evidence_used_as_rent_source,
+                used_for_comparison=market_evidence_used_for_comparison,
+                flags=risks["flags"],
+            )
+        }
         report = self._report(
             metrics.to_dict(),
             risks["flags"],
@@ -1620,6 +1644,9 @@ class InvestmentAnalysisProvider:
             purchase_source,
             purchase_confirmation,
             cap,
+            market_evidence_enabled=market_evidence_enabled,
+            used_as_rent_source=market_evidence_used_as_rent_source,
+            used_for_comparison=market_evidence_used_for_comparison,
         )
         return ListingAnalysisResult(
             score=score,
@@ -1640,17 +1667,41 @@ class InvestmentAnalysisProvider:
         source: str | None,
         confirmation: bool,
         cap: str | None,
+        *,
+        market_evidence_enabled: bool,
+        used_as_rent_source: bool,
+        used_for_comparison: bool,
     ) -> str:
         warning = (
             " Listing price was used as purchase price because the operator explicitly allowed it; human confirmation is required."
             if confirmation
             else ""
         )
+        if used_as_rent_source:
+            evidence_line = (
+                "Deterministic v0 analysis: stored SQL-backed market evidence was used as rent source. "
+                "It uses no LLM, no ResearchAgent, and no live external calls during scoring."
+            )
+        elif used_for_comparison:
+            evidence_line = (
+                "Deterministic v0 analysis: manual rent remained primary and stored market evidence was used for comparison. "
+                "It uses no LLM, no ResearchAgent, and no live external calls during scoring."
+            )
+        elif market_evidence_enabled:
+            evidence_line = (
+                "Deterministic v0 analysis had market evidence enabled, but no stored comps were used as the rent source. "
+                "It uses no LLM, no ResearchAgent, and no live external calls during scoring."
+            )
+        else:
+            evidence_line = (
+                "Deterministic v0 analysis uses manual assumptions only. It uses no comps, no LLM, "
+                "no ResearchAgent, and no live external calls during scoring."
+            )
         return "\n".join(
             [
                 f"# Investment analysis: {self.profile}",
                 "",
-                "Deterministic v0 analysis uses manual assumptions only. It uses no comps, no market research, no LLM, no RAG, and no agents.",
+                evidence_line,
                 "This is not an appraisal, not a market valuation, and not a buy/sell recommendation.",
                 f"Purchase price source: {source or 'missing'}.{warning}",
                 "Formulas: annual gross income = rent * 12; vacancy loss = gross * vacancy; NOI = effective gross income - opex; total outlay = purchase price + CAPEX; yields divide by price and total outlay; payback = total outlay / NOI.",
@@ -1664,14 +1715,63 @@ class InvestmentAnalysisProvider:
         )
 
 
+def _investment_questions(
+    *,
+    base_questions: list[str],
+    market_evidence_enabled: bool,
+    used_as_rent_source: bool,
+    used_for_comparison: bool,
+    flags: list[str],
+) -> list[str]:
+    questions = list(base_questions)
+    if not market_evidence_enabled:
+        questions.append(
+            "При необходимости вручную проверить рыночные арендные comps вне расчета."
+        )
+    elif used_as_rent_source:
+        questions.append(
+            "Проверить выбранные stored SQL-backed rent comps и их применимость к объекту."
+        )
+    elif used_for_comparison:
+        questions.append(
+            "Сравнить ручную арендную ставку с выбранными stored rent comps; ручная ставка остается основной."
+        )
+    else:
+        questions.append(
+            "Проверить, почему stored market evidence не дало достаточную арендную оценку."
+        )
+
+    weak_flags = {
+        "market_evidence_missing",
+        "insufficient_market_comps",
+        "single_market_comp",
+        "low_confidence_market_comps",
+        "missing_area_for_market_rent",
+        "unsupported_market_rent_strategy",
+    }
+    if weak_flags.intersection(flags):
+        questions.append(
+            "Провести ручную проверку рыночной аренды из-за слабых, недостаточных или неприменимых comps."
+        )
+    if "missing_area_for_market_rent" in flags:
+        questions.append(
+            "Уточнить площадь объекта, чтобы конвертировать rent-per-m2 comps в месячную аренду."
+        )
+    return list(dict.fromkeys(questions))
+
+
 def _market_evidence_facts(
     context: SelectedMarketEvidenceContext, estimate, manual_rent: float | None
 ) -> dict:
     facts = {
         "enabled": True,
-        "used": estimate is not None
+        "used": estimate is not None and estimate.monthly_rent is not None,
+        "used_as_rent_source": estimate is not None
         and estimate.monthly_rent is not None
         and manual_rent is None,
+        "used_for_comparison": estimate is not None
+        and estimate.monthly_rent is not None
+        and manual_rent is not None,
         "backend": "sql",
         "retrieval_as_of_date": context.retrieval_as_of_date.isoformat(),
         "market_rent_strategy": context.config.rent_strategy,

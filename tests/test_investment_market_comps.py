@@ -166,3 +166,112 @@ def test_missing_area_blocks_rent_per_m2_only(db_session):
     est = estimate_market_rent(context=ctx, area_m2=None)
     assert est.monthly_rent is None
     assert "missing_area_for_market_rent" in est.risk_flags
+
+
+def test_evidence_only_report_and_facts_explain_market_rent_source(db_session):
+    for v in (1000, 1200, 1400):
+        _item(db_session, rent_per_m2_rub=v, rent_rub_per_month=None)
+    cfg = AnalysisConfig.from_search_filters(
+        "commercial_sale_investment",
+        {
+            "use_market_evidence": True,
+            "investment_purchase_price": 1_000_000,
+            "asset_type": "commercial",
+            "deal_type": "sale",
+            "opex_ratio": 0.1,
+        },
+    )
+    ctx = select_market_evidence(
+        candidates=db_session.query(MarketEvidenceItem).all(),
+        config=cfg,
+        expected_asset_type="commercial",
+        evidence_retrieval_as_of_datetime=AS_OF,
+        evidence_retrieval_as_of_date=AS_OF.date(),
+    )
+    result = InvestmentAnalysisProvider("commercial_sale_investment").analyze(
+        listing=Listing(external_id="l1", title="x", area_m2=50),
+        snapshot=None,
+        input_hash="h",
+        config=cfg,
+        market_evidence_context=ctx,
+    )
+    assert "manual assumptions only" not in result.report_md
+    assert "uses no comps" not in result.report_md
+    assert (
+        "stored SQL-backed market evidence was used as rent source" in result.report_md
+    )
+    assert result.facts_json["market_evidence_used_as_rent_source"] is True
+    assert result.facts_json["market_evidence_used_for_comparison"] is False
+    assert result.facts_json["market_comps_used"] is True
+
+
+def test_manual_primary_report_questions_and_facts_show_comparison(db_session):
+    for rent in (50_000, 55_000, 60_000):
+        _item(db_session, rent_per_m2_rub=None, rent_rub_per_month=rent)
+    cfg = AnalysisConfig.from_search_filters(
+        "commercial_sale_investment",
+        {
+            "use_market_evidence": True,
+            "investment_purchase_price": 1_000_000,
+            "estimated_monthly_rent": 100_000,
+            "asset_type": "commercial",
+            "deal_type": "sale",
+            "opex_ratio": 0.1,
+        },
+    )
+    ctx = select_market_evidence(
+        candidates=db_session.query(MarketEvidenceItem).all(),
+        config=cfg,
+        expected_asset_type="commercial",
+        evidence_retrieval_as_of_datetime=AS_OF,
+        evidence_retrieval_as_of_date=AS_OF.date(),
+    )
+    result = InvestmentAnalysisProvider("commercial_sale_investment").analyze(
+        listing=Listing(external_id="l1", title="x", area_m2=50),
+        snapshot=None,
+        input_hash="h",
+        config=cfg,
+        market_evidence_context=ctx,
+    )
+    assert "manual rent remained primary" in result.report_md
+    assert "evidence was used for comparison" in result.report_md
+    assert result.facts_json["market_evidence_used_for_comparison"] is True
+    assert result.facts_json["market_evidence_used_as_rent_source"] is False
+    assert result.facts_json["market_comps_used"] is False
+    assert not any(
+        "расчет не использует рыночные comps" in question
+        for question in result.questions_json["items"]
+    )
+
+
+def test_insufficient_comps_adds_human_review_question(db_session):
+    _item(db_session, rent_per_m2_rub=None, rent_rub_per_month=50_000)
+    cfg = AnalysisConfig.from_search_filters(
+        "commercial_sale_investment",
+        {
+            "use_market_evidence": True,
+            "investment_purchase_price": 1_000_000,
+            "asset_type": "commercial",
+            "deal_type": "sale",
+            "opex_ratio": 0.1,
+        },
+    )
+    ctx = select_market_evidence(
+        candidates=db_session.query(MarketEvidenceItem).all(),
+        config=cfg,
+        expected_asset_type="commercial",
+        evidence_retrieval_as_of_datetime=AS_OF,
+        evidence_retrieval_as_of_date=AS_OF.date(),
+    )
+    result = InvestmentAnalysisProvider("commercial_sale_investment").analyze(
+        listing=Listing(external_id="l1", title="x", area_m2=50),
+        snapshot=None,
+        input_hash="h",
+        config=cfg,
+        market_evidence_context=ctx,
+    )
+    assert "insufficient_market_comps" in result.risks_json["flags"]
+    assert any(
+        "ручную проверку рыночной аренды" in question
+        for question in result.questions_json["items"]
+    )
