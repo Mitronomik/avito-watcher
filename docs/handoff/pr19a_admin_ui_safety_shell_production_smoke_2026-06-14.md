@@ -13,12 +13,10 @@ PR19a deploy: OK
 PR19a admin access smoke: OK
 PR19a technical write guards: OK
 PR19a worker smoke: OK
-PR19a final post-GET SQL no-side-effects check: pending in chat evidence
+PR19a final post-GET SQL no-side-effects check: CLOSED
 ```
 
-This handoff records the production evidence captured during the PR19a deployment and smoke.
-
-Important: the chat transcript includes a baseline SQL count before the successful `200` GET-page smoke, but the final SQL count after those successful GET requests was not included before this handoff was created. Do not mark the full no-side-effects smoke as completely closed until that post-GET SQL count is attached and matches the baseline.
+This handoff records the production evidence captured during the PR19a deployment and smoke. The final read-only GET smoke was repeated with the worker stopped, and post-GET SQL counts matched the baseline captured immediately before that clean check.
 
 ## Scope
 
@@ -245,7 +243,7 @@ Pages checked:
 /admin/technical
 ```
 
-## Baseline SQL counts captured before successful GET smoke
+## Initial baseline SQL counts captured before successful GET smoke
 
 Baseline counts captured during smoke:
 
@@ -274,16 +272,27 @@ select
   (select count(*) from investment_decisions) as investment_decisions;
 ```
 
-## Pending no-side-effects evidence
+## Final no-side-effects evidence
 
-The final post-GET SQL count after the successful `200` page checks was not present in the chat evidence before this handoff was created.
-
-To fully close PR19a production smoke, rerun the same SQL after successful GET page checks and confirm the values remain:
+The first no-side-effects check was inconclusive because the worker was still running during that smoke. The temporary count changes below were caused by normal worker activity, not by admin GET pages:
 
 ```text
-listings = 1520
+listings 1520 -> 1521
+alerts_sent 2860 -> 2862
+```
+
+The final clean read-only GET smoke was repeated with the worker stopped for the baseline and GET-page checks:
+
+```text
+docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile worker stop worker
+```
+
+Baseline counts before the final GET smoke:
+
+```text
+listings = 1521
 listing_analyses = 730
-alerts_sent = 2860
+alerts_sent = 2862
 search_jobs = 2
 agent_tasks = 2
 human_reviews = 0
@@ -291,11 +300,42 @@ human_review_actions = 0
 investment_decisions = 0
 ```
 
-Expected verdict after matching post-GET SQL:
+GET smoke with valid `X-API-Key`:
+
+```text
+admin=200
+searches=200
+alerts=200
+listings=200
+analyses=200
+technical=200
+```
+
+Post-GET SQL counts:
+
+```text
+listings = 1521
+listing_analyses = 730
+alerts_sent = 2862
+search_jobs = 2
+agent_tasks = 2
+human_reviews = 0
+human_review_actions = 0
+investment_decisions = 0
+```
+
+Final verdict:
 
 ```text
 GET admin pages are read-only: OK
-No DB side effects detected: OK
+No DB side effects from PR19a GET admin pages.
+PR19a production smoke: CLOSED.
+```
+
+Worker was restarted after the final GET-page smoke. A post-GET SQL count was then captured and remained identical to the clean baseline.
+
+```text
+docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile worker up -d worker
 ```
 
 ## Worker logs
@@ -338,14 +378,13 @@ Query-string key disabled: CLOSED
 Technical write guards: CLOSED
 GET page availability: CLOSED
 Worker log smoke: CLOSED
-Final post-GET SQL no-side-effects check: PENDING EVIDENCE
+Final post-GET SQL no-side-effects check: CLOSED
+PR19a production smoke: CLOSED
 ```
-
-Do not mark the full production smoke as `CLOSED` until the final post-GET SQL count is attached and matches the baseline.
 
 ## Next step
 
-After post-GET SQL no-side-effects evidence is attached and this handoff is updated, proceed to:
+With the post-GET SQL no-side-effects evidence attached and this handoff finalized, proceed to:
 
 ```text
 PR19b - Listing detail and human review workflow
