@@ -8,6 +8,10 @@ from typing import Any, Protocol
 
 from app.analysis.config import AnalysisConfig
 from app.analysis.investment import calculate_investment_metrics
+from app.analysis.market_comps import (
+    SelectedMarketEvidenceContext,
+    estimate_market_rent,
+)
 from app.models.listing import Listing
 from app.models.listing_snapshot import ListingSnapshot
 
@@ -915,7 +919,6 @@ class FlatSaleDeterministicAnalysisProvider:
         return max(0, min(100, score))
 
 
-
 _FLAT_RENT_TERM_KEYWORDS = {
     "has_deposit_hint": ("залог", "депозит"),
     "has_commission_hint": ("комиссия",),
@@ -1097,7 +1100,9 @@ class FlatRentDeterministicAnalysisProvider:
                 "note": "Пороги flat-rent-v0 являются простыми допущениями, а не рыночной оценкой.",
             },
         }
-        questions = {"items": _flat_rent_questions_for(flags=flags, hints=rental_terms_hints)}
+        questions = {
+            "items": _flat_rent_questions_for(flags=flags, hints=rental_terms_hints)
+        }
         score = rules._score(facts=facts, flags=flags)
         if sanity.score_cap is not None:
             score = min(score, sanity.score_cap)
@@ -1304,7 +1309,6 @@ def _add_analysis_config_facts(facts: dict, config: AnalysisConfig) -> None:
     facts["analysis_config"] = config.facts_metadata()
 
 
-
 _INVESTMENT_PROFILE_META = {
     "commercial_sale_investment": {
         "version": "commercial-sale-investment-v0",
@@ -1320,7 +1324,6 @@ _INVESTMENT_PROFILE_META = {
             "Уточнить первоначальный CAPEX.",
             "Проверить отдельный вход, мокрую точку, вентиляцию, мощность.",
             "Проверить юридическую возможность целевого использования.",
-            "Проверить, что расчет не использует рыночные comps.",
         ],
     },
     "flat_sale_investment": {
@@ -1333,7 +1336,6 @@ _INVESTMENT_PROFILE_META = {
             "Уточнить ремонт/CAPEX перед сдачей.",
             "Уточнить вакантность между арендаторами.",
             "Проверить, что цена является ценой покупки.",
-            "Проверить, что расчет не использует рыночные comps.",
             "Проверить ликвидность локации и транспортную доступность вручную.",
         ],
     },
@@ -1358,11 +1360,16 @@ class InvestmentAnalysisProvider:
         snapshot: ListingSnapshot | None,
         input_hash: str,
         config: AnalysisConfig | None = None,
+        market_evidence_context: SelectedMarketEvidenceContext | None = None,
     ) -> ListingAnalysisResult:
         del snapshot, input_hash
         config = _provider_config(self.profile, config)
         purchase_price = config.investment_purchase_price
-        purchase_source = "filters_json.investment_purchase_price" if purchase_price is not None else None
+        purchase_source = (
+            "filters_json.investment_purchase_price"
+            if purchase_price is not None
+            else None
+        )
         purchase_confirmation = False
         pre_flags: list[str] = []
         allow_listing_price_fallback = (
@@ -1382,13 +1389,81 @@ class InvestmentAnalysisProvider:
             pre_flags.append("purchase_price_source_requires_human_confirmation")
         if config.deal_type is None:
             pre_flags.append("deal_type_missing")
-        if config.asset_type is not None and config.asset_type != self.expected_asset_type:
+        if (
+            config.asset_type is not None
+            and config.asset_type != self.expected_asset_type
+        ):
             pre_flags.append("asset_type_profile_mismatch")
 
+        market_estimate = (
+            estimate_market_rent(
+                context=market_evidence_context, area_m2=listing.area_m2
+            )
+            if config.use_market_evidence is True
+            and market_evidence_context is not None
+            else None
+        )
+        rent_source = (
+            "manual" if config.estimated_monthly_rent is not None else "missing"
+        )
+        estimated_rent = config.estimated_monthly_rent
+        market_flags: list[str] = []
+        score_cap: int | None = None
+        verdict_cap: str | None = None
+        if config.use_market_evidence is False:
+            market_flags.append("market_evidence_disabled")
+        elif config.use_market_evidence is True:
+            if market_estimate is None or market_estimate.comp_count == 0:
+                if config.estimated_monthly_rent is None:
+                    market_flags.append("market_evidence_missing")
+            elif config.estimated_monthly_rent is None:
+                if (
+                    market_estimate.monthly_rent is not None
+                    and market_estimate.usable_comp_count
+                    >= market_evidence_context.config.min_comps
+                ):
+                    estimated_rent = market_estimate.monthly_rent
+                    rent_source = "market_evidence"
+                else:
+                    market_flags.append("insufficient_market_comps")
+            if market_estimate is not None:
+                market_flags.extend(market_estimate.risk_flags)
+                if config.estimated_monthly_rent is None:
+                    if market_estimate.usable_comp_count == 1:
+                        market_flags.append("single_market_comp")
+                        score_cap = 65
+                        verdict_cap = "review"
+                    elif (
+                        market_estimate.usable_comp_count
+                        < market_evidence_context.config.min_comps
+                    ):
+                        market_flags.append("insufficient_market_comps")
+                        score_cap = 70
+                        verdict_cap = "review"
+                    if (
+                        market_estimate.confidence is not None
+                        and market_estimate.confidence
+                        < market_evidence_context.config.min_confidence
+                    ):
+                        market_flags.append("low_confidence_market_comps")
+                        score_cap = 70 if score_cap is None else min(score_cap, 70)
+                        verdict_cap = "review"
+                elif market_estimate.monthly_rent:
+                    delta = (
+                        abs(
+                            config.estimated_monthly_rent - market_estimate.monthly_rent
+                        )
+                        / market_estimate.monthly_rent
+                    )
+                    if (
+                        delta
+                        > market_evidence_context.config.manual_mismatch_threshold_pct
+                    ):
+                        market_flags.append("manual_rent_differs_from_market_evidence")
         metrics = calculate_investment_metrics(
             purchase_price=purchase_price,
             purchase_price_source=purchase_source,
-            estimated_monthly_rent=config.estimated_monthly_rent,
+            estimated_monthly_rent=estimated_rent,
             opex_ratio=config.opex_ratio,
             opex_monthly=config.opex_monthly,
             vacancy_rate=config.vacancy_rate,
@@ -1397,30 +1472,81 @@ class InvestmentAnalysisProvider:
             min_noi_yield=config.min_noi_yield,
             max_payback_years=config.max_payback_years,
         )
-        flags = list(dict.fromkeys([*pre_flags, *metrics.flags]))
-        if config.min_gross_yield is None and config.min_noi_yield is None and config.max_payback_years is None:
+        flags = list(dict.fromkeys([*pre_flags, *metrics.flags, *market_flags]))
+        if (
+            config.min_gross_yield is None
+            and config.min_noi_yield is None
+            and config.max_payback_years is None
+        ):
             flags.append("all_thresholds_missing")
-        if config.min_gross_yield is not None and (metrics.gross_yield_on_total_outlay is None or metrics.gross_yield_on_total_outlay < config.min_gross_yield):
+        if config.min_gross_yield is not None and (
+            metrics.gross_yield_on_total_outlay is None
+            or metrics.gross_yield_on_total_outlay < config.min_gross_yield
+        ):
             flags.append("gross_yield_below_threshold")
-        if config.min_noi_yield is not None and (metrics.noi_yield_on_total_outlay is None or metrics.noi_yield_on_total_outlay < config.min_noi_yield):
+        if config.min_noi_yield is not None and (
+            metrics.noi_yield_on_total_outlay is None
+            or metrics.noi_yield_on_total_outlay < config.min_noi_yield
+        ):
             flags.append("noi_yield_below_threshold")
-        if config.max_payback_years is not None and (metrics.payback_years is None or metrics.payback_years > config.max_payback_years):
+        if config.max_payback_years is not None and (
+            metrics.payback_years is None
+            or metrics.payback_years > config.max_payback_years
+        ):
             flags.append("payback_above_threshold")
         if metrics.purchase_price is None or metrics.estimated_monthly_rent is None:
             flags.append("insufficient_investment_assumptions")
 
         score = 50
-        complete = metrics.purchase_price is not None and metrics.estimated_monthly_rent is not None and metrics.noi_annual is not None
+        complete = (
+            metrics.purchase_price is not None
+            and metrics.estimated_monthly_rent is not None
+            and metrics.noi_annual is not None
+        )
         if complete:
             score += 10
-        threshold_flags = {"gross_yield_below_threshold", "noi_yield_below_threshold", "payback_above_threshold"}
-        score += 10 * sum(1 for f in ("min_gross_yield", "min_noi_yield", "max_payback_years") if f in metrics.assumptions)
+        threshold_flags = {
+            "gross_yield_below_threshold",
+            "noi_yield_below_threshold",
+            "payback_above_threshold",
+        }
+        score += 10 * sum(
+            1
+            for f in ("min_gross_yield", "min_noi_yield", "max_payback_years")
+            if f in metrics.assumptions
+        )
         score -= 15 * len(threshold_flags.intersection(flags))
-        score -= 10 * sum(1 for f in ("vacancy_rate_missing_assumed_zero", "capex_missing_assumed_zero", "opex_missing") if f in flags)
-        score -= 25 * sum(1 for f in ("negative_or_zero_noi", "invalid_purchase_price", "invalid_estimated_monthly_rent") if f in flags)
-        score -= 15 if "purchase_price_source_requires_human_confirmation" in flags else 0
+        score -= 10 * sum(
+            1
+            for f in (
+                "vacancy_rate_missing_assumed_zero",
+                "capex_missing_assumed_zero",
+                "opex_missing",
+            )
+            if f in flags
+        )
+        score -= 25 * sum(
+            1
+            for f in (
+                "negative_or_zero_noi",
+                "invalid_purchase_price",
+                "invalid_estimated_monthly_rent",
+            )
+            if f in flags
+        )
+        score -= (
+            15 if "purchase_price_source_requires_human_confirmation" in flags else 0
+        )
+        if score_cap is not None:
+            score = min(score, score_cap)
         score = max(0, min(100, score))
-        verdict = "strong" if score >= 80 and not threshold_flags.intersection(flags) else "medium" if score >= 60 else "weak"
+        verdict = (
+            "strong"
+            if score >= 80 and not threshold_flags.intersection(flags)
+            else "medium"
+            if score >= 60
+            else "weak"
+        )
         cap = None
         for flag, flag_cap in {
             "missing_investment_purchase_price": "review",
@@ -1438,18 +1564,61 @@ class InvestmentAnalysisProvider:
         }.items():
             if flag in flags:
                 cap = _strongest_verdict_cap(cap, flag_cap)
-        if "vacancy_rate_missing_assumed_zero" in flags and "capex_missing_assumed_zero" in flags:
+        if (
+            "vacancy_rate_missing_assumed_zero" in flags
+            and "capex_missing_assumed_zero" in flags
+        ):
             cap = _strongest_verdict_cap(cap, "weak")
+        if verdict_cap is not None:
+            cap = _strongest_verdict_cap(cap, verdict_cap)
         if metrics.noi_annual is None:
             cap = _strongest_verdict_cap(cap, "weak")
         verdict = _apply_verdict_cap(verdict, cap)
 
+        market_evidence_enabled = config.use_market_evidence is True
+        stored_market_evidence_selected = market_evidence_context is not None and bool(
+            market_evidence_context.items
+        )
+        market_evidence_used_as_rent_source = rent_source == "market_evidence"
+        market_evidence_used_for_comparison = (
+            config.estimated_monthly_rent is not None
+            and market_estimate is not None
+            and market_estimate.monthly_rent is not None
+        )
+
         facts = {
             "investment_profile": self.profile,
-            "investment_metrics": metrics.to_dict(),
-            "manual_assumptions_only": True,
-            "market_comps_used": False,
+            "investment_metrics": {
+                **metrics.to_dict(),
+                "rent_estimate_source": rent_source,
+                **(
+                    {
+                        "market_evidence": _market_evidence_facts(
+                            market_evidence_context,
+                            market_estimate,
+                            config.estimated_monthly_rent,
+                        )
+                    }
+                    if config.use_market_evidence is True
+                    and market_evidence_context is not None
+                    else {}
+                ),
+            },
+            "manual_assumptions_only": config.use_market_evidence is not True,
+            "market_evidence_enabled": market_evidence_enabled,
+            "stored_market_evidence_selected": stored_market_evidence_selected,
+            "market_evidence_used_as_rent_source": market_evidence_used_as_rent_source,
+            "market_evidence_used_for_comparison": market_evidence_used_for_comparison,
+            "market_comps_used": market_evidence_used_as_rent_source,
             "external_research_used": False,
+            "live_external_research_used": False,
+            "stored_market_evidence_used": (
+                market_evidence_used_as_rent_source
+                or market_evidence_used_for_comparison
+            ),
+            "market_evidence_origin": "stored_external_research"
+            if config.use_market_evidence is True
+            else None,
             "llm_used": False,
             "rag_used": False,
             "agent_used": False,
@@ -1458,27 +1627,181 @@ class InvestmentAnalysisProvider:
             "threshold_basis": "gross and NOI thresholds compare against total initial outlay",
         }
         _add_analysis_config_facts(facts, config)
-        questions = {"items": self.base_questions}
         risks = {"flags": list(dict.fromkeys(flags))}
-        report = self._report(metrics.to_dict(), risks["flags"], questions["items"], purchase_source, purchase_confirmation, cap)
-        return ListingAnalysisResult(score=score, verdict=verdict, facts_json=facts, risks_json=risks, questions_json=questions, report_md=report, model_provider=self.model_provider, model_name=self.model_name)
+        questions = {
+            "items": _investment_questions(
+                base_questions=self.base_questions,
+                market_evidence_enabled=market_evidence_enabled,
+                used_as_rent_source=market_evidence_used_as_rent_source,
+                used_for_comparison=market_evidence_used_for_comparison,
+                flags=risks["flags"],
+            )
+        }
+        report = self._report(
+            metrics.to_dict(),
+            risks["flags"],
+            questions["items"],
+            purchase_source,
+            purchase_confirmation,
+            cap,
+            market_evidence_enabled=market_evidence_enabled,
+            used_as_rent_source=market_evidence_used_as_rent_source,
+            used_for_comparison=market_evidence_used_for_comparison,
+        )
+        return ListingAnalysisResult(
+            score=score,
+            verdict=verdict,
+            facts_json=facts,
+            risks_json=risks,
+            questions_json=questions,
+            report_md=report,
+            model_provider=self.model_provider,
+            model_name=self.model_name,
+        )
 
-    def _report(self, metrics: dict, flags: list[str], questions: list[str], source: str | None, confirmation: bool, cap: str | None) -> str:
-        warning = " Listing price was used as purchase price because the operator explicitly allowed it; human confirmation is required." if confirmation else ""
-        return "\n".join([
-            f"# Investment analysis: {self.profile}",
-            "",
-            "Deterministic v0 analysis uses manual assumptions only. It uses no comps, no market research, no LLM, no RAG, and no agents.",
-            "This is not an appraisal, not a market valuation, and not a buy/sell recommendation.",
-            f"Purchase price source: {source or 'missing'}.{warning}",
-            "Formulas: annual gross income = rent * 12; vacancy loss = gross * vacancy; NOI = effective gross income - opex; total outlay = purchase price + CAPEX; yields divide by price and total outlay; payback = total outlay / NOI.",
-            "Threshold basis: min_gross_yield and min_noi_yield compare against total initial outlay.",
-            f"Missing assumptions: {', '.join(metrics['missing_assumptions']) or 'none'}.",
-            f"Risk caps applied: {cap or 'none'}.",
-            f"Flags: {', '.join(flags) or 'none'}.",
-            "Human-review questions:",
-            *[f"- {q}" for q in questions],
-        ])
+    def _report(
+        self,
+        metrics: dict,
+        flags: list[str],
+        questions: list[str],
+        source: str | None,
+        confirmation: bool,
+        cap: str | None,
+        *,
+        market_evidence_enabled: bool,
+        used_as_rent_source: bool,
+        used_for_comparison: bool,
+    ) -> str:
+        warning = (
+            " Listing price was used as purchase price because the operator explicitly allowed it; human confirmation is required."
+            if confirmation
+            else ""
+        )
+        if used_as_rent_source:
+            evidence_line = (
+                "Deterministic v0 analysis: stored SQL-backed market evidence was used as rent source. "
+                "It uses no LLM, no ResearchAgent, and no live external calls during scoring."
+            )
+        elif used_for_comparison:
+            evidence_line = (
+                "Deterministic v0 analysis: manual rent remained primary and stored market evidence was used for comparison. "
+                "It uses no LLM, no ResearchAgent, and no live external calls during scoring."
+            )
+        elif market_evidence_enabled:
+            evidence_line = (
+                "Deterministic v0 analysis had market evidence enabled, but no stored comps were used as the rent source. "
+                "It uses no LLM, no ResearchAgent, and no live external calls during scoring."
+            )
+        else:
+            evidence_line = (
+                "Deterministic v0 analysis uses manual assumptions only. It uses no comps, no LLM, "
+                "no ResearchAgent, and no live external calls during scoring."
+            )
+        return "\n".join(
+            [
+                f"# Investment analysis: {self.profile}",
+                "",
+                evidence_line,
+                "This is not an appraisal, not a market valuation, and not a buy/sell recommendation.",
+                f"Purchase price source: {source or 'missing'}.{warning}",
+                "Formulas: annual gross income = rent * 12; vacancy loss = gross * vacancy; NOI = effective gross income - opex; total outlay = purchase price + CAPEX; yields divide by price and total outlay; payback = total outlay / NOI.",
+                "Threshold basis: min_gross_yield and min_noi_yield compare against total initial outlay.",
+                f"Missing assumptions: {', '.join(metrics['missing_assumptions']) or 'none'}.",
+                f"Risk caps applied: {cap or 'none'}.",
+                f"Flags: {', '.join(flags) or 'none'}.",
+                "Human-review questions:",
+                *[f"- {q}" for q in questions],
+            ]
+        )
+
+
+def _investment_questions(
+    *,
+    base_questions: list[str],
+    market_evidence_enabled: bool,
+    used_as_rent_source: bool,
+    used_for_comparison: bool,
+    flags: list[str],
+) -> list[str]:
+    questions = list(base_questions)
+    if not market_evidence_enabled:
+        questions.append(
+            "При необходимости вручную проверить рыночные арендные comps вне расчета."
+        )
+    elif used_as_rent_source:
+        questions.append(
+            "Проверить выбранные stored SQL-backed rent comps и их применимость к объекту."
+        )
+    elif used_for_comparison:
+        questions.append(
+            "Сравнить ручную арендную ставку с выбранными stored rent comps; ручная ставка остается основной."
+        )
+    else:
+        questions.append(
+            "Проверить, почему stored market evidence не дало достаточную арендную оценку."
+        )
+
+    weak_flags = {
+        "market_evidence_missing",
+        "insufficient_market_comps",
+        "single_market_comp",
+        "low_confidence_market_comps",
+        "missing_area_for_market_rent",
+        "unsupported_market_rent_strategy",
+    }
+    if weak_flags.intersection(flags):
+        questions.append(
+            "Провести ручную проверку рыночной аренды из-за слабых, недостаточных или неприменимых comps."
+        )
+    if "missing_area_for_market_rent" in flags:
+        questions.append(
+            "Уточнить площадь объекта, чтобы конвертировать rent-per-m2 comps в месячную аренду."
+        )
+    return list(dict.fromkeys(questions))
+
+
+def _market_evidence_facts(
+    context: SelectedMarketEvidenceContext, estimate, manual_rent: float | None
+) -> dict:
+    facts = {
+        "enabled": True,
+        "used": estimate is not None and estimate.monthly_rent is not None,
+        "used_as_rent_source": estimate is not None
+        and estimate.monthly_rent is not None
+        and manual_rent is None,
+        "used_for_comparison": estimate is not None
+        and estimate.monthly_rent is not None
+        and manual_rent is not None,
+        "backend": "sql",
+        "retrieval_as_of_date": context.retrieval_as_of_date.isoformat(),
+        "market_rent_strategy": context.config.rent_strategy,
+        "market_comp_count": estimate.comp_count
+        if estimate is not None
+        else len(context.items),
+        "market_usable_comp_count": estimate.usable_comp_count
+        if estimate is not None
+        else 0,
+        "market_estimate_confidence": estimate.confidence
+        if estimate is not None
+        else None,
+        "market_evidence_item_ids": estimate.item_ids if estimate is not None else [],
+        "market_evidence_content_hashes": estimate.content_hashes
+        if estimate is not None
+        else [],
+        "market_source_urls": estimate.source_urls if estimate is not None else [],
+        "excluded_counts_by_reason": context.excluded_counts_by_reason,
+    }
+    if estimate is not None:
+        facts["market_estimated_monthly_rent"] = estimate.monthly_rent
+        facts["market_estimated_rent_per_m2"] = estimate.rent_per_m2
+    if manual_rent is not None:
+        facts["manual_estimated_monthly_rent"] = manual_rent
+        if estimate is not None and estimate.monthly_rent:
+            facts["manual_vs_market_delta_pct"] = round(
+                abs(manual_rent - estimate.monthly_rent) / estimate.monthly_rent, 4
+            )
+    return facts
+
 
 def get_analysis_provider(profile: str) -> AnalysisProvider:
     if profile == "default":
@@ -1740,19 +2063,31 @@ def _parse_flat_floor(title: str) -> dict:
 def _flat_questions_for(*, flags: list[str]) -> list[str]:
     questions: list[str] = []
     if "missing_address" in flags:
-        questions.append("Уточнить точный корпус/адрес и срок сдачи, если это новостройка.")
+        questions.append(
+            "Уточнить точный корпус/адрес и срок сдачи, если это новостройка."
+        )
     questions.extend(_FLAT_ALWAYS_QUESTIONS)
     if "first_floor" in flags:
         questions.append(
             "Для первого этажа: уточнить уровень окон, проходной трафик, безопасность, коммерческие помещения рядом."
         )
     if "last_floor" in flags:
-        questions.append("Для последнего этажа: уточнить крышу/техэтаж/шум оборудования.")
+        questions.append(
+            "Для последнего этажа: уточнить крышу/техэтаж/шум оборудования."
+        )
     if "unknown_floor" in flags:
-        questions.append("Уточнить этаж, общее количество этажей, лифт и расположение квартиры.")
+        questions.append(
+            "Уточнить этаж, общее количество этажей, лифт и расположение квартиры."
+        )
     if "missing_price" in flags or "over_budget" in flags:
-        questions.append("Уточнить финальную цену, торг и дополнительные расходы сделки.")
-    if "missing_area" in flags or "area_too_small" in flags or "area_too_large" in flags:
+        questions.append(
+            "Уточнить финальную цену, торг и дополнительные расходы сделки."
+        )
+    if (
+        "missing_area" in flags
+        or "area_too_small" in flags
+        or "area_too_large" in flags
+    ):
         questions.append("Уточнить точную площадь, планировку и долю полезной площади.")
     return list(dict.fromkeys(questions))
 
@@ -1836,7 +2171,9 @@ def _flat_good_lines(*, facts: dict, risks: dict) -> list[str]:
     if facts["detected_flat_type"] != "unknown":
         lines.append("Тип квартиры удалось определить из текста объявления.")
     if not lines and flags:
-        lines.append("Плюсы требуют ручной проверки из-за неполных или рискованных данных.")
+        lines.append(
+            "Плюсы требуют ручной проверки из-за неполных или рискованных данных."
+        )
     return lines or ["Базовые факты заполнены, явных v0-рисков нет."]
 
 
@@ -1887,7 +2224,9 @@ def _flat_rent_questions_for(*, flags: list[str], hints: dict) -> list[str]:
     if "over_budget" in flags or "missing_price" in flags:
         questions.append("Уточнить финальную ставку аренды и все обязательные платежи.")
     if "short_term_rent" in flags or hints["has_short_term_hint"]:
-        questions.append("Уточнить, возможен ли долгосрочный договор вместо краткосрочной аренды.")
+        questions.append(
+            "Уточнить, возможен ли долгосрочный договор вместо краткосрочной аренды."
+        )
     if not hints["has_utilities_hint"]:
         questions.append("Уточнить отдельно КУ, счетчики, интернет и сезонные платежи.")
     if not (hints["has_commission_hint"] or hints["has_no_commission_hint"]):
@@ -1982,7 +2321,9 @@ def _flat_rent_good_lines(*, facts: dict, risks: dict) -> list[str]:
     if hints["has_furniture_hint"] or hints["has_appliances_hint"]:
         lines.append("Есть hint о мебели или технике.")
     if not lines and flags:
-        lines.append("Плюсы требуют ручной проверки из-за неполных или рискованных данных.")
+        lines.append(
+            "Плюсы требуют ручной проверки из-за неполных или рискованных данных."
+        )
     return lines or ["Базовые факты заполнены, явных v0-рисков нет."]
 
 

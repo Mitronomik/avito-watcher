@@ -31,6 +31,14 @@ class AnalysisConfig:
     max_payback_years: float | None = None
     asset_type: str | None = None
     deal_type: str | None = None
+    use_market_evidence: bool | None = None
+    market_evidence_min_confidence: float | None = None
+    market_evidence_min_comps: int | None = None
+    market_evidence_max_comps: int | None = None
+    market_evidence_max_age_days: int | None = None
+    market_evidence_location_key: str | None = None
+    market_evidence_rent_strategy: str | None = None
+    market_evidence_manual_mismatch_threshold_pct: float | None = None
 
     @classmethod
     def from_search_filters(
@@ -78,8 +86,8 @@ class AnalysisConfig:
 
 
 _MISSING = object()
-_STRING_FIELDS = {"investment_price_basis", "asset_type", "deal_type"}
-_BOOL_FIELDS = {"investment_allow_listing_price_as_purchase_price"}
+_STRING_FIELDS = {"investment_price_basis", "asset_type", "deal_type", "market_evidence_location_key", "market_evidence_rent_strategy"}
+_BOOL_FIELDS = {"investment_allow_listing_price_as_purchase_price", "use_market_evidence"}
 
 
 def _profile_defaults(profile: str) -> AnalysisConfig:

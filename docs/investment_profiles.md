@@ -85,3 +85,11 @@ python3 -m compileall app
 ruff check app tests
 pytest -q tests/test_investment_analysis.py
 ```
+
+## PR16: opt-in stored market comps for investment profiles
+
+`commercial_sale_investment` and `flat_sale_investment` can optionally use stored SQL-backed market evidence as rent comps when `use_market_evidence=true` is set in `AnalysisConfig` / search `filters_json`. The feature is deterministic: scoring reads already-stored `market_evidence_items` only and does not call an LLM, `ResearchAgent`, embeddings/vector search, or the network during scoring.
+
+Market evidence can estimate rent only. It cannot replace `investment_purchase_price`, does not add any purchase-price fallback flags, and does not silently use `listing.price` unless the pre-existing explicit PR13 listing-price fallback is configured. Manual `estimated_monthly_rent` remains primary; stored comps are used only for comparison, and weak or missing comps do not degrade manual-primary calculations. If manual rent is missing, enough reusable rent comps can fill the rent estimate; weak or insufficient evidence caps verdict only when market evidence is the rent source. A single comp cannot produce a strong result.
+
+Selected evidence is resolved before `input_hash`, and the selected evidence fingerprint is included in `input_hash`. One explicit timezone-aware `as_of_datetime` is used for selection, max-age filtering, expiration filtering, fingerprinting, facts, and report content. PR16 reuses the existing `investment_metrics` schema and adds market-evidence details under it. Low/base/high scenarios remain future scope.
