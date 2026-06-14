@@ -61,6 +61,10 @@ def build_default_agent_task_handlers(db) -> dict[str, AgentTaskHandler]:
         MARKET_RESEARCH_TASK_TYPE,
         ResearchAgentTaskHandler,
     )
+    from app.agents.weekly_strategy_agent import (
+        WEEKLY_STRATEGY_AGENT_TASK_TYPE,
+        WeeklyStrategyAgentTaskHandler,
+    )
 
     return {
         REVIEW_COPILOT_TASK_TYPE: ReviewCopilotAgentTaskHandler(db),
@@ -69,6 +73,7 @@ def build_default_agent_task_handlers(db) -> dict[str, AgentTaskHandler]:
         ),
         DATA_QUALITY_AGENT_TASK_TYPE: DataQualityAgentTaskHandler(db),
         MARKET_RESEARCH_TASK_TYPE: ResearchAgentTaskHandler(db),
+        WEEKLY_STRATEGY_AGENT_TASK_TYPE: WeeklyStrategyAgentTaskHandler(db),
     }
 
 
