@@ -7,6 +7,7 @@ import re
 from typing import Any, Protocol
 
 from app.analysis.config import AnalysisConfig
+from app.analysis.investment import calculate_investment_metrics
 from app.models.listing import Listing
 from app.models.listing_snapshot import ListingSnapshot
 
@@ -1303,6 +1304,182 @@ def _add_analysis_config_facts(facts: dict, config: AnalysisConfig) -> None:
     facts["analysis_config"] = config.facts_metadata()
 
 
+
+_INVESTMENT_PROFILE_META = {
+    "commercial_sale_investment": {
+        "version": "commercial-sale-investment-v0",
+        "model": "commercial-sale-investment-rules-v0",
+        "asset": "commercial",
+        "questions": [
+            "Уточнить реальную рыночную аренду.",
+            "Проверить, что цена объявления является ценой покупки, а не арендной ставкой.",
+            "Уточнить операционные расходы собственника.",
+            "Уточнить НДС/УСН/налоговый режим, если важно.",
+            "Уточнить коммунальные платежи и эксплуатационные расходы.",
+            "Уточнить вакантность.",
+            "Уточнить первоначальный CAPEX.",
+            "Проверить отдельный вход, мокрую точку, вентиляцию, мощность.",
+            "Проверить юридическую возможность целевого использования.",
+            "Проверить, что расчет не использует рыночные comps.",
+        ],
+    },
+    "flat_sale_investment": {
+        "version": "flat-sale-investment-v0",
+        "model": "flat-sale-investment-rules-v0",
+        "asset": "flat",
+        "questions": [
+            "Уточнить реальную долгосрочную арендную ставку.",
+            "Уточнить ежемесячные расходы собственника.",
+            "Уточнить ремонт/CAPEX перед сдачей.",
+            "Уточнить вакантность между арендаторами.",
+            "Проверить, что цена является ценой покупки.",
+            "Проверить, что расчет не использует рыночные comps.",
+            "Проверить ликвидность локации и транспортную доступность вручную.",
+        ],
+    },
+}
+
+
+class InvestmentAnalysisProvider:
+    model_provider = "deterministic"
+
+    def __init__(self, profile: str) -> None:
+        meta = _INVESTMENT_PROFILE_META[profile]
+        self.profile = profile
+        self.analysis_version = meta["version"]
+        self.model_name = meta["model"]
+        self.expected_asset_type = meta["asset"]
+        self.base_questions = meta["questions"]
+
+    def analyze(
+        self,
+        *,
+        listing: Listing,
+        snapshot: ListingSnapshot | None,
+        input_hash: str,
+        config: AnalysisConfig | None = None,
+    ) -> ListingAnalysisResult:
+        del snapshot, input_hash
+        config = _provider_config(self.profile, config)
+        purchase_price = config.investment_purchase_price
+        purchase_source = "filters_json.investment_purchase_price" if purchase_price is not None else None
+        purchase_confirmation = False
+        pre_flags: list[str] = []
+        allow_listing_price_fallback = (
+            config.investment_allow_listing_price_as_purchase_price is True
+        )
+        if config.deal_type == "rent":
+            pre_flags.append("deal_type_rent_not_sale")
+        elif (
+            purchase_price is None
+            and allow_listing_price_fallback
+            and config.investment_price_basis == "listing_price_as_purchase_price"
+            and config.deal_type != "rent"
+        ):
+            purchase_price = listing.price
+            purchase_source = "listing.price"
+            purchase_confirmation = True
+            pre_flags.append("purchase_price_source_requires_human_confirmation")
+        if config.deal_type is None:
+            pre_flags.append("deal_type_missing")
+        if config.asset_type is not None and config.asset_type != self.expected_asset_type:
+            pre_flags.append("asset_type_profile_mismatch")
+
+        metrics = calculate_investment_metrics(
+            purchase_price=purchase_price,
+            purchase_price_source=purchase_source,
+            estimated_monthly_rent=config.estimated_monthly_rent,
+            opex_ratio=config.opex_ratio,
+            opex_monthly=config.opex_monthly,
+            vacancy_rate=config.vacancy_rate,
+            capex_initial=config.capex_initial,
+            min_gross_yield=config.min_gross_yield,
+            min_noi_yield=config.min_noi_yield,
+            max_payback_years=config.max_payback_years,
+        )
+        flags = list(dict.fromkeys([*pre_flags, *metrics.flags]))
+        if config.min_gross_yield is None and config.min_noi_yield is None and config.max_payback_years is None:
+            flags.append("all_thresholds_missing")
+        if config.min_gross_yield is not None and (metrics.gross_yield_on_total_outlay is None or metrics.gross_yield_on_total_outlay < config.min_gross_yield):
+            flags.append("gross_yield_below_threshold")
+        if config.min_noi_yield is not None and (metrics.noi_yield_on_total_outlay is None or metrics.noi_yield_on_total_outlay < config.min_noi_yield):
+            flags.append("noi_yield_below_threshold")
+        if config.max_payback_years is not None and (metrics.payback_years is None or metrics.payback_years > config.max_payback_years):
+            flags.append("payback_above_threshold")
+        if metrics.purchase_price is None or metrics.estimated_monthly_rent is None:
+            flags.append("insufficient_investment_assumptions")
+
+        score = 50
+        complete = metrics.purchase_price is not None and metrics.estimated_monthly_rent is not None and metrics.noi_annual is not None
+        if complete:
+            score += 10
+        threshold_flags = {"gross_yield_below_threshold", "noi_yield_below_threshold", "payback_above_threshold"}
+        score += 10 * sum(1 for f in ("min_gross_yield", "min_noi_yield", "max_payback_years") if f in metrics.assumptions)
+        score -= 15 * len(threshold_flags.intersection(flags))
+        score -= 10 * sum(1 for f in ("vacancy_rate_missing_assumed_zero", "capex_missing_assumed_zero", "opex_missing") if f in flags)
+        score -= 25 * sum(1 for f in ("negative_or_zero_noi", "invalid_purchase_price", "invalid_estimated_monthly_rent") if f in flags)
+        score -= 15 if "purchase_price_source_requires_human_confirmation" in flags else 0
+        score = max(0, min(100, score))
+        verdict = "strong" if score >= 80 and not threshold_flags.intersection(flags) else "medium" if score >= 60 else "weak"
+        cap = None
+        for flag, flag_cap in {
+            "missing_investment_purchase_price": "review",
+            "missing_estimated_monthly_rent": "review",
+            "invalid_purchase_price": "review",
+            "invalid_estimated_monthly_rent": "review",
+            "negative_or_zero_noi": "review",
+            "deal_type_rent_not_sale": "review",
+            "asset_type_profile_mismatch": "review",
+            "opex_missing": "weak",
+            "vacancy_rate_missing_assumed_zero": "medium",
+            "capex_missing_assumed_zero": "medium",
+            "all_thresholds_missing": "medium",
+            "purchase_price_source_requires_human_confirmation": "medium",
+        }.items():
+            if flag in flags:
+                cap = _strongest_verdict_cap(cap, flag_cap)
+        if "vacancy_rate_missing_assumed_zero" in flags and "capex_missing_assumed_zero" in flags:
+            cap = _strongest_verdict_cap(cap, "weak")
+        if metrics.noi_annual is None:
+            cap = _strongest_verdict_cap(cap, "weak")
+        verdict = _apply_verdict_cap(verdict, cap)
+
+        facts = {
+            "investment_profile": self.profile,
+            "investment_metrics": metrics.to_dict(),
+            "manual_assumptions_only": True,
+            "market_comps_used": False,
+            "external_research_used": False,
+            "llm_used": False,
+            "rag_used": False,
+            "agent_used": False,
+            "purchase_price_source": purchase_source,
+            "purchase_price_requires_human_confirmation": purchase_confirmation,
+            "threshold_basis": "gross and NOI thresholds compare against total initial outlay",
+        }
+        _add_analysis_config_facts(facts, config)
+        questions = {"items": self.base_questions}
+        risks = {"flags": list(dict.fromkeys(flags))}
+        report = self._report(metrics.to_dict(), risks["flags"], questions["items"], purchase_source, purchase_confirmation, cap)
+        return ListingAnalysisResult(score=score, verdict=verdict, facts_json=facts, risks_json=risks, questions_json=questions, report_md=report, model_provider=self.model_provider, model_name=self.model_name)
+
+    def _report(self, metrics: dict, flags: list[str], questions: list[str], source: str | None, confirmation: bool, cap: str | None) -> str:
+        warning = " Listing price was used as purchase price because the operator explicitly allowed it; human confirmation is required." if confirmation else ""
+        return "\n".join([
+            f"# Investment analysis: {self.profile}",
+            "",
+            "Deterministic v0 analysis uses manual assumptions only. It uses no comps, no market research, no LLM, no RAG, and no agents.",
+            "This is not an appraisal, not a market valuation, and not a buy/sell recommendation.",
+            f"Purchase price source: {source or 'missing'}.{warning}",
+            "Formulas: annual gross income = rent * 12; vacancy loss = gross * vacancy; NOI = effective gross income - opex; total outlay = purchase price + CAPEX; yields divide by price and total outlay; payback = total outlay / NOI.",
+            "Threshold basis: min_gross_yield and min_noi_yield compare against total initial outlay.",
+            f"Missing assumptions: {', '.join(metrics['missing_assumptions']) or 'none'}.",
+            f"Risk caps applied: {cap or 'none'}.",
+            f"Flags: {', '.join(flags) or 'none'}.",
+            "Human-review questions:",
+            *[f"- {q}" for q in questions],
+        ])
+
 def get_analysis_provider(profile: str) -> AnalysisProvider:
     if profile == "default":
         return DeterministicAnalysisProvider()
@@ -1312,6 +1489,8 @@ def get_analysis_provider(profile: str) -> AnalysisProvider:
         return FlatSaleDeterministicAnalysisProvider()
     if profile == "flat_rent":
         return FlatRentDeterministicAnalysisProvider()
+    if profile in {"commercial_sale_investment", "flat_sale_investment"}:
+        return InvestmentAnalysisProvider(profile)
     raise ValueError(f"unsupported analysis profile: {profile}")
 
 
