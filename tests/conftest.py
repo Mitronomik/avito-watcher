@@ -63,6 +63,7 @@ from app.models.listing_snapshot import ListingSnapshot  # noqa: F401
 from app.models.listing_detail_snapshot import ListingDetailSnapshot  # noqa: F401
 from app.models.listing_enrichment import ListingEnrichment  # noqa: F401
 from app.models.market_evidence import MarketEvidenceItem, MarketResearchRun  # noqa: F401
+from app.models.human_review import HumanReview, HumanReviewAction, InvestmentDecision  # noqa: F401
 
 from app.models.search_job import SearchJob  # noqa: F401
 
