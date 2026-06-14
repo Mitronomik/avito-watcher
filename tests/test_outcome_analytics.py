@@ -295,6 +295,102 @@ def test_search_stats_use_explicit_search_job_id_and_examples_are_bounded(db_ses
     assert len(r.examples.sent_to_expert_examples) == 1
 
 
+def test_decision_filters_follow_listing_search_and_review_context(db_session):
+    search_a = SearchJob(name="A", source_url="https://example.test/a")
+    search_b = SearchJob(name="B", source_url="https://example.test/b")
+    db_session.add_all([search_a, search_b])
+    db_session.flush()
+    review_a = add_review(
+        db_session,
+        "decision-a",
+        search_job_id=search_a.id,
+        human_verdict="interesting",
+        outcome_status="sent_to_expert",
+    )
+    review_b = add_review(
+        db_session,
+        "decision-b",
+        search_job_id=search_b.id,
+        human_verdict="not_interesting",
+        outcome_status="deal_lost",
+    )
+    db_session.add_all(
+        [
+            InvestmentDecision(
+                human_review_id=review_a.id,
+                listing_external_id="decision-a",
+                decision_type="send_to_expert",
+                decision_status="approved",
+                created_at=dt(-1),
+                updated_at=dt(-1),
+                decided_at=dt(-1),
+            ),
+            InvestmentDecision(
+                human_review_id=review_b.id,
+                listing_external_id="decision-b",
+                decision_type="reject",
+                decision_status="rejected",
+                created_at=dt(-1),
+                updated_at=dt(-1),
+                decided_at=dt(-1),
+            ),
+        ]
+    )
+    db_session.commit()
+
+    by_listing = report(db_session, listing_external_ids=["decision-a"])
+    assert by_listing.decision_counts.by_status["approved"] == 1
+    assert by_listing.decision_counts.by_status["rejected"] == 0
+
+    by_search = report(db_session, search_job_ids=[search_b.id])
+    assert by_search.decision_counts.by_type["reject"] == 1
+    assert by_search.decision_counts.by_type["send_to_expert"] == 0
+
+    by_review_context = report(
+        db_session,
+        human_verdicts=["interesting"],
+        outcome_statuses=["sent_to_expert"],
+    )
+    assert by_review_context.decision_counts.by_status["approved"] == 1
+    assert by_review_context.decision_counts.by_status["rejected"] == 0
+
+
+def test_stats_hash_ignores_unrelated_decision_outside_selected_filters(db_session):
+    selected = add_review(db_session, "selected", human_verdict="interesting")
+    db_session.add(
+        InvestmentDecision(
+            human_review_id=selected.id,
+            listing_external_id="selected",
+            decision_type="send_to_expert",
+            decision_status="approved",
+            created_at=dt(-1),
+            updated_at=dt(-1),
+            decided_at=dt(-1),
+        )
+    )
+    db_session.commit()
+    first = report(db_session, listing_external_ids=["selected"])
+
+    unrelated = add_review(db_session, "unrelated", human_verdict="not_interesting")
+    db_session.add(
+        InvestmentDecision(
+            human_review_id=unrelated.id,
+            listing_external_id="unrelated",
+            decision_type="reject",
+            decision_status="rejected",
+            created_at=dt(-1),
+            updated_at=dt(-1),
+            decided_at=dt(-1),
+        )
+    )
+    db_session.commit()
+
+    second = report(db_session, listing_external_ids=["selected"])
+    assert second.decision_counts.by_status["approved"] == 1
+    assert second.decision_counts.by_status["rejected"] == 0
+    assert first.stats_snapshot_hash == second.stats_snapshot_hash
+
+
 def test_read_only_no_side_effects_or_session_writes(db_session, monkeypatch):
     add_review(db_session, "safe")
     db_session.commit()

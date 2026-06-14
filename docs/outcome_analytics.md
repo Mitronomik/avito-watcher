@@ -1,20 +1,20 @@
-# Human outcome analytics read model (PR18b)
+# Human outcome analytics / backtesting read model (PR19)
 
-PR18b adds a deterministic, read-only analytics foundation on top of PR18 human decision logging. PR18 created `human_reviews`, `human_review_actions`, and `investment_decisions`; PR18b aggregates those rows so future UI, StrategyAgent, backtesting, calibration, and reporting work can compare deterministic outputs with human outcomes.
+PR19 adds a deterministic, read-only analytics foundation on top of PR18 human decision logging. PR18 created `human_reviews`, `human_review_actions`, and `investment_decisions`; PR19 aggregates those rows so future UI, StrategyAgent, backtesting, calibration, and reporting work can compare deterministic outputs with human outcomes.
 
-PR18b is not PR19: the Admin UI for searches, analyses, agents, evidence, and reviews remains future scope. PR18b is also not PR35: the Backtesting dashboard remains future scope.
+PR19 implements the human outcome analytics / backtesting read model. The Admin UI for searches, analyses, agents, evidence, and reviews remains future scope, and the PR35 Backtesting dashboard also remains future scope.
 
 ## Read-only guarantee
 
-PR18b is a read-only analytics foundation:
+PR19 is a read-only analytics foundation:
 
-- PR18b does not change deterministic score/verdict.
-- PR18b does not calibrate thresholds.
-- PR18b does not mutate filters/searches/alerts.
-- PR18b does not mutate human reviews.
-- PR18b does not mutate listings, listing analyses, market evidence, agent tasks, knowledge notes, enrichments, snapshots, or search jobs.
-- PR18b does not call LLMs or external services.
-- PR18b only runs SELECT-style repository queries and returns structured DTOs.
+- PR19 does not change deterministic score/verdict.
+- PR19 does not calibrate thresholds.
+- PR19 does not mutate filters/searches/alerts.
+- PR19 does not mutate human reviews.
+- PR19 does not mutate listings, listing analyses, market evidence, agent tasks, knowledge notes, enrichments, snapshots, or search jobs.
+- PR19 does not call LLMs or external services.
+- PR19 only runs SELECT-style repository queries and returns structured DTOs.
 
 ## Request and period semantics
 
@@ -51,7 +51,7 @@ Multiple reviews for the same listing increase review counts but do not inflate 
 
 ## Explicit and derived outcome signals
 
-PR18b separates explicit labels from derived unique signal counts.
+PR19 separates explicit labels from derived unique signal counts.
 
 Explicit positive review signals include:
 
@@ -86,13 +86,13 @@ False negatives are counted only when explicit:
 
 ## Analysis alignment and score buckets
 
-Analysis alignment is explicit-only in PR18b v0:
+Analysis alignment is explicit-only in PR19 v0:
 
 ```text
 human_reviews.listing_analysis_id -> listing_analyses.id
 ```
 
-PR18b does not infer the latest analysis by `listing_external_id`, because later analyses may use different configuration, hashes, profiles, or facts. Alignment reports observed counts by deterministic verdict, profile, rent source, and market evidence usage when those fields are present.
+PR19 does not infer the latest analysis by `listing_external_id`, because later analyses may use different configuration, hashes, profiles, or facts. Alignment reports observed counts by deterministic verdict, profile, rent source, and market evidence usage when those fields are present.
 
 Score buckets are fixed and deterministic:
 
@@ -115,11 +115,11 @@ Risk flag stats use production-shaped `listing_analyses.risks_json`:
 
 `extract_risk_flags()` uses non-empty string values from `risks_json["flags"]` when it is a list, ignores non-strings, ignores `items`, deduplicates flags per analysis row, and sorts deterministically. Legacy fallback is used only when `flags` is not a list.
 
-Risk flag stats report observed outcome counts only. PR18b makes no recommendations and applies no calibration.
+Risk flag stats report observed outcome counts only. PR19 makes no recommendations and applies no calibration.
 
 ## Search stats
 
-Search-level stats use only explicit `human_reviews.search_job_id`. PR18b does not fallback through `ListingSearchMatch`, because fallback can duplicate rows and may not match the review context.
+Search-level stats use only explicit `human_reviews.search_job_id`. PR19 does not fallback through `ListingSearchMatch`, because fallback can duplicate rows and may not match the review context.
 
 Each search group reports review counts, distinct reviewed listing counts, human outcome counts, linked analysis counts, average linked score, score bucket distribution, and top risk flags.
 
@@ -141,9 +141,9 @@ Examples are sorted by the repository's deterministic review ordering and capped
 
 ## Limitations and non-goals
 
-PR18b does not implement:
+PR19 does not implement:
 
-- PR19 Admin UI;
+- Admin UI;
 - PR35 Backtesting dashboard;
 - automatic calibration;
 - score formula or threshold changes;
@@ -162,7 +162,7 @@ PR18b does not implement:
 1. No migration is expected. Check `alembic heads` and `alembic current`; the current head should remain unchanged from PR18.
 2. Check health with `curl -i http://127.0.0.1:8010/health`.
 3. Capture baseline row counts for `human_reviews`, `human_review_actions`, `investment_decisions`, `listings`, `listing_analyses`, `alerts_sent`, `market_research_runs`, `market_evidence_items`, `agent_tasks`, `knowledge_notes`, `listing_enrichments`, `listing_detail_snapshots`, and `search_jobs`.
-4. Create temporary smoke rows manually using PR18 service or direct SQL with prefix `pr18b-smoke-2026-06-14`: one interesting review, one false-positive review, one sent-to-expert review, and one approved investment decision.
+4. Create temporary smoke rows manually using PR18 service or direct SQL with prefix `pr19-smoke-2026-06-14`: one interesting review, one false-positive review, one sent-to-expert review, and one approved investment decision.
 5. Run the outcome analytics service for `period_days=7` using a short one-off invocation inside the app container.
 6. Assert that the report has `request_hash`, `stats_snapshot_hash`, review counts, distinct listing counts, human verdict counts, outcome status counts, decision counts, score bucket stats when linked analysis exists, risk flag stats when linked analysis exists, and bounded examples.
 7. Assert no unrelated row counts changed and no commit was required.
