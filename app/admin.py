@@ -11,8 +11,8 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import APIKeyHeader
-from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, or_, select
+from sqlalchemy.orm import Session, raiseload
 
 from app.cli import _build_parser, _parser_stats_snapshot
 from app.core.config import settings
@@ -655,11 +655,13 @@ def dashboard(db: Session = Depends(get_db)):
 def admin_evidence(request: Request, db: Session = Depends(get_db), limit: str | None = Query(default=None)):
     api_key = request.query_params.get('api_key')
     effective_limit = _bounded_int(limit, 'limit', 50, 1, 200)
-    runs = db.scalars(select(MarketResearchRun).order_by(MarketResearchRun.created_at.desc(), MarketResearchRun.id.desc()).limit(effective_limit)).all()
+    runs = db.scalars(select(MarketResearchRun).options(raiseload(MarketResearchRun.evidence_items)).order_by(MarketResearchRun.created_at.desc(), MarketResearchRun.id.desc()).limit(effective_limit)).all()
+    run_ids = [run.id for run in runs]
+    item_counts = dict(db.execute(select(MarketEvidenceItem.run_id, func.count(MarketEvidenceItem.id)).where(MarketEvidenceItem.run_id.in_(run_ids)).group_by(MarketEvidenceItem.run_id)).all()) if run_ids else {}
     items = db.scalars(select(MarketEvidenceItem).order_by(MarketEvidenceItem.created_at.desc(), MarketEvidenceItem.id.desc()).limit(effective_limit)).all()
     run_rows = []
     for run in runs:
-        count = len(run.evidence_items or [])
+        count = item_counts.get(run.id, 0)
         run_rows.append(f"<tr><td>{run.id}<br><a href='{_html_attr(_admin_url(f'/admin/evidence/runs/{run.id}', api_key))}'>детали</a></td><td>{html.escape(run.listing_external_id or '—')}</td><td>{html.escape(run.research_profile or '—')}</td><td>{html.escape(run.provider or '—')}</td><td>{html.escape(run.status or '—')}</td><td>{display_datetime(run.created_at)}</td><td>{display_datetime(run.checked_at)}</td><td>{count}</td><td>{_json_details('Показать технические данные', {'query_plan_json': run.query_plan_json, 'sources_json': run.sources_json, 'limitations_json': run.limitations_json, 'summary': run.summary})}</td></tr>")
     item_rows = []
     for item in items:

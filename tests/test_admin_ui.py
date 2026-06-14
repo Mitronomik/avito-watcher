@@ -1626,6 +1626,34 @@ def test_pr19c_evidence_and_agent_pages_are_read_only_and_safe(monkeypatch):
             assert s.query(model).count() == before[model.__tablename__]
 
 
+def test_pr19c_evidence_run_item_count_uses_aggregate_without_relationship_load(monkeypatch):
+    from app.models.market_evidence import MarketEvidenceItem
+
+    client, Session = make_client(monkeypatch)
+    run_id, _task_id = _create_evidence_and_agent(Session)
+    with Session() as s:
+        s.add(
+            MarketEvidenceItem(
+                run_id=run_id,
+                listing_external_id="ext-evidence",
+                evidence_type="risk",
+                research_profile="default",
+                title="Third aggregate-only item",
+                source_url="https://example.com/third",
+                evidence_json={"token": "secret"},
+                content_hash="hash-third",
+            )
+        )
+        s.commit()
+
+    response = client.get("/admin/evidence?limit=1")
+
+    assert response.status_code == 200
+    assert f"/admin/evidence/runs/{run_id}" in response.text
+    assert "<td>3</td><td><details><summary>Показать технические данные</summary>" in response.text
+    assert "Third aggregate-only item" in response.text
+
+
 def test_pr19c_outcome_analytics_uses_service(monkeypatch):
     from app.schemas.outcome_analytics import (
         DecisionCounts,
