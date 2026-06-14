@@ -19,8 +19,12 @@ from app.db.init_db import init_db
 from app.db.session import SessionLocal
 from app.repositories.agent_task_repository import AgentTaskRepository
 from app.repositories.search_repository import SearchRepository
-from app.services.agent_task_runner import AgentTaskRunner, build_default_agent_task_handlers
+from app.services.agent_task_runner import (
+    AgentTaskRunner,
+    build_default_agent_task_handlers,
+)
 from app.services.monitor_service import MonitorService, runtime_diagnostics
+from app.services.market_evidence import MarketEvidenceService
 
 
 def _parser_stats_snapshot(parser_instance: "AvitoParser") -> dict:
@@ -268,9 +272,15 @@ def _search_analysis_profile_diagnostic(search) -> dict:
         warning = "missing_analysis_profile"
     elif analysis_profile not in SUPPORTED_ANALYSIS_PROFILES:
         warning = "unknown_analysis_profile"
-    elif analysis_profile == "commercial_rent" and "/kommercheskaya_nedvizhimost/" not in search.source_url:
+    elif (
+        analysis_profile == "commercial_rent"
+        and "/kommercheskaya_nedvizhimost/" not in search.source_url
+    ):
         warning = "commercial_profile_on_non_commercial_hint"
-    elif analysis_profile in {"flat_sale", "flat_rent"} and "/kvartiry/" not in search.source_url:
+    elif (
+        analysis_profile in {"flat_sale", "flat_rent"}
+        and "/kvartiry/" not in search.source_url
+    ):
         warning = "flat_profile_on_non_flat_hint"
 
     return {
@@ -288,11 +298,16 @@ def cmd_check_analysis_profiles(args) -> None:
     del args
     init_db()
     with SessionLocal() as db:
-        searches = [_search_analysis_profile_diagnostic(search) for search in SearchRepository(db).list_all()]
+        searches = [
+            _search_analysis_profile_diagnostic(search)
+            for search in SearchRepository(db).list_all()
+        ]
         result = {
             "ok": True,
             "searches_total": len(searches),
-            "searches_without_analysis_profile": sum(1 for item in searches if not item["analysis_profile"]),
+            "searches_without_analysis_profile": sum(
+                1 for item in searches if not item["analysis_profile"]
+            ),
             "searches": searches,
         }
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -463,9 +478,9 @@ def _skipped_search_result(search, profile: str | None, skip_reason: str) -> dic
 
 
 def _pending_search_matches(db, search, provider, limit: int) -> list:
-    return ListingAnalysisService(db, provider=provider).list_search_matches_needing_analysis(
-        search_job_id=search.id, limit=limit
-    )
+    return ListingAnalysisService(
+        db, provider=provider
+    ).list_search_matches_needing_analysis(search_job_id=search.id, limit=limit)
 
 
 def cmd_analyze_all_active_searches(args) -> None:
@@ -519,7 +534,9 @@ def cmd_analyze_all_active_searches(args) -> None:
                     db, search, provider, args.limit_per_search
                 )
                 if not pending_matches:
-                    results.append(_skipped_search_result(search, profile, "no_pending_matches"))
+                    results.append(
+                        _skipped_search_result(search, profile, "no_pending_matches")
+                    )
                     continue
 
                 if args.dry_run:
@@ -551,7 +568,9 @@ def cmd_analyze_all_active_searches(args) -> None:
                         "analysis_profile": profile,
                         "status": "processed",
                         "count": len(analyses),
-                        "analyses": [_analysis_to_json(analysis) for analysis in analyses],
+                        "analyses": [
+                            _analysis_to_json(analysis) for analysis in analyses
+                        ],
                     }
                 )
             except Exception as exc:
@@ -581,7 +600,9 @@ def cmd_analyze_all_active_searches(args) -> None:
             "searches_processed": sum(
                 1 for item in results if item["status"] == "processed"
             ),
-            "searches_skipped": sum(1 for item in results if item["status"] == "skipped"),
+            "searches_skipped": sum(
+                1 for item in results if item["status"] == "skipped"
+            ),
             "searches_failed": sum(1 for item in results if item["status"] == "failed"),
             "analyses_created_total": analyses_created_total,
             "results": results,
@@ -613,6 +634,14 @@ def cmd_admin_server(args) -> None:
 
     app = create_app(admin_ui_enabled=True)
     uvicorn.run(app, host=args.host, port=args.port)
+
+
+def cmd_ingest_market_evidence(args) -> None:
+    init_db()
+    with SessionLocal() as db:
+        result = MarketEvidenceService(db).ingest_agent_task(args.task_id)
+        db.commit()
+        print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -705,6 +734,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_agent_tasks.add_argument("--task-type", required=False)
     run_agent_tasks.add_argument("--dry-run", action="store_true")
     run_agent_tasks.set_defaults(func=cmd_run_agent_tasks)
+
+    ingest_market_evidence = sub.add_parser(
+        "ingest-market-evidence",
+        help="Manually ingest a successful market_research AgentTask into SQL market evidence",
+    )
+    ingest_market_evidence.add_argument("--task-id", type=int, required=True)
+    ingest_market_evidence.set_defaults(func=cmd_ingest_market_evidence)
 
     return parser
 
