@@ -63,6 +63,17 @@ class Settings(BaseSettings):
     market_evidence_default_ttl_days: int = 30
     market_evidence_min_confidence_for_reuse: float = 0.5
     market_evidence_max_retrieval_items: int = 10
+    weekly_strategy_agent_enabled: bool = False
+    weekly_strategy_agent_provider: Literal["off", "openai_compatible"] = "off"
+    weekly_strategy_agent_model: str = ""
+    weekly_strategy_agent_base_url: str = ""
+    weekly_strategy_agent_api_key: str = ""
+    weekly_strategy_agent_timeout_sec: int = 60
+    weekly_strategy_agent_max_retries: int = 1
+    weekly_strategy_agent_max_input_chars: int = 16000
+    weekly_strategy_agent_max_output_chars: int = 12000
+    weekly_strategy_agent_prompt_version: str = "weekly-strategy-agent-v1"
+    weekly_strategy_agent_schema_version: str = "weekly-strategy-agent-result-v1"
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     api_key: str = ""
