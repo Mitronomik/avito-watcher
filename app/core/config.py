@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     research_agent_max_output_chars: int = 12000
     research_agent_prompt_version: str = "research-agent-v1"
     research_agent_schema_version: str = "research-agent-result-v1"
+    market_evidence_default_ttl_days: int = 30
+    market_evidence_min_confidence_for_reuse: float = 0.5
+    market_evidence_max_retrieval_items: int = 10
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     api_key: str = ""

@@ -9,6 +9,8 @@ from app.models.listing_search_match import ListingSearchMatch  # noqa: F401
 from app.models.knowledge_note import KnowledgeNote  # noqa: F401
 from app.models.listing_detail_snapshot import ListingDetailSnapshot  # noqa: F401
 from app.models.listing_enrichment import ListingEnrichment  # noqa: F401
+from app.models.market_evidence import MarketEvidenceItem, MarketResearchRun  # noqa: F401
+
 
 
 def init_db() -> None:

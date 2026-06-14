@@ -13,6 +13,7 @@ from app.models.agent_task import AgentTask
 from app.models.knowledge_note import KnowledgeNote
 from app.models.listing_detail_snapshot import ListingDetailSnapshot
 from app.models.listing_enrichment import ListingEnrichment
+from app.models.market_evidence import MarketEvidenceItem, MarketResearchRun
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)
