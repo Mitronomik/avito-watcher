@@ -52,6 +52,8 @@ The service generates it when it is not provided. It is unique in the database a
 
 Unknown values fail closed in the service layer.
 
+`review_status` is intentionally only a coarse review lifecycle. Funnel states such as `watchlist`, `sent_to_expert`, and `deal_candidate` are not valid `review_status` values; they are represented by the `watchlist` flag, `outcome_status`, and/or durable rows in `investment_decisions`.
+
 ## Confirmed human facts
 
 Human-confirmed purchase price, rent, area, opex, capex, vacancy, and source fields are stored on `human_reviews`. They do not overwrite parsed listing fields, researched market evidence, or `listing_analyses` facts.

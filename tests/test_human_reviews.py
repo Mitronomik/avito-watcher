@@ -22,6 +22,16 @@ def test_create_review_generates_context_and_action(db_session):
     assert db_session.scalars(select(HumanReviewAction)).one().action_type == "created"
 
 
+def test_create_review_with_explicit_context_key_removes_context_type(db_session):
+    review = HumanReviewService(db_session).create_review(
+        listing_external_id="x",
+        review_context_key="custom",
+        context_type="expert",
+    )
+
+    assert review.review_context_key == "custom"
+
+
 def test_create_review_linked_to_listing_and_analysis(db_session):
     listing = Listing(external_id="l1", url="https://example.test", title="t")
     db_session.add(listing)
@@ -43,6 +53,26 @@ def test_update_review_compact_diff_and_preserves_history(db_session):
     assert actions[1].before_json == {"review_status": "new", "next_action": None, "outcome_status": None, "notes": None, "reviewed_at": None}
     assert set(actions[1].after_json) == {"review_status", "next_action", "outcome_status", "notes", "reviewed_at"}
     assert review.reviewed_at is not None
+
+
+@pytest.mark.parametrize("field,value", [
+    ("review_context_key", "other"),
+    ("listing_external_id", "other"),
+    ("listing_id", 1),
+    ("search_job_id", 1),
+    ("listing_analysis_id", 1),
+])
+def test_update_review_rejects_identity_context_mutation(db_session, field, value):
+    service = HumanReviewService(db_session)
+    review = service.create_review(listing_external_id="immutable")
+    original_context_key = review.review_context_key
+    original_external_id = review.listing_external_id
+
+    with pytest.raises(HumanReviewValidationError):
+        service.update_review(review.id, **{field: value})
+
+    assert review.review_context_key == original_context_key
+    assert review.listing_external_id == original_external_id
 
 
 def test_record_investment_decision_appends_action(db_session):
@@ -103,6 +133,10 @@ def test_decision_validation_and_no_side_effect_counts(db_session):
     service = HumanReviewService(db_session)
     review = service.create_review(listing_external_id="safe")
     service.update_review(review.id, human_verdict="interesting")
+    with pytest.raises(HumanReviewValidationError, match="decision_type is required"):
+        service.record_investment_decision(review.id, decision_status="done")
+    with pytest.raises(HumanReviewValidationError, match="decision_status is required"):
+        service.record_investment_decision(review.id, decision_type="offer")
     with pytest.raises(HumanReviewValidationError):
         service.record_investment_decision(review.id, decision_type="bad", decision_status="done")
     with pytest.raises(HumanReviewValidationError):
@@ -112,3 +146,50 @@ def test_decision_validation_and_no_side_effect_counts(db_session):
     service.record_investment_decision(review.id, decision_type="offer", decision_status="proposed")
     counts_after = {name: db_session.scalar(select(func.count()).select_from(table)) for name, table in Base.metadata.tables.items() if name not in {"human_reviews", "human_review_actions", "investment_decisions"}}
     assert counts_after == counts_before
+
+
+def test_watchlist_sent_to_expert_and_deal_candidate_are_outcomes_not_review_statuses(db_session):
+    service = HumanReviewService(db_session)
+    watchlist_review = service.create_review(
+        listing_external_id="watch",
+        review_status="reviewed",
+        watchlist=True,
+        outcome_status="watchlist",
+    )
+    expert_review = service.create_review(
+        listing_external_id="expert",
+        review_status="reviewed",
+        outcome_status="sent_to_expert",
+    )
+    deal_review = service.create_review(
+        listing_external_id="deal",
+        review_status="reviewed",
+        outcome_status="deal_candidate",
+    )
+    expert_decision = service.record_investment_decision(
+        expert_review.id,
+        decision_type="send_to_expert",
+        decision_status="done",
+    )
+    deal_decision = service.record_investment_decision(
+        deal_review.id,
+        decision_type="deal_candidate",
+        decision_status="approved",
+    )
+
+    assert watchlist_review.review_status == "reviewed"
+    assert watchlist_review.watchlist is True
+    assert watchlist_review.outcome_status == "watchlist"
+    assert expert_review.review_status == "reviewed"
+    assert expert_review.outcome_status == "sent_to_expert"
+    assert expert_decision.decision_type == "send_to_expert"
+    assert deal_review.review_status == "reviewed"
+    assert deal_review.outcome_status == "deal_candidate"
+    assert deal_decision.decision_type == "deal_candidate"
+
+    for invalid_status in ("watchlist", "sent_to_expert", "deal_candidate"):
+        with pytest.raises(HumanReviewValidationError):
+            service.create_review(
+                listing_external_id=f"invalid-{invalid_status}",
+                review_status=invalid_status,
+            )

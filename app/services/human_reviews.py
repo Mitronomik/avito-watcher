@@ -33,6 +33,27 @@ CONFIRMED_NUMERIC = {
     "confirmed_opex_monthly_rub", "confirmed_opex_ratio", "confirmed_capex_initial_rub", "confirmed_vacancy_rate",
 }
 MONEY_FIELDS = {"amount_rub", "expected_monthly_rent_rub", "actual_monthly_rent_rub", "actual_purchase_price_rub"}
+HUMAN_EDITABLE_REVIEW_FIELDS = {
+    "review_status",
+    "human_verdict",
+    "next_action",
+    "rejected_reason",
+    "outcome_status",
+    "watchlist",
+    "false_positive",
+    "false_negative",
+    "confirmed_purchase_price_rub",
+    "confirmed_monthly_rent_rub",
+    "confirmed_area_m2",
+    "confirmed_opex_monthly_rub",
+    "confirmed_opex_ratio",
+    "confirmed_capex_initial_rub",
+    "confirmed_vacancy_rate",
+    "confirmed_source",
+    "reviewer",
+    "notes",
+    "payload_json",
+}
 
 
 class HumanReviewValidationError(ValueError):
@@ -134,12 +155,13 @@ class HumanReviewService:
 
     def create_review(self, **kwargs: Any) -> HumanReview:
         data = _validate_common(kwargs)
+        context_type = data.pop("context_type", "listing")
         if "listing_external_id" not in data:
             raise HumanReviewValidationError("listing_external_id is required")
         self._validate_links(data)
         data.setdefault("review_status", "new")
         data.setdefault("watchlist", False)
-        data["review_context_key"] = data.get("review_context_key") or build_review_context_key(data["listing_external_id"], data.get("search_job_id"), data.get("listing_analysis_id"), data.pop("context_type", "listing"))
+        data["review_context_key"] = data.get("review_context_key") or build_review_context_key(data["listing_external_id"], data.get("search_job_id"), data.get("listing_analysis_id"), context_type)
         if self.repo.get_by_context_key(data["review_context_key"]):
             raise HumanReviewValidationError("review_context_key already exists")
         now = utcnow()
@@ -152,11 +174,11 @@ class HumanReviewService:
     def update_review(self, review_id: int, **kwargs: Any) -> HumanReview:
         review = self.get_review(review_id)
         data = _validate_common(kwargs)
-        allowed = {c.name for c in HumanReview.__table__.columns} - {"id", "created_at", "updated_at"}
+        immutable_fields = set(data) - HUMAN_EDITABLE_REVIEW_FIELDS
+        if immutable_fields:
+            raise HumanReviewValidationError(f"immutable human review fields cannot be updated: {', '.join(sorted(immutable_fields))}")
         before, after = {}, {}
         for key, value in data.items():
-            if key not in allowed:
-                continue
             old = getattr(review, key)
             if old != value:
                 before[key] = str(old) if isinstance(old, Decimal) else old
@@ -193,6 +215,10 @@ class HumanReviewService:
 
     def record_investment_decision(self, human_review_id: int, **kwargs: Any) -> InvestmentDecision:
         review = self.get_review(human_review_id)
+        if kwargs.get("decision_type") is None:
+            raise HumanReviewValidationError("decision_type is required")
+        if kwargs.get("decision_status") is None:
+            raise HumanReviewValidationError("decision_status is required")
         _validate_choice("decision_type", kwargs.get("decision_type"), DECISION_TYPES)
         _validate_choice("decision_status", kwargs.get("decision_status"), DECISION_STATUSES)
         data = dict(kwargs)
