@@ -11,6 +11,7 @@ from app.core.config import Settings
 from app.models.agent_task import AgentTask
 from app.models.listing import Listing
 from app.models.listing_analysis import ListingAnalysis
+from app.models.listing_search_match import ListingSearchMatch
 from app.models.search_job import SearchJob
 from app.repositories.agent_task_repository import AgentTaskRepository
 from app.services.agent_task_runner import (
@@ -201,6 +202,7 @@ def test_stats_collector_stable_and_read_only(db_session):
     db_session.add(sj)
     db_session.flush()
     db_session.add(Listing(external_id="e1", url="u", title="T", area_m2=None))
+    db_session.add(ListingSearchMatch(search_job_id=sj.id, listing_external_id="e1"))
     db_session.add(
         ListingAnalysis(
             listing_external_id="e1",
@@ -210,7 +212,10 @@ def test_stats_collector_stable_and_read_only(db_session):
             profile="p",
             input_hash="h",
             score=0.8,
-            risks_json={"missing_area": True},
+            risks_json={
+                "flags": ["missing_area", "stale_publication", 123, None],
+                "items": [{"code": "ignored_item_code"}],
+            },
         )
     )
     db_session.commit()
@@ -221,7 +226,16 @@ def test_stats_collector_stable_and_read_only(db_session):
         period_end_at=datetime(2100, 1, 1),
     )
     assert snap["analysis_stats"][0]["profile"] == "p"
-    assert snap["risk_flags"][0]["risk_flag"] == "missing_area"
+    risk_counts = {row["risk_flag"]: row["count"] for row in snap["risk_flags"]}
+    assert risk_counts["missing_area"] == 1
+    assert risk_counts["stale_publication"] == 1
+    assert "items" not in risk_counts
+    assert "ignored_item_code" not in risk_counts
+    assert snap["search_stats"][0]["created_listings_count"] == 1
+    assert snap["search_stats"][0]["matched_listings_count"] == 1
+    assert snap["examples"][0]["search_job_id"] == sj.id
+    assert snap["examples"][0]["listing_id"]
+    assert "search_id" not in snap["examples"][0]
     assert sha256_json(snap) == sha256_json(snap)
     assert db_session.scalar(select(func.count()).select_from(Listing)) == before
 
@@ -231,6 +245,7 @@ def test_success_sets_service_metadata_and_sanitizes_refs(db_session, monkeypatc
     db_session.add(sj)
     db_session.flush()
     db_session.add(Listing(external_id="known", url="u", title="T"))
+    db_session.add(ListingSearchMatch(search_job_id=sj.id, listing_external_id="known"))
     db_session.commit()
     task = AgentTask(
         task_type=WEEKLY_STRATEGY_AGENT_TASK_TYPE,

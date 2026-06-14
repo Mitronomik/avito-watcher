@@ -188,6 +188,21 @@ def resolve_weekly_strategy_provider() -> WeeklyStrategyProvider:
     return OffWeeklyStrategyProvider()
 
 
+def extract_risk_flags(risks_json: Any) -> list[str]:
+    if not isinstance(risks_json, dict):
+        return []
+
+    flags = risks_json.get("flags")
+    if isinstance(flags, list):
+        return [flag for flag in flags if isinstance(flag, str) and flag.strip()]
+
+    return [
+        key
+        for key, value in risks_json.items()
+        if key not in {"items", "flags"} and isinstance(key, str) and value
+    ]
+
+
 class WeeklyStrategyStatsCollector:
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -208,24 +223,22 @@ class WeeklyStrategyStatsCollector:
         search_ids = [s.id for s in searches]
         search_stats = []
         for s in searches:
-            created = (
-                self.db.scalar(
-                    select(func.count())
-                    .select_from(Listing)
-                    .where(
-                        Listing.first_seen_at >= period_start_at,
-                        Listing.first_seen_at <= period_end_at,
-                    )
-                )
-                or 0
-            )
-            matched_q = (
+            created_q = (
                 select(func.count())
                 .select_from(ListingSearchMatch)
                 .where(
                     ListingSearchMatch.search_job_id == s.id,
                     ListingSearchMatch.first_seen_at >= period_start_at,
                     ListingSearchMatch.first_seen_at <= period_end_at,
+                )
+            )
+            matched_q = (
+                select(func.count())
+                .select_from(ListingSearchMatch)
+                .where(
+                    ListingSearchMatch.search_job_id == s.id,
+                    ListingSearchMatch.last_seen_at >= period_start_at,
+                    ListingSearchMatch.last_seen_at <= period_end_at,
                 )
             )
             alerts = dict(
@@ -250,7 +263,7 @@ class WeeklyStrategyStatsCollector:
                         s.last_success_at.isoformat() if s.last_success_at else None
                     ),
                     "last_error": s.last_error,
-                    "created_listings_count": created,
+                    "created_listings_count": self.db.scalar(created_q) or 0,
                     "matched_listings_count": self.db.scalar(matched_q) or 0,
                     "alerts_count_by_channel": alerts,
                 }
@@ -288,9 +301,7 @@ class WeeklyStrategyStatsCollector:
                 ListingAnalysis.created_at <= period_end_at,
             )
         ).all():
-            risks = a.risks_json or {}
-            keys = risks.keys() if isinstance(risks, dict) else []
-            for k in keys:
+            for k in extract_risk_flags(a.risks_json):
                 bucket = risk_counts.setdefault(
                     k, {"risk_flag": k, "count": 0, "example_listing_external_ids": []}
                 )
@@ -336,19 +347,35 @@ class WeeklyStrategyStatsCollector:
                 }
                 for r in rows
             ]
-        examples = [
-            {
-                "external_id": listing.external_id,
-                "search_id": listing.id,
-                "title": (listing.title or "")[:160],
-                "price": listing.price,
-                "area_m2": listing.area_m2,
-            }
-            for listing in self.db.scalars(
+        example_listings = list(
+            self.db.scalars(
                 select(Listing)
                 .order_by(Listing.first_seen_at.desc())
                 .limit(payload.max_examples_per_section)
             ).all()
+        )
+        example_external_ids = [listing.external_id for listing in example_listings]
+        example_search_ids = {
+            row[0]: row[1]
+            for row in self.db.execute(
+                select(
+                    ListingSearchMatch.listing_external_id,
+                    func.min(ListingSearchMatch.search_job_id),
+                )
+                .where(ListingSearchMatch.listing_external_id.in_(example_external_ids))
+                .group_by(ListingSearchMatch.listing_external_id)
+            ).all()
+        }
+        examples = [
+            {
+                "external_id": listing.external_id,
+                "listing_id": listing.id,
+                "search_job_id": example_search_ids.get(listing.external_id),
+                "title": (listing.title or "")[:160],
+                "price": listing.price,
+                "area_m2": listing.area_m2,
+            }
+            for listing in example_listings
         ]
         return {
             "period": {
