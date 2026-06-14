@@ -19,9 +19,11 @@ from app.core.config import settings
 from app.db.session import get_db
 from app.models.listing import Listing
 from app.models.listing_analysis import ListingAnalysis
+from app.models.human_review import HUMAN_VERDICTS, NEXT_ACTIONS, OUTCOME_STATUSES, HumanReviewAction
 from app.parsers.errors import ParserError
 from app.repositories.search_repository import SearchRepository
 from app.services.monitor_service import MonitorService, runtime_diagnostics
+from app.services.human_reviews import HumanReviewService, HumanReviewValidationError, build_review_context_key
 from app.workers.status import read_worker_status, summarize_worker_status
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,120}$")
@@ -97,7 +99,48 @@ def display_review_status(value: object, lang: str | None = None) -> str:
     return _display_mapped(value, {"needs_review": "Требует проверки", "approved": "Одобрено", "rejected": "Отклонено", "false_positive": "Ложное срабатывание"}, lang)
 
 def display_outcome_status(value: object, lang: str | None = None) -> str:
-    return display_review_status(value, lang)
+    return _display_mapped(value, OUTCOME_STATUS_LABELS_RU, lang)
+
+HUMAN_VERDICT_LABELS_RU = {
+    "interesting": "Интересно",
+    "neutral": "Нейтрально",
+    "not_interesting": "Не интересно",
+    "false_positive": "Ложное срабатывание",
+    "false_negative": "Пропущенная возможность",
+    "needs_more_data": "Нужны данные",
+}
+OUTCOME_STATUS_LABELS_RU = {
+    "not_started": "Не начато",
+    "contacted_owner": "Связались с владельцем",
+    "waiting_response": "Ждём ответ",
+    "documents_requested": "Запрошены документы",
+    "sent_to_expert": "Отправлено эксперту",
+    "under_review": "На проверке",
+    "rejected_after_call": "Отклонено после звонка",
+    "watchlist": "В наблюдении",
+    "deal_candidate": "Кандидат в сделку",
+    "offer_made": "Сделано предложение",
+    "deal_lost": "Сделка потеряна",
+    "deal_done": "Сделка состоялась",
+    "closed": "Закрыто",
+}
+NEXT_ACTION_LABELS_RU = {
+    "open_listing": "Открыть объявление",
+    "call_owner": "Позвонить владельцу",
+    "request_documents": "Запросить документы",
+    "run_market_research": "Запустить исследование рынка",
+    "run_data_quality_review": "Проверить качество данных",
+    "send_to_expert": "Отправить эксперту",
+    "add_to_watchlist": "Добавить в наблюдение",
+    "reject": "Отклонить",
+    "do_nothing": "Ничего не делать",
+}
+
+def display_human_verdict(value: object, lang: str | None = None) -> str:
+    return _display_mapped(value, HUMAN_VERDICT_LABELS_RU, lang)
+
+def display_next_action(value: object, lang: str | None = None) -> str:
+    return _display_mapped(value, NEXT_ACTION_LABELS_RU, lang)
 
 def display_risk_flag(value: object, lang: str | None = None) -> str:
     return _display_mapped(value, {"missing_area": "Не указана площадь", "stale_publication": "Объявление может быть старым", "suspicious_low_price_per_m2": "Подозрительно низкая цена за м²", "market_evidence_used": "Использованы рыночные ориентиры"}, lang)
@@ -342,6 +385,98 @@ def _delivery_badge(attempted: int, unsuccessful: int, failed: int, unknown: int
 async def _parse_form(request: Request) -> dict[str, str]:
     data = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
     return {k: v[-1] if v else "" for k, v in data.items()}
+
+
+def _safe_external_link(url: str | None, label: str = "open") -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return "—"
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return html.escape(raw)
+    return f"<a href='{_html_attr(raw)}' target='_blank' rel='noopener noreferrer'>{html.escape(label)}</a>"
+
+
+def _latest_successful_analysis(db: Session, listing: Listing) -> ListingAnalysis | None:
+    return db.scalar(
+        select(ListingAnalysis)
+        .where(ListingAnalysis.listing_external_id == listing.external_id, ListingAnalysis.status == "success")
+        .order_by(ListingAnalysis.created_at.desc(), ListingAnalysis.id.desc())
+        .limit(1)
+    )
+
+
+def _admin_listing_context_key(listing: Listing, analysis: ListingAnalysis | None) -> str:
+    return build_review_context_key(
+        listing.external_id,
+        search_job_id=None,
+        listing_analysis_id=analysis.id if analysis else None,
+        context_type="admin_listing_detail",
+    )
+
+
+def _admin_listing_review(service: HumanReviewService, listing: Listing, analysis: ListingAnalysis | None):
+    preferred = service.get_review_by_context_key(_admin_listing_context_key(listing, analysis))
+    if preferred:
+        return preferred
+    for review in service.list_reviews(listing_external_id=listing.external_id):
+        if str(review.review_context_key or "").endswith(":context:admin_listing_detail"):
+            return review
+    return None
+
+
+def _require_admin_write_form(request: Request, form: dict[str, str]) -> None:
+    expected = _configured_write_key()
+    if not expected:
+        return
+    header_key = request.headers.get("X-API-Key")
+    form_key = form.pop("admin_write_key", None)
+    # Query-string keys intentionally remain governed by ADMIN_UI_ALLOW_QUERY_API_KEY.
+    query_key = request.query_params.get("api_key") if settings.admin_ui_allow_query_api_key else None
+    if header_key == expected or form_key == expected or query_key == expected:
+        return
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid admin write key")
+
+
+def _parse_bool_field(value: str | None) -> bool:
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"", "0", "false", "no", "off"}:
+        return False
+    raise ValueError("watchlist must be boolean")
+
+
+def _validate_review_form(form: dict[str, str]) -> dict[str, object]:
+    human_verdict = (form.get("human_verdict") or "").strip() or None
+    outcome_status = (form.get("outcome_status") or "").strip() or None
+    next_action = (form.get("next_action") or "").strip() or None
+    if human_verdict is not None and human_verdict not in HUMAN_VERDICTS:
+        raise ValueError("invalid human_verdict")
+    if outcome_status is not None and outcome_status not in OUTCOME_STATUSES:
+        raise ValueError("invalid outcome_status")
+    if next_action is not None and next_action not in NEXT_ACTIONS:
+        raise ValueError("invalid next_action")
+    notes = form.get("notes") or None
+    if notes is not None and len(notes) > 5000:
+        raise ValueError("notes is too long")
+    return {
+        "human_verdict": human_verdict,
+        "outcome_status": outcome_status,
+        "next_action": next_action,
+        "watchlist": _parse_bool_field(form.get("watchlist")),
+        "notes": notes,
+        "reviewer": "admin_ui",
+    }
+
+
+def _select_options(values: set[str], labels: dict[str, str], selected: str | None) -> str:
+    options = ["<option value=''>—</option>"]
+    for value in sorted(values):
+        options.append(
+            f"<option value='{_html_attr(value)}' {'selected' if value == selected else ''}>{html.escape(labels.get(value, value))} ({html.escape(value)})</option>"
+        )
+    return "".join(options)
 
 
 def _job_form(job=None, error: str = "", return_url: str = "") -> str:
@@ -775,9 +910,10 @@ def listings(request: Request, db: Session = Depends(get_db), limit: int = Query
     items = db.scalars(stmt.order_by(Listing.last_seen_at.desc(), Listing.id.desc()).limit(effective_limit)).all()
     rows = []
     for item in items:
-        open_link = f"<a href='{_html_attr(item.url)}' target='_blank' rel='noopener noreferrer'>open</a>" if item.url else ''
+        detail_link = f"<a href='{_html_attr(_admin_url(f'/admin/listings/{item.id}', api_key))}'>детали</a>"
+        open_link = _safe_external_link(item.url, "источник") if item.url else ''
         rows.append(
-            f"<tr><td>{html.escape(str(item.id or ''))}</td><td>{html.escape(item.external_id or '')}</td><td>{html.escape(item.title or '')}</td>"
+            f"<tr><td>{html.escape(str(item.id or ''))}<br>{detail_link}</td><td>{html.escape(item.external_id or '')}</td><td>{html.escape(item.title or '')}</td>"
             f"<td>{html.escape(str(item.price or ''))}</td><td>{html.escape(str(item.area_m2 or ''))}</td><td>{html.escape(item.address or '')}</td>"
             f"<td>{html.escape(item.published_label or '')}</td><td>{html.escape(str(item.first_seen_at or ''))}</td><td>{html.escape(str(item.last_seen_at or ''))}</td><td>{open_link}</td></tr>"
         )
@@ -799,6 +935,131 @@ def listings(request: Request, db: Session = Depends(get_db), limit: int = Query
         f"<button type='submit'>Apply</button></form>{empty}{table}"
     )
     return _render_page('Listings', body)
+
+
+def _render_listing_detail_body(listing: Listing, analysis: ListingAnalysis | None, review, actions: list[HumanReviewAction], api_key: str | None, saved: bool = False, error: str = "") -> str:
+    success = "<div class='note'>Решение сохранено.</div>" if saved else ""
+    error_html = f"<div class='error'>{html.escape(error)}</div>" if error else ""
+    core = (
+        "<div class='section'><h3>Объявление</h3>"
+        f"<p><strong>ID:</strong> {listing.id}<br><strong>external_id:</strong> {html.escape(listing.external_id or '')}<br>"
+        f"<strong>Название:</strong> {html.escape(listing.title or '')}<br><strong>Цена:</strong> {display_money(listing.price)}<br>"
+        f"<strong>Площадь:</strong> {display_area(listing.area_m2)}<br><strong>Адрес:</strong> {html.escape(listing.address or '')}<br>"
+        f"<strong>Источник:</strong> {_safe_external_link(listing.url, listing.url)}<br><strong>Публикация:</strong> {html.escape(listing.published_label or '')}<br>"
+        f"<strong>published_at:</strong> {display_datetime(listing.published_at)}<br><strong>first_seen_at:</strong> {display_datetime(listing.first_seen_at)}<br>"
+        f"<strong>last_seen_at:</strong> {display_datetime(listing.last_seen_at)}<br><strong>Активно:</strong> {display_boolean(listing.is_active)}</p></div>"
+    )
+    if analysis:
+        risk_flags = (analysis.risks_json or {}).get("flags") if isinstance(analysis.risks_json, dict) else None
+        risks = ", ".join(display_risk_flag(x) for x in (risk_flags or [])) or "—"
+        questions = redact_admin_json(analysis.questions_json or {})
+        facts = redact_admin_json(analysis.facts_json or {})
+        report = html.escape(_truncate(analysis.report_md or "", 700))
+        analysis_html = (
+            "<div class='section'><h3>Последний успешный детерминированный анализ</h3>"
+            f"<p><strong>ID:</strong> {analysis.id}<br><strong>Профиль:</strong> {html.escape(analysis.profile or '')}<br>"
+            f"<strong>Статус:</strong> {html.escape(analysis.status or '')}<br><strong>Оценка:</strong> {html.escape(str(analysis.score or '—'))}<br>"
+            f"<strong>Вердикт:</strong> {display_verdict(analysis.verdict)} ({html.escape(str(analysis.verdict or '—'))})<br>"
+            f"<strong>created_at:</strong> {display_datetime(analysis.created_at)}<br><strong>updated_at:</strong> {display_datetime(analysis.updated_at)}<br>"
+            f"<strong>Риски:</strong> {risks}</p><p><strong>Краткий отчёт:</strong><br><span class='preview'>{report}</span></p>"
+            f"<details><summary>{html.escape(_t('technical.details'))}: вопросы</summary><pre>{questions}</pre></details>"
+            f"<details><summary>{html.escape(_t('technical.details'))}: факты</summary><pre>{facts}</pre></details></div>"
+        )
+    else:
+        analysis_html = "<div class='section'><h3>Анализ</h3><p>Успешный детерминированный анализ не найден.</p></div>"
+    if review:
+        action_rows = "".join(
+            f"<li>{display_datetime(a.created_at)} — {html.escape(a.action_type)} — {html.escape(_truncate(a.note, 160))}</li>"
+            for a in actions
+        )
+        review_html = (
+            "<div class='section'><h3>Текущее human review</h3>"
+            f"<p><strong>ID:</strong> {review.id}<br><strong>review_status:</strong> {html.escape(review.review_status or '')}<br>"
+            f"<strong>human_verdict:</strong> {display_human_verdict(review.human_verdict)} ({html.escape(str(review.human_verdict or '—'))})<br>"
+            f"<strong>outcome_status:</strong> {display_outcome_status(review.outcome_status)} ({html.escape(str(review.outcome_status or '—'))})<br>"
+            f"<strong>watchlist:</strong> {display_boolean(review.watchlist)}<br><strong>next_action:</strong> {display_next_action(review.next_action)} ({html.escape(str(review.next_action or '—'))})<br>"
+            f"<strong>notes:</strong> {html.escape(review.notes or '—')}<br><strong>reviewed_at:</strong> {display_datetime(review.reviewed_at)}<br>"
+            f"<strong>created_at:</strong> {display_datetime(review.created_at)}<br><strong>updated_at:</strong> {display_datetime(review.updated_at)}<br>"
+            f"<strong>listing_analysis_id:</strong> {html.escape(str(review.listing_analysis_id or '—'))}<br><strong>search_job_id:</strong> {html.escape(str(review.search_job_id or '—'))}<br>"
+            f"<strong>review_context_key:</strong> <code>{html.escape(review.review_context_key or '')}</code></p>"
+            f"<details><summary>Последние действия</summary><ul>{action_rows or '<li>Нет действий</li>'}</ul></details></div>"
+        )
+    else:
+        review_html = "<div class='section'><h3>Human review</h3><p>Решение оператора ещё не сохранено.</p></div>"
+    selected_verdict = review.human_verdict if review else None
+    selected_outcome = review.outcome_status if review else None
+    selected_action = review.next_action if review else None
+    checked = "checked" if (review and review.watchlist) else ""
+    notes = _html_attr(review.notes if review else "")
+    form = (
+        f"<div class='section'><h3>Сохранить решение</h3><form method='post' action='{_html_attr(_admin_url(f'/admin/listings/{listing.id}/human-review', api_key))}'>"
+        "<div class='row'><label>Ключ записи<input name='admin_write_key' type='password' autocomplete='off'></label></div>"
+        f"<div class='row'><label>Вердикт<select name='human_verdict'>{_select_options(HUMAN_VERDICTS, HUMAN_VERDICT_LABELS_RU, selected_verdict)}</select></label></div>"
+        f"<div class='row'><label>Статус исхода<select name='outcome_status'>{_select_options(OUTCOME_STATUSES, OUTCOME_STATUS_LABELS_RU, selected_outcome)}</select></label></div>"
+        f"<div class='row'><label>Следующее действие<select name='next_action'>{_select_options(NEXT_ACTIONS, NEXT_ACTION_LABELS_RU, selected_action)}</select></label></div>"
+        f"<div class='row checkbox'><label><input name='watchlist' type='checkbox' value='true' {checked}>В наблюдении</label></div>"
+        f"<div class='row'><label>Комментарий<textarea name='notes' maxlength='5000'>{notes}</textarea></label></div>"
+        "<button type='submit'>Сохранить</button></form></div>"
+    )
+    return f"<h1>Объект #{listing.id}</h1><p><a href='{_html_attr(_admin_url('/admin/listings', api_key))}'>Назад к объектам</a></p>{success}{error_html}{core}{analysis_html}{review_html}{form}"
+
+
+@router.get('/listings/{listing_id}', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
+def listing_detail(request: Request, listing_id: int, db: Session = Depends(get_db), saved: int | None = Query(default=None)):
+    api_key = request.query_params.get('api_key')
+    listing = db.get(Listing, listing_id)
+    if listing is None:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    analysis = _latest_successful_analysis(db, listing)
+    service = HumanReviewService(db)
+    review = _admin_listing_review(service, listing, analysis)
+    actions = []
+    if review:
+        actions = list(db.scalars(select(HumanReviewAction).where(HumanReviewAction.human_review_id == review.id).order_by(HumanReviewAction.created_at.desc(), HumanReviewAction.id.desc()).limit(10)))
+    return _render_page("Listing detail", _render_listing_detail_body(listing, analysis, review, actions, api_key, saved=bool(saved)))
+
+
+@router.post('/listings/{listing_id}/human-review')
+async def save_listing_human_review(request: Request, listing_id: int, db: Session = Depends(get_db)):
+    form = await _parse_form(request)
+    try:
+        _require_admin_write_form(request, form)
+        data = _validate_review_form(form)
+        listing = db.get(Listing, listing_id)
+        if listing is None:
+            raise HTTPException(status_code=404, detail="Listing not found")
+        analysis = _latest_successful_analysis(db, listing)
+        service = HumanReviewService(db)
+        review = _admin_listing_review(service, listing, analysis)
+        if review:
+            service.update_review(review.id, **data)
+        else:
+            service.create_review(
+                listing_id=listing.id,
+                listing_external_id=listing.external_id,
+                listing_analysis_id=analysis.id if analysis else None,
+                search_job_id=None,
+                context_type="admin_listing_detail",
+                review_status="reviewed" if data.get("human_verdict") else "needs_review",
+                **data,
+            )
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except (ValueError, HumanReviewValidationError) as exc:
+        db.rollback()
+        listing = db.get(Listing, listing_id)
+        if listing is None:
+            raise HTTPException(status_code=404, detail="Listing not found") from exc
+        analysis = _latest_successful_analysis(db, listing)
+        service = HumanReviewService(db)
+        review = _admin_listing_review(service, listing, analysis)
+        actions = []
+        if review:
+            actions = list(db.scalars(select(HumanReviewAction).where(HumanReviewAction.human_review_id == review.id).order_by(HumanReviewAction.created_at.desc(), HumanReviewAction.id.desc()).limit(10)))
+        return HTMLResponse(_render_page("Validation error", _render_listing_detail_body(listing, analysis, review, actions, request.query_params.get('api_key'), error=str(exc))).body, status_code=400)
+    return RedirectResponse(_admin_url(f'/admin/listings/{listing_id}?saved=1', request.query_params.get('api_key')), status_code=303)
 
 @router.get('/searches/new', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
 def new_search_form(request: Request):

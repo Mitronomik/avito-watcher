@@ -3,7 +3,7 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select, func
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -13,6 +13,7 @@ from app.db.base import Base
 from app.main import create_app
 from app.models.listing import Listing
 from app.models.listing_analysis import ListingAnalysis
+from app.models.human_review import HumanReview, HumanReviewAction, InvestmentDecision
 from app.models.search_job import SearchJob
 from app.parsers.errors import ParserError, ParserErrorType
 
@@ -1283,3 +1284,153 @@ def test_pr19a_redaction_helpers():
     rendered = redact_admin_json({"smtp_password": "secret", "url": "https://script.google.com/macros/s/abc/exec"})
     assert "secret" not in rendered
     assert "https://script.google.com/.../exec" in rendered
+
+
+def test_listing_detail_human_review_workflow_and_safety(monkeypatch):
+    client, Session = make_client(monkeypatch, technical_ops_enabled=False, allow_query_api_key=False)
+    monkeypatch.setattr(settings, "admin_ui_read_key", "read-key")
+    monkeypatch.setattr(settings, "admin_ui_write_key", "write-key")
+    listing_id = create_listing(
+        Session,
+        external_id="detail-1",
+        title="<script>alert(1)</script> Хороший объект",
+        url="https://www.avito.ru/safe/path?x=1",
+        price=123.0,
+        area_m2=45.0,
+        address="Адрес",
+        published_label="сегодня",
+    )
+    unsafe_id = create_listing(Session, external_id="detail-unsafe", url="javascript:alert(1)", title="Unsafe")
+    create_listing_analysis(
+        Session,
+        listing_external_id="detail-1",
+        input_hash="old-analysis",
+        score=10,
+        verdict="weak",
+        risks_json={"flags": ["missing_area"]},
+        questions_json={"q": "old"},
+        facts_json={"api_key": "must-not-leak", "safe": "old"},
+        report_md="old <script>bad()</script>",
+        created_at=datetime(2026, 1, 1),
+    )
+    latest_analysis_id = create_listing_analysis(
+        Session,
+        listing_external_id="detail-1",
+        input_hash="latest-analysis",
+        score=88,
+        verdict="strong",
+        risks_json={"flags": ["market_evidence_used"]},
+        questions_json={"question": "Проверить документы?"},
+        facts_json={"safe": "fact", "token": "hidden"},
+        report_md="**Итог** <script>evil()</script>",
+        created_at=datetime(2026, 1, 3),
+    )
+    create_listing_analysis(
+        Session,
+        listing_external_id="detail-1",
+        input_hash="failed-analysis",
+        status="failed",
+        score=99,
+        verdict="reject",
+        report_md="failed should not win",
+        created_at=datetime(2026, 1, 4),
+    )
+
+    page_resp = client.get(f"/admin/listings/{listing_id}", headers={"X-API-Key": "read-key"})
+    assert page_resp.status_code == 200
+    page = page_resp.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+    assert "detail-1" in page
+    assert "href='https://www.avito.ru/safe/path?x=1'" in page
+    assert "88" in page and "latest-analysis" not in page and "failed should not win" not in page
+    assert "&lt;script&gt;evil()&lt;/script&gt;" in page and "<script>evil()</script>" not in page
+    assert "[redacted]" in page and "must-not-leak" not in page and "hidden" not in page
+    assert "write-key" not in page
+    unsafe_page = client.get(f"/admin/listings/{unsafe_id}", headers={"X-API-Key": "read-key"}).text
+    assert "javascript:alert(1)" in unsafe_page
+    assert "href='javascript:alert(1)'" not in unsafe_page
+
+    assert client.post(f"/admin/listings/{listing_id}/human-review", data={"human_verdict": "interesting"}).status_code == 403
+    assert client.post(
+        f"/admin/listings/{listing_id}/human-review",
+        headers={"X-API-Key": "read-key"},
+        data={"human_verdict": "interesting"},
+    ).status_code == 403
+    assert client.post(
+        f"/admin/listings/{listing_id}/human-review?api_key=write-key",
+        data={"human_verdict": "interesting"},
+    ).status_code == 403
+
+    bad = client.post(
+        f"/admin/listings/{listing_id}/human-review",
+        data={"admin_write_key": "write-key", "human_verdict": "bad-value"},
+    )
+    assert bad.status_code == 400
+    with Session() as s:
+        assert s.scalar(select(func.count()).select_from(HumanReview)) == 0
+        assert s.scalar(select(func.count()).select_from(HumanReviewAction)) == 0
+
+    ok = client.post(
+        f"/admin/listings/{listing_id}/human-review",
+        data={
+            "admin_write_key": "write-key",
+            "human_verdict": "interesting",
+            "outcome_status": "watchlist",
+            "next_action": "add_to_watchlist",
+            "watchlist": "true",
+            "notes": "note <script>x</script>",
+        },
+        follow_redirects=False,
+    )
+    assert ok.status_code == 303
+    with Session() as s:
+        review = s.scalars(select(HumanReview)).one()
+        assert review.listing_id == listing_id
+        assert review.listing_external_id == "detail-1"
+        assert review.listing_analysis_id == latest_analysis_id
+        assert review.search_job_id is None
+        assert review.review_context_key.endswith(":context:admin_listing_detail")
+        assert review.human_verdict == "interesting"
+        assert review.outcome_status == "watchlist"
+        assert review.next_action == "add_to_watchlist"
+        assert review.watchlist is True
+        assert "write-key" not in (review.notes or "")
+        action_count = s.scalar(select(func.count()).select_from(HumanReviewAction))
+        assert action_count >= 1
+        assert s.scalar(select(func.count()).select_from(InvestmentDecision)) == 0
+        original_context = review.review_context_key
+        original_created_at = review.created_at
+
+    create_listing_analysis(
+        Session,
+        listing_external_id="detail-1",
+        input_hash="newer-analysis",
+        score=100,
+        verdict="strong",
+        report_md="newer analysis",
+        created_at=datetime(2026, 1, 5),
+    )
+    upd = client.post(
+        f"/admin/listings/{listing_id}/human-review",
+        data={
+            "admin_write_key": "write-key",
+            "human_verdict": "needs_more_data",
+            "outcome_status": "documents_requested",
+            "next_action": "request_documents",
+            "watchlist": "false",
+            "notes": "updated",
+        },
+        follow_redirects=False,
+    )
+    assert upd.status_code == 303
+    with Session() as s:
+        reviews = s.scalars(select(HumanReview)).all()
+        assert len(reviews) == 1
+        review = reviews[0]
+        assert review.listing_analysis_id == latest_analysis_id
+        assert review.review_context_key == original_context
+        assert review.created_at == original_created_at
+        assert review.human_verdict == "needs_more_data"
+        assert s.scalar(select(func.count()).select_from(HumanReviewAction)) > action_count
+        assert s.scalar(select(func.count()).select_from(ListingAnalysis)) == 4
+        assert s.scalar(select(func.count()).select_from(Listing)) == 2
