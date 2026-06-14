@@ -78,6 +78,13 @@ class Settings(BaseSettings):
     telegram_chat_id: str = ""
     api_key: str = ""
     admin_ui_enabled: bool = False
+    admin_ui_mode: str = "operator"
+    admin_ui_language: str = "ru"
+    admin_ui_allow_query_api_key: bool = False
+    admin_ui_technical_ops_enabled: bool = False
+    admin_ui_read_key: str = ""
+    admin_ui_write_key: str = ""
+    admin_ui_technical_write_key: str = ""
     # Secret key to protect POST /monitor/run. Set API_KEY env var.
     # If empty, the endpoint is unprotected (dev mode only).
     scrape_headless: bool = True

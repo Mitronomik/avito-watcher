@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.core.config import settings
+from app.admin import redact_admin_json, redact_admin_value
 from app.db.base import Base
 from app.main import create_app
 from app.models.listing import Listing
@@ -1230,3 +1231,36 @@ def test_listing_analyses_page_is_read_only_and_has_no_runtime_side_effects(monk
     assert '>edit<' not in page.lower()
     assert '>run once<' not in page.lower()
     assert 'does not execute, edit, delete, or re-run analyses' in page
+
+
+def test_pr19a_operator_dashboard_and_technical_ops_default(monkeypatch):
+    client, Session = make_client(monkeypatch)
+    monkeypatch.setattr(settings, "admin_ui_technical_ops_enabled", False)
+    create_job(Session, name="safe_shell")
+
+    page = client.get("/admin").text
+    assert "Панель оператора" in page
+    assert "filters_json" not in page
+    assert "payload_json" not in page
+    assert "input_hash" not in page
+    assert "api_key=" not in page
+
+    searches_page = client.get("/admin/searches").text
+    assert "safe_shell" in searches_page
+    assert "Технические действия выключены" in searches_page
+    assert client.post("/admin/searches/1/run-once").status_code == 403
+
+
+def test_pr19a_query_api_key_disabled_by_default(monkeypatch):
+    client, _ = make_client(monkeypatch)
+    monkeypatch.setattr(settings, "api_key", "secret")
+    monkeypatch.setattr(settings, "admin_ui_allow_query_api_key", False)
+    assert client.get("/admin?api_key=secret").status_code == 403
+    assert client.get("/admin", headers={"X-API-Key": "secret"}).status_code == 200
+
+
+def test_pr19a_redaction_helpers():
+    assert redact_admin_value("secret", "telegram_bot_token") == "[redacted]"
+    rendered = redact_admin_json({"smtp_password": "secret", "url": "https://script.google.com/macros/s/abc/exec"})
+    assert "secret" not in rendered
+    assert "https://script.google.com/.../exec" in rendered
