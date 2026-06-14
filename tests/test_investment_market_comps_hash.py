@@ -80,3 +80,79 @@ def test_max_age_and_expiration_use_explicit_as_of(db_session):
     assert ctx.items == []
     assert ctx.excluded_counts_by_reason["too_old"] == 1
     assert ctx.excluded_counts_by_reason["expired"] == 1
+
+
+def test_matching_policy_and_selected_cross_listing_evidence_affect_hash(db_session):
+    _item(db_session, listing_external_id="l1", location_key="loc", content_hash="same")
+    _item(
+        db_session,
+        listing_external_id="other",
+        location_key="loc",
+        content_hash="cross",
+    )
+    same_cfg = AnalysisConfig.from_search_filters(
+        "commercial_sale_investment",
+        {
+            "use_market_evidence": True,
+            "market_evidence_matching_policy": "same_listing",
+            "market_evidence_location_key": "loc",
+        },
+    )
+    cross_cfg = AnalysisConfig.from_search_filters(
+        "commercial_sale_investment",
+        {
+            "use_market_evidence": True,
+            "market_evidence_matching_policy": "same_location_key",
+            "market_evidence_location_key": "loc",
+        },
+    )
+    same_ctx = select_market_evidence(
+        candidates=db_session.query(MarketEvidenceItem).all(),
+        config=same_cfg,
+        expected_asset_type="commercial",
+        evidence_retrieval_as_of_datetime=AS_OF,
+        evidence_retrieval_as_of_date=AS_OF.date(),
+        target_listing_external_id="l1",
+    )
+    cross_ctx = select_market_evidence(
+        candidates=db_session.query(MarketEvidenceItem).all(),
+        config=cross_cfg,
+        expected_asset_type="commercial",
+        evidence_retrieval_as_of_datetime=AS_OF,
+        evidence_retrieval_as_of_date=AS_OF.date(),
+        target_listing_external_id="l1",
+    )
+    assert market_evidence_fingerprint_hash(
+        same_ctx
+    ) != market_evidence_fingerprint_hash(cross_ctx)
+    h1 = market_evidence_fingerprint_hash(cross_ctx)
+    _item(
+        db_session,
+        listing_external_id="other2",
+        location_key="wrong",
+        content_hash="irrelevant",
+    )
+    cross_ctx_2 = select_market_evidence(
+        candidates=db_session.query(MarketEvidenceItem).all(),
+        config=cross_cfg,
+        expected_asset_type="commercial",
+        evidence_retrieval_as_of_datetime=AS_OF.replace(hour=12),
+        evidence_retrieval_as_of_date=AS_OF.date(),
+        target_listing_external_id="l1",
+    )
+    assert h1 == market_evidence_fingerprint_hash(cross_ctx_2)
+    _item(
+        db_session,
+        listing_external_id="other3",
+        location_key="loc",
+        content_hash="selected-new",
+    )
+    cross_ctx_3 = select_market_evidence(
+        candidates=db_session.query(MarketEvidenceItem).all(),
+        config=cross_cfg,
+        expected_asset_type="commercial",
+        evidence_retrieval_as_of_datetime=AS_OF,
+        evidence_retrieval_as_of_date=AS_OF.date(),
+        target_listing_external_id="l1",
+    )
+    assert h1 != market_evidence_fingerprint_hash(cross_ctx_3)

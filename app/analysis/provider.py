@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from app.analysis.config import AnalysisConfig
 from app.analysis.investment import calculate_investment_metrics
 from app.analysis.market_comps import (
+    MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY,
     SelectedMarketEvidenceContext,
     estimate_market_rent,
 )
@@ -1460,6 +1461,46 @@ class InvestmentAnalysisProvider:
                         > market_evidence_context.config.manual_mismatch_threshold_pct
                     ):
                         market_flags.append("manual_rent_differs_from_market_evidence")
+            for limitation in market_evidence_context.limitations:
+                market_flags.append(limitation)
+            if (
+                market_evidence_context.config.matching_policy
+                == MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY
+            ):
+                if market_estimate is not None and market_estimate.comp_count == 0:
+                    market_flags.append("market_evidence_location_key_no_matches")
+                if (
+                    config.estimated_monthly_rent is None
+                    and market_estimate is not None
+                    and market_estimate.usable_comp_count
+                    < market_evidence_context.config.min_comps
+                ):
+                    market_flags.append("cross_listing_low_sample")
+                external_ids = {
+                    i.listing_external_id
+                    for i in market_evidence_context.items
+                    if i.listing_external_id
+                    != market_evidence_context.target_listing_external_id
+                }
+                selected_urls = {
+                    i.source_url_normalized
+                    for i in market_evidence_context.items
+                    if i.source_url_normalized
+                }
+                has_cross_listing = bool(external_ids)
+                low_diversity = bool(market_evidence_context.items) and (
+                    len({i.listing_external_id for i in market_evidence_context.items})
+                    < 2
+                    and len(selected_urls) < 2
+                )
+                if rent_source == "market_evidence" and has_cross_listing:
+                    market_flags.append("cross_listing_evidence_requires_human_review")
+                    market_flags.append("cross_listing_evidence_without_quality_score")
+                    verdict_cap = _strongest_verdict_cap(verdict_cap, "medium")
+                if low_diversity:
+                    market_flags.append("cross_listing_low_diversity")
+                    if rent_source == "market_evidence":
+                        verdict_cap = _strongest_verdict_cap(verdict_cap, "review")
         metrics = calculate_investment_metrics(
             purchase_price=purchase_price,
             purchase_price_source=purchase_source,
@@ -1597,6 +1638,8 @@ class InvestmentAnalysisProvider:
                             market_evidence_context,
                             market_estimate,
                             config.estimated_monthly_rent,
+                            rent_source == "market_evidence",
+                            "cross_listing_low_diversity" in flags,
                         )
                     }
                     if config.use_market_evidence is True
@@ -1635,6 +1678,7 @@ class InvestmentAnalysisProvider:
                 used_as_rent_source=market_evidence_used_as_rent_source,
                 used_for_comparison=market_evidence_used_for_comparison,
                 flags=risks["flags"],
+                market_evidence_context=market_evidence_context,
             )
         }
         report = self._report(
@@ -1722,6 +1766,7 @@ def _investment_questions(
     used_as_rent_source: bool,
     used_for_comparison: bool,
     flags: list[str],
+    market_evidence_context: SelectedMarketEvidenceContext | None = None,
 ) -> list[str]:
     questions = list(base_questions)
     if not market_evidence_enabled:
@@ -1753,6 +1798,28 @@ def _investment_questions(
         questions.append(
             "Провести ручную проверку рыночной аренды из-за слабых, недостаточных или неприменимых comps."
         )
+    if (
+        market_evidence_context is not None
+        and market_evidence_context.config.matching_policy
+        == MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY
+    ):
+        questions.extend(
+            [
+                "Проверить применимость cross-listing market comps к объекту.",
+                "Проверить, что location_key корректно отражает микролокацию объекта.",
+                "Проверить, что selected comps относятся к тому же asset/deal type.",
+                "Проверить cross-listing comps вручную, так как comp quality scoring ещё не реализован.",
+            ]
+        )
+        if {
+            "market_evidence_location_key_missing",
+            "market_evidence_location_key_no_matches",
+            "cross_listing_low_sample",
+        }.intersection(flags):
+            questions.append("Недостаточно market evidence по выбранному location_key.")
+            questions.append(
+                "Нужна ручная арендная ставка или дополнительное market research."
+            )
     if "missing_area_for_market_rent" in flags:
         questions.append(
             "Уточнить площадь объекта, чтобы конвертировать rent-per-m2 comps в месячную аренду."
@@ -1761,7 +1828,11 @@ def _investment_questions(
 
 
 def _market_evidence_facts(
-    context: SelectedMarketEvidenceContext, estimate, manual_rent: float | None
+    context: SelectedMarketEvidenceContext,
+    estimate,
+    manual_rent: float | None,
+    used_as_rent_source: bool = False,
+    low_diversity: bool = False,
 ) -> dict:
     facts = {
         "enabled": True,
@@ -1790,6 +1861,38 @@ def _market_evidence_facts(
         else [],
         "market_source_urls": estimate.source_urls if estimate is not None else [],
         "excluded_counts_by_reason": context.excluded_counts_by_reason,
+        "matching_policy": context.config.matching_policy,
+        "location_key": context.config.location_key,
+        "cross_listing_reuse_enabled": context.config.matching_policy
+        == MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY,
+        "comp_quality_scoring_used": False,
+        "selected_listing_external_ids": [i.listing_external_id for i in context.items],
+        "selected_same_listing_count": sum(
+            1
+            for i in context.items
+            if i.listing_external_id == context.target_listing_external_id
+        ),
+        "selected_external_listing_count": sum(
+            1
+            for i in context.items
+            if i.listing_external_id != context.target_listing_external_id
+        ),
+        "selected_distinct_listing_external_id_count": len(
+            {i.listing_external_id for i in context.items if i.listing_external_id}
+        ),
+        "selected_distinct_source_url_count": len(
+            {i.source_url_normalized for i in context.items if i.source_url_normalized}
+        ),
+        "cross_listing_low_diversity": low_diversity,
+        "cross_listing_verdict_cap_applied": (
+            used_as_rent_source
+            and context.config.matching_policy
+            == MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY
+            and any(
+                i.listing_external_id != context.target_listing_external_id
+                for i in context.items
+            )
+        ),
     }
     if estimate is not None:
         facts["market_estimated_monthly_rent"] = estimate.monthly_rent

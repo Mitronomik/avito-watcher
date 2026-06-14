@@ -110,3 +110,18 @@ PR16 consumes SQL-backed market evidence for investment scoring only when explic
 Cross-listing evidence reuse is not implemented. Selection always starts from evidence for the target `listing_external_id`; `market_evidence_location_key` only narrows within that same listing evidence set. Broad city-wide and location-level reuse are future scope.
 
 Eligible rent comps are reusable `comparable_candidate` items for the same listing, matching the investment profile asset type (`commercial` or `flat`), with `deal_type=rent`, source URL, rent metric, confidence above the configured threshold, not expired, and checked within the configured max age. The selected evidence fingerprint is included in the analysis `input_hash`, so selected evidence changes churn the hash while unrelated non-selected evidence does not.
+
+## PR16b matching policy bridge
+
+PR16 used same-listing market evidence only. PR16b adds a narrow deterministic matching policy layer and does not replace PR24 comparable quality scoring or PR25 comparable selection policy v2.
+
+Supported policies:
+
+* `same_listing` — effective default when `use_market_evidence=true` and `market_evidence_matching_policy` is unset. Selection is limited to the target `listing_external_id`; an optional `market_evidence_location_key` only narrows that same-listing set.
+* `same_location_key` — opt-in cross-listing reuse. It requires explicit `market_evidence_location_key` and can select stored rent comps from other `listing_external_id` values only when their `location_key` exactly equals the configured key.
+
+No fuzzy matching, semantic matching, embeddings, vector search, GIS/geocoding, radius search, inferred district/address matching, or broad city-wide evidence is used. Scoring still reads existing SQL-backed `market_evidence_items` only; it does not call an LLM, `ResearchAgent`, live external research, or mutate market evidence.
+
+The matching policy and selected evidence fingerprint are part of `input_hash`. Fingerprinted item fields include id, listing id, content hash, confidence, checked/expires UTC date bucket, normalized source URL, asset/deal type, location key, and rent metrics. This keeps replay behavior deterministic: policy changes or selected evidence changes churn the hash, while irrelevant non-selected evidence does not.
+
+Because PR16b has no full comparable quality scoring, same-location-key cross-listing evidence cannot produce a strong verdict when used as the rent source. Facts record `matching_policy`, `cross_listing_reuse_enabled`, `comp_quality_scoring_used=false`, selected listing ids, same/external listing counts, distinct source/listing counts, excluded counts, and whether a cross-listing verdict cap was applied. Manual rent remains primary; weak or missing cross-listing evidence does not degrade manual-primary calculations.

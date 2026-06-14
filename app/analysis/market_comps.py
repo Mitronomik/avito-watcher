@@ -16,6 +16,12 @@ DEFAULT_MAX_COMPS = 10
 DEFAULT_MAX_AGE_DAYS = 30
 DEFAULT_STRATEGY = "median"
 DEFAULT_MISMATCH_THRESHOLD = 0.25
+MARKET_EVIDENCE_POLICY_SAME_LISTING = "same_listing"
+MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY = "same_location_key"
+ALLOWED_MARKET_EVIDENCE_POLICIES = {
+    MARKET_EVIDENCE_POLICY_SAME_LISTING,
+    MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY,
+}
 
 
 @dataclass(frozen=True)
@@ -27,11 +33,13 @@ class ResolvedMarketEvidenceConfig:
     location_key: str | None = None
     rent_strategy: str = DEFAULT_STRATEGY
     manual_mismatch_threshold_pct: float = DEFAULT_MISMATCH_THRESHOLD
+    matching_policy: str = MARKET_EVIDENCE_POLICY_SAME_LISTING
 
 
 @dataclass(frozen=True)
 class MarketCompInput:
     id: int
+    listing_external_id: str | None
     content_hash: str
     confidence: float
     checked_at: datetime
@@ -52,6 +60,7 @@ class SelectedMarketEvidenceContext:
     retrieval_as_of_datetime: datetime
     retrieval_as_of_date: date
     config: ResolvedMarketEvidenceConfig
+    target_listing_external_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +107,10 @@ def resolve_market_evidence_config(
             if config.market_evidence_manual_mismatch_threshold_pct is not None
             else DEFAULT_MISMATCH_THRESHOLD
         ),
+        matching_policy=(
+            config.market_evidence_matching_policy
+            or MARKET_EVIDENCE_POLICY_SAME_LISTING
+        ),
     )
 
 
@@ -108,10 +121,40 @@ def select_market_evidence(
     expected_asset_type: str,
     evidence_retrieval_as_of_datetime: datetime,
     evidence_retrieval_as_of_date: date,
+    target_listing_external_id: str | None = None,
 ) -> SelectedMarketEvidenceContext:
     if evidence_retrieval_as_of_datetime.tzinfo is None:
         raise ValueError("evidence_retrieval_as_of_datetime must be timezone-aware")
     resolved = resolve_market_evidence_config(config)
+    if resolved.matching_policy not in ALLOWED_MARKET_EVIDENCE_POLICIES:
+        return SelectedMarketEvidenceContext(
+            items=[],
+            excluded_counts_by_reason={"invalid_matching_policy": len(candidates)},
+            limitations=["market_evidence_matching_policy_invalid"],
+            retrieval_as_of_datetime=evidence_retrieval_as_of_datetime,
+            retrieval_as_of_date=evidence_retrieval_as_of_date,
+            config=resolved,
+            target_listing_external_id=target_listing_external_id,
+        )
+    if (
+        resolved.matching_policy == MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY
+        and not resolved.location_key
+    ):
+        return SelectedMarketEvidenceContext(
+            items=[],
+            excluded_counts_by_reason={"missing_location_key": len(candidates)},
+            limitations=["market_evidence_location_key_missing"],
+            retrieval_as_of_datetime=evidence_retrieval_as_of_datetime,
+            retrieval_as_of_date=evidence_retrieval_as_of_date,
+            config=ResolvedMarketEvidenceConfig(
+                **{**resolved.__dict__, "min_comps": max(resolved.min_comps, 3)}
+            ),
+            target_listing_external_id=target_listing_external_id,
+        )
+    if resolved.matching_policy == MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY:
+        resolved = ResolvedMarketEvidenceConfig(
+            **{**resolved.__dict__, "min_comps": max(resolved.min_comps, 3)}
+        )
     cutoff = evidence_retrieval_as_of_datetime - timedelta(days=resolved.max_age_days)
     excluded: dict[str, int] = {}
     selected: list[MarketCompInput] = []
@@ -122,12 +165,13 @@ def select_market_evidence(
             expected_asset_type,
             cutoff,
             evidence_retrieval_as_of_datetime,
+            target_listing_external_id,
         )
         if reason is not None:
             excluded[reason] = excluded.get(reason, 0) + 1
             continue
         selected.append(_to_comp(item))
-    selected.sort(key=lambda c: (c.id, c.content_hash))
+    selected.sort(key=lambda c: (-c.confidence, -c.checked_at.timestamp(), c.id))
     return SelectedMarketEvidenceContext(
         items=selected[: max(0, resolved.max_comps)],
         excluded_counts_by_reason=excluded,
@@ -135,6 +179,7 @@ def select_market_evidence(
         retrieval_as_of_datetime=evidence_retrieval_as_of_datetime,
         retrieval_as_of_date=evidence_retrieval_as_of_date,
         config=resolved,
+        target_listing_external_id=target_listing_external_id,
     )
 
 
@@ -144,7 +189,19 @@ def _exclusion_reason(
     asset: str,
     cutoff: datetime,
     as_of: datetime,
+    target_listing_external_id: str | None,
 ) -> str | None:
+    if (
+        cfg.matching_policy == MARKET_EVIDENCE_POLICY_SAME_LISTING
+        and target_listing_external_id is not None
+        and item.listing_external_id != target_listing_external_id
+    ):
+        return "wrong_listing_external_id"
+    if (
+        cfg.matching_policy == MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY
+        and item.location_key != cfg.location_key
+    ):
+        return "wrong_location_key"
     if item.evidence_type != "comparable_candidate":
         return "wrong_evidence_type"
     if item.is_reusable is not True:
@@ -159,10 +216,16 @@ def _exclusion_reason(
         return "wrong_asset_type"
     if item.deal_type != "rent":
         return "wrong_deal_type"
-    if cfg.location_key is not None and item.location_key != cfg.location_key:
-        return "location_mismatch"
+    if (
+        cfg.matching_policy == MARKET_EVIDENCE_POLICY_SAME_LISTING
+        and cfg.location_key is not None
+        and item.location_key != cfg.location_key
+    ):
+        return "wrong_location_key"
     if not (item.source_url_normalized or item.source_url):
         return "missing_source"
+    if not item.content_hash:
+        return "missing_content_hash"
     if item.rent_per_m2_rub is None and item.rent_rub_per_month is None:
         return "missing_rent_metric"
     return None
@@ -171,6 +234,7 @@ def _exclusion_reason(
 def _to_comp(item: MarketEvidenceItem) -> MarketCompInput:
     return MarketCompInput(
         id=int(item.id),
+        listing_external_id=item.listing_external_id,
         content_hash=item.content_hash,
         confidence=float(item.confidence or 0),
         checked_at=_aware(item.checked_at),
@@ -267,10 +331,11 @@ def market_evidence_fingerprint(
         "items": [
             {
                 "id": i.id,
+                "listing_external_id": i.listing_external_id,
                 "content_hash": i.content_hash,
                 "confidence": i.confidence,
-                "checked_at": i.checked_at.isoformat(),
-                "expires_at": i.expires_at.isoformat() if i.expires_at else None,
+                "checked_at": i.checked_at.date().isoformat(),
+                "expires_at": i.expires_at.date().isoformat() if i.expires_at else None,
                 "source_url_normalized": i.source_url_normalized,
                 "asset_type": i.asset_type,
                 "deal_type": i.deal_type,

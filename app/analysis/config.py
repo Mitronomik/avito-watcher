@@ -37,6 +37,7 @@ class AnalysisConfig:
     market_evidence_max_comps: int | None = None
     market_evidence_max_age_days: int | None = None
     market_evidence_location_key: str | None = None
+    market_evidence_matching_policy: str | None = None
     market_evidence_rent_strategy: str | None = None
     market_evidence_manual_mismatch_threshold_pct: float | None = None
 
@@ -86,8 +87,18 @@ class AnalysisConfig:
 
 
 _MISSING = object()
-_STRING_FIELDS = {"investment_price_basis", "asset_type", "deal_type", "market_evidence_location_key", "market_evidence_rent_strategy"}
-_BOOL_FIELDS = {"investment_allow_listing_price_as_purchase_price", "use_market_evidence"}
+_STRING_FIELDS = {
+    "investment_price_basis",
+    "asset_type",
+    "deal_type",
+    "market_evidence_location_key",
+    "market_evidence_matching_policy",
+    "market_evidence_rent_strategy",
+}
+_BOOL_FIELDS = {
+    "investment_allow_listing_price_as_purchase_price",
+    "use_market_evidence",
+}
 
 
 def _profile_defaults(profile: str) -> AnalysisConfig:
