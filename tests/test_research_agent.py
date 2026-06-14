@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from sqlalchemy import func, select
 
 from app.agents.research_agent import (
@@ -348,6 +349,110 @@ def test_schema_validation_rejects_forbidden_sourceless_bad_indexes_and_low_conf
         )["review_recommendation"]["should_review"]
         is True
     )
+
+
+def _validate_payload(payload):
+    return validate_research_agent_response(
+        payload,
+        schema_version="research-agent-result-v1",
+        research_profile="default",
+        listing_external_id="ext-ra",
+    )
+
+
+def test_valid_comparable_candidate_with_nullable_numeric_fields_passes():
+    payload = valid_payload(
+        comparable_candidates=[
+            {
+                "asset_type": "commercial",
+                "deal_type": "rent",
+                "location_text": "Москва",
+                "area_m2": None,
+                "price_rub": None,
+                "rent_rub_per_month": None,
+                "price_per_m2_rub": None,
+                "rent_per_m2_rub": None,
+                "source_indexes": [0],
+                "similarity_notes": "Nullable numerics are allowed when evidence is missing.",
+                "confidence": 0.7,
+            }
+        ]
+    )
+
+    comparable = _validate_payload(payload)["comparable_candidates"][0]
+
+    assert comparable["asset_type"] == "commercial"
+    assert comparable["deal_type"] == "rent"
+    assert comparable["area_m2"] is None
+    assert comparable["rent_per_m2_rub"] is None
+
+
+def test_comparable_candidate_invalid_asset_type_fails_schema_validation():
+    payload = valid_payload(
+        comparable_candidates=[
+            valid_payload()["comparable_candidates"][0] | {"asset_type": "office"}
+        ]
+    )
+
+    with pytest.raises(ResearchAgentError) as exc:
+        _validate_payload(payload)
+
+    assert exc.value.error_type == "research_agent_schema_validation_failed"
+
+
+def test_comparable_candidate_invalid_deal_type_fails_schema_validation():
+    payload = valid_payload(
+        comparable_candidates=[
+            valid_payload()["comparable_candidates"][0] | {"deal_type": "leasehold"}
+        ]
+    )
+
+    with pytest.raises(ResearchAgentError) as exc:
+        _validate_payload(payload)
+
+    assert exc.value.error_type == "research_agent_schema_validation_failed"
+
+
+@pytest.mark.parametrize("bad_value", ["42", {"value": 42}, [42], True])
+def test_comparable_candidate_numeric_field_invalid_type_fails_schema_validation(
+    bad_value,
+):
+    payload = valid_payload(
+        comparable_candidates=[
+            valid_payload()["comparable_candidates"][0] | {"area_m2": bad_value}
+        ]
+    )
+
+    with pytest.raises(ResearchAgentError) as exc:
+        _validate_payload(payload)
+
+    assert exc.value.error_type == "research_agent_schema_validation_failed"
+
+
+def test_comparable_candidate_negative_numeric_field_fails_schema_validation():
+    payload = valid_payload(
+        comparable_candidates=[
+            valid_payload()["comparable_candidates"][0] | {"price_rub": -1}
+        ]
+    )
+
+    with pytest.raises(ResearchAgentError) as exc:
+        _validate_payload(payload)
+
+    assert exc.value.error_type == "research_agent_schema_validation_failed"
+
+
+def test_comparable_candidate_without_valid_source_index_still_fails():
+    payload = valid_payload(
+        comparable_candidates=[
+            valid_payload()["comparable_candidates"][0] | {"source_indexes": []}
+        ]
+    )
+
+    with pytest.raises(ResearchAgentError) as exc:
+        _validate_payload(payload)
+
+    assert exc.value.error_type == "research_agent_schema_validation_failed"
 
 
 def test_unsupported_and_misconfigured_provider_fail_closed(db_session, monkeypatch):

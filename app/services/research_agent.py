@@ -48,6 +48,16 @@ ALLOWED_TOPICS = {
     "unknown",
 }
 ALLOWED_SEVERITIES = {"low", "medium", "high", "unknown"}
+ALLOWED_COMPARABLE_ASSET_TYPES = {"commercial", "flat", "unknown", None}
+ALLOWED_COMPARABLE_DEAL_TYPES = {"sale", "rent", "unknown", None}
+COMPARABLE_NUMERIC_FIELDS = {
+    "area_m2",
+    "price_rub",
+    "rent_rub_per_month",
+    "price_per_m2_rub",
+    "rent_per_m2_rub",
+}
+
 ALLOWED_RISK_CODES = {
     "manual_verification_required",
     "source_conflict",
@@ -198,6 +208,22 @@ def _conf(v) -> float:
     return float(v)
 
 
+def _comparable_number(value, field: str) -> int | float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ResearchAgentError(
+            f"Invalid comparable numeric field: {field}",
+            "research_agent_schema_validation_failed",
+        )
+    if value < 0:
+        raise ResearchAgentError(
+            f"Negative comparable numeric field: {field}",
+            "research_agent_schema_validation_failed",
+        )
+    return value
+
+
 def _indexes(value, source_count: int) -> list[int]:
     if not isinstance(value, list):
         raise ResearchAgentError(
@@ -323,20 +349,27 @@ def validate_research_agent_response(
                 "Comparable candidates require sources",
                 "research_agent_schema_validation_failed",
             )
+        asset_type = c.get("asset_type")
+        deal_type = c.get("deal_type")
+        if asset_type not in ALLOWED_COMPARABLE_ASSET_TYPES:
+            raise ResearchAgentError(
+                "Invalid comparable asset_type",
+                "research_agent_schema_validation_failed",
+            )
+        if deal_type not in ALLOWED_COMPARABLE_DEAL_TYPES:
+            raise ResearchAgentError(
+                "Invalid comparable deal_type",
+                "research_agent_schema_validation_failed",
+            )
+        numeric_values = {
+            field: _comparable_number(c.get(field), field)
+            for field in COMPARABLE_NUMERIC_FIELDS
+        }
         comps.append(
             {
-                k: c.get(k)
-                for k in [
-                    "asset_type",
-                    "deal_type",
-                    "area_m2",
-                    "price_rub",
-                    "rent_rub_per_month",
-                    "price_per_m2_rub",
-                    "rent_per_m2_rub",
-                ]
-            }
-            | {
+                "asset_type": asset_type,
+                "deal_type": deal_type,
+                **numeric_values,
                 "location_text": _truncate(c.get("location_text"), 500),
                 "source_indexes": idx,
                 "similarity_notes": _truncate(c.get("similarity_notes"), 500),
