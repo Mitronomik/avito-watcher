@@ -1365,9 +1365,17 @@ class InvestmentAnalysisProvider:
         purchase_source = "filters_json.investment_purchase_price" if purchase_price is not None else None
         purchase_confirmation = False
         pre_flags: list[str] = []
+        allow_listing_price_fallback = (
+            config.investment_allow_listing_price_as_purchase_price is True
+        )
         if config.deal_type == "rent":
             pre_flags.append("deal_type_rent_not_sale")
-        elif purchase_price is None and config.investment_allow_listing_price_as_purchase_price and config.investment_price_basis == "listing_price_as_purchase_price" and config.deal_type != "rent":
+        elif (
+            purchase_price is None
+            and allow_listing_price_fallback
+            and config.investment_price_basis == "listing_price_as_purchase_price"
+            and config.deal_type != "rent"
+        ):
             purchase_price = listing.price
             purchase_source = "listing.price"
             purchase_confirmation = True

@@ -20,7 +20,7 @@ class AnalysisConfig:
     suspicious_low_price_per_m2: float | None = None
     investment_purchase_price: float | None = None
     investment_price_basis: str | None = None
-    investment_allow_listing_price_as_purchase_price: bool = False
+    investment_allow_listing_price_as_purchase_price: bool | None = None
     estimated_monthly_rent: float | None = None
     opex_ratio: float | None = None
     opex_monthly: float | None = None

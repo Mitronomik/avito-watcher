@@ -52,6 +52,74 @@ def test_investment_config_whitelist_and_hash_changes():
     assert AnalysisConfig.from_search_filters("flat_sale_investment", {"investment_allow_listing_price_as_purchase_price": True}).investment_allow_listing_price_as_purchase_price is True
 
 
+def test_investment_bool_hash_payload_absent_true_and_false():
+    absent = AnalysisConfig.from_search_filters("commercial_sale_investment", {})
+    explicit_true = AnalysisConfig.from_search_filters(
+        "commercial_sale_investment",
+        {"investment_allow_listing_price_as_purchase_price": True},
+    )
+    explicit_false = AnalysisConfig.from_search_filters(
+        "commercial_sale_investment",
+        {"investment_allow_listing_price_as_purchase_price": False},
+    )
+    assert "investment_allow_listing_price_as_purchase_price" not in absent.to_hash_payload()
+    assert (
+        explicit_true.to_hash_payload()[
+            "investment_allow_listing_price_as_purchase_price"
+        ]
+        is True
+    )
+    assert (
+        explicit_false.to_hash_payload()[
+            "investment_allow_listing_price_as_purchase_price"
+        ]
+        is False
+    )
+    assert absent.hash() != explicit_true.hash()
+    assert explicit_true.hash() != explicit_false.hash()
+
+
+def test_existing_profiles_do_not_receive_investment_hash_payload_or_facts(db_session):
+    expected = {
+        "default": ("mock", "deterministic-local"),
+        "commercial_rent": ("deterministic", "commercial-rent-rules-v0"),
+        "flat_sale": ("deterministic", "flat-sale-rules-v0"),
+        "flat_rent": ("deterministic", "flat-rent-rules-v0"),
+    }
+    investment_only_keys = {
+        "investment_purchase_price",
+        "investment_price_basis",
+        "investment_allow_listing_price_as_purchase_price",
+        "estimated_monthly_rent",
+        "opex_ratio",
+        "opex_monthly",
+        "vacancy_rate",
+        "capex_initial",
+        "min_gross_yield",
+        "min_noi_yield",
+        "max_payback_years",
+        "asset_type",
+        "deal_type",
+    }
+    for profile, (model_provider, model_name) in expected.items():
+        config = AnalysisConfig.from_search_filters(profile, {})
+        assert investment_only_keys.isdisjoint(config.to_hash_payload())
+        listing = _listing(db_session, external_id=f"existing-{profile}")
+        provider = get_analysis_provider(profile)
+        result = provider.analyze(
+            listing=listing,
+            snapshot=None,
+            input_hash="x",
+            config=config,
+        )
+        assert provider.profile == profile
+        assert provider.model_provider == model_provider
+        assert provider.model_name == model_name
+        assert result.model_provider == model_provider
+        assert result.model_name == model_name
+        assert "investment_metrics" not in result.facts_json
+
+
 def test_metric_calculation_complete_and_opex_ratio():
     metrics = calculate_investment_metrics(
         purchase_price=9_500_000,
