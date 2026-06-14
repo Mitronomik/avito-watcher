@@ -57,6 +57,10 @@ def build_default_agent_task_handlers(db) -> dict[str, AgentTaskHandler]:
         DATA_QUALITY_AGENT_TASK_TYPE,
         DataQualityAgentTaskHandler,
     )
+    from app.agents.research_agent import (
+        MARKET_RESEARCH_TASK_TYPE,
+        ResearchAgentTaskHandler,
+    )
 
     return {
         REVIEW_COPILOT_TASK_TYPE: ReviewCopilotAgentTaskHandler(db),
@@ -64,6 +68,7 @@ def build_default_agent_task_handlers(db) -> dict[str, AgentTaskHandler]:
             db
         ),
         DATA_QUALITY_AGENT_TASK_TYPE: DataQualityAgentTaskHandler(db),
+        MARKET_RESEARCH_TASK_TYPE: ResearchAgentTaskHandler(db),
     }
 
 
