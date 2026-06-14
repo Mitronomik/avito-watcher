@@ -29,7 +29,7 @@ from app.schemas.outcome_analytics import (
     SignalCounts,
 )
 
-REPORT_VERSION = "pr19-outcome-analytics-v1"
+REPORT_VERSION = "pr18b-outcome-analytics-v1"
 SCORE_BUCKETS = ("0-39", "40-59", "60-74", "75-89", "90-100", "unknown")
 POSITIVE_OUTCOMES = {
     "watchlist",
