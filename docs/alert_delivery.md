@@ -112,3 +112,19 @@ PR20b is intentionally not a health dashboard: it does not add worker heartbeat,
 9. Verify invariant counters and unsupported POST routes (`POST /admin/alerts`, `POST /admin/alerts/delivery-attempts/{attempt_id}`) do not mutate state.
 10. Snapshot the same DB counts and confirm they are unchanged.
 11. Check logs for tracebacks, errors, and secret leakage. Do not trigger run-once, technical ops, manual retry, or automatic retry.
+
+## PR20c manual delivery retry
+
+PR20c adds a controlled manual retry action for one existing delivery attempt. It is not an automatic retry system: there is no scheduler, queue, retry daemon, retry-all action, `next_retry_at` policy engine, worker heartbeat, parser health, SLA metric, migration, or raw payload replay.
+
+Operators open `GET /admin/alerts/delivery-attempts/{attempt_id}` and, only for eligible failed/skipped/unknown attempts, submit `POST /admin/alerts/delivery-attempts/{attempt_id}/retry`. The form is shown only when technical operations are enabled and requires `ADMIN_UI_TECHNICAL_WRITE_KEY` plus a visible typed confirmation of `retry_delivery_attempt_{attempt_id}`. Read keys and normal admin write keys cannot perform the retry.
+
+Eligibility is intentionally narrow. The original attempt must have status `failed`, `skipped`, or `unknown`; the listing must still exist; `channel` and `dedupe_key` must be non-empty; the dedupe key must match the delivery convention `{channel}:new:{listing_external_id}`; and there must be no exact matching `AlertSent` row for the same dedupe key, listing external id, and channel. Successful attempts, including success-without-AlertSent invariant rows, are not repairable through PR20c.
+
+Immediately before sending, the POST route rechecks the exact matching `AlertSent`. If it exists, no notifier is called and no delivery attempt is written. This last-moment check plus the existing `alerts_sent.dedupe_key` uniqueness is the small duplicate protection used by PR20c; no lock table or retry lock migration is added.
+
+The retry targets exactly the original attempt channel. It does not recompute all pending channels, call the monitor cycle, parser, LLM, scoring, deterministic analysis, agents, market research, or human review. Manual retry regenerates the message and delivery payload from the current stored `Listing` row and safe existing alert builders. It is not a byte-for-byte replay, does not store raw payloads, and the new retry attempt receives its own payload hash.
+
+A successful external retry records a new `alert_delivery_attempts(status=success)` row and creates `AlertSent` in the same DB session flow. Failed, skipped, unknown, or channel-not-configured outcomes record only a new delivery attempt row and do not create `AlertSent`. Auth, confirmation, eligibility, and precondition failures are not delivery attempts and create no rows.
+
+Production smoke should remain safe. Leave `ADMIN_UI_TECHNICAL_OPS_ENABLED=false`, open `/admin/alerts`, open a recent attempt detail page, confirm successful attempts do not render an active retry form, POST a retry while technical ops are disabled and confirm HTTP 403, then snapshot table counts before/after to confirm no mutation and review logs for secret leakage. Only with explicit operator approval should technical ops be enabled to retry one real failed/skipped/unknown attempt; after that, confirm exactly one attempt row was added, `AlertSent` was added only on success, no other channels were called, invariant counters remain healthy, and technical ops are disabled again.

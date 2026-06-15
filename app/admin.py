@@ -29,6 +29,11 @@ from app.services.outcome_analytics import HumanOutcomeAnalyticsService
 from app.parsers.errors import ParserError
 from app.repositories.search_repository import SearchRepository
 from app.services.monitor_service import MonitorService, runtime_diagnostics
+from app.parsers.schemas import ListingCard
+from app.repositories.alert_repository import AlertRepository
+from app.repositories.alert_delivery_attempt_repository import AlertDeliveryAttemptRepository
+from app.utils.formatting import build_listing_message
+from app.services.alert_delivery_attempts import compute_alert_payload_hash
 from app.services.alert_delivery_attempts import sanitize_alert_delivery_error
 from app.services.human_reviews import HumanReviewService, HumanReviewValidationError, build_review_context_key
 from app.workers.status import read_worker_status, summarize_worker_status
@@ -963,6 +968,151 @@ def _admin_query_api_key_input(api_key: str | None) -> str:
     return f"<input type='hidden' name='api_key' value='{_html_attr(api_key)}'>"
 
 
+MANUAL_RETRY_STATUSES = {"failed", "skipped", "unknown"}
+
+
+def _delivery_dedupe_key(channel: str, listing_external_id: str) -> str:
+    return f"{channel}:new:{listing_external_id}"
+
+
+def _matching_alert_sent(db: Session, attempt: AlertDeliveryAttempt) -> AlertSent | None:
+    return db.scalar(
+        select(AlertSent)
+        .where(
+            AlertSent.dedupe_key == attempt.dedupe_key,
+            AlertSent.listing_external_id == attempt.listing_external_id,
+            AlertSent.channel == attempt.channel,
+        )
+        .limit(1)
+    )
+
+
+def _manual_retry_eligibility(
+    db: Session, attempt: AlertDeliveryAttempt
+) -> tuple[bool, str, Listing | None]:
+    channel = (attempt.channel or "").strip()
+    dedupe_key = (attempt.dedupe_key or "").strip()
+    listing = db.scalar(select(Listing).where(Listing.external_id == attempt.listing_external_id).limit(1))
+    if attempt.status not in MANUAL_RETRY_STATUSES:
+        return False, "Only failed, skipped, or unknown attempts can be retried.", listing
+    if not channel:
+        return False, "This attempt is not eligible for manual retry because channel is empty.", listing
+    if not dedupe_key:
+        return False, "This attempt is not eligible for manual retry because dedupe key is empty.", listing
+    if listing is None:
+        return False, "This attempt is not eligible for manual retry because the listing is missing.", None
+    expected = _delivery_dedupe_key(channel, attempt.listing_external_id)
+    if dedupe_key != expected:
+        return False, "This attempt is not eligible for manual retry because dedupe key does not match the expected channel/listing key.", listing
+    if _matching_alert_sent(db, attempt) is not None:
+        return False, "This attempt is not eligible for manual retry because a matching AlertSent already exists.", listing
+    return True, "Eligible for manual retry.", listing
+
+
+def _listing_card_from_listing(listing: Listing) -> ListingCard:
+    return ListingCard(
+        external_id=listing.external_id,
+        url=listing.url,
+        title=listing.title or "",
+        price=listing.price,
+        address=listing.address or "",
+        area_m2=listing.area_m2,
+        rooms=listing.rooms or "",
+        published_label=listing.published_label or "",
+        published_at=listing.published_at,
+        raw={},
+    )
+
+
+async def _retry_single_delivery_channel(
+    db: Session,
+    *,
+    attempt: AlertDeliveryAttempt,
+    listing: Listing,
+) -> str:
+    channel_name = (attempt.channel or "").strip()
+    dedupe_key = _delivery_dedupe_key(channel_name, attempt.listing_external_id)
+    service = MonitorService()
+    card = _listing_card_from_listing(listing)
+    search_name = attempt.search_name or "manual_delivery_retry"
+    payload = service._build_alert_payload(
+        card=card,
+        search_name=search_name,
+        summary="",
+        score=None,
+        tags=[],
+        analysis=None,
+    )
+    message = build_listing_message(
+        {
+            "title": card.title,
+            "price": card.price,
+            "address": card.address,
+            "area_m2": card.area_m2,
+            "rooms": card.rooms,
+            "published_label": card.published_label,
+            "url": card.url,
+        },
+        "",
+    )
+    payload_hash = compute_alert_payload_hash(payload)
+    attempt_repo = AlertDeliveryAttemptRepository(db)
+    attempt_count = attempt_repo.next_attempt_count(dedupe_key=dedupe_key, channel=channel_name)
+
+    channels = getattr(service.notifier, "channels", [service.notifier])
+    channel_map = {
+        getattr(channel, "channel_name", ""): channel
+        for channel in channels
+        if getattr(channel, "channel_name", "")
+    }
+    channel = channel_map.get(channel_name)
+
+    def record(status_value: str, error: BaseException | str | None = None) -> None:
+        attempt_repo.create_attempt(
+            listing_external_id=attempt.listing_external_id,
+            channel=channel_name,
+            dedupe_key=dedupe_key,
+            payload_hash=payload_hash,
+            status=status_value,
+            attempt_count=attempt_count,
+            last_error=sanitize_alert_delivery_error(error) if error is not None else None,
+            next_retry_at=None,
+            sent_at=service._now() if status_value == "success" else None,
+            search_job_id=attempt.search_job_id,
+            search_name=search_name,
+            error_type=error.__class__.__name__ if isinstance(error, BaseException) else ("channel_not_configured" if status_value == "unknown" and error else None),
+        )
+
+    if channel is None:
+        record("unknown", "channel not configured for manual retry")
+        db.commit()
+        return "unknown"
+
+    try:
+        delivered = await channel.send_listing_alert(message, payload)
+    except Exception as exc:
+        record("failed", exc)
+        db.commit()
+        return "failed"
+
+    if delivered is True:
+        record("success")
+        AlertRepository(db).create(
+            listing_external_id=attempt.listing_external_id,
+            dedupe_key=dedupe_key,
+            channel=channel_name,
+        )
+        db.commit()
+        return "success"
+    if delivered is False:
+        record("skipped")
+        db.commit()
+        return "skipped"
+    record("unknown", f"unexpected result type: {type(delivered).__name__}")
+    db.commit()
+    return "unknown"
+
+
 def _attempt_matches_alert_sent_clause() -> object:
     return (
         (AlertSent.dedupe_key == AlertDeliveryAttempt.dedupe_key)
@@ -1150,12 +1300,8 @@ def alert_delivery_attempt_detail(request: Request, attempt_id: int, db: Session
     attempt = db.get(AlertDeliveryAttempt, attempt_id)
     if attempt is None:
         raise HTTPException(status_code=404, detail="Delivery attempt not found")
-    alert_sent = db.scalar(select(AlertSent).where(
-        AlertSent.dedupe_key == attempt.dedupe_key,
-        AlertSent.listing_external_id == attempt.listing_external_id,
-        AlertSent.channel == attempt.channel,
-    ).limit(1))
-    listing = db.scalar(select(Listing).where(Listing.external_id == attempt.listing_external_id).limit(1))
+    alert_sent = _matching_alert_sent(db, attempt)
+    eligible, eligibility_reason, listing = _manual_retry_eligibility(db, attempt)
     listing_block = "—"
     if listing is not None:
         listing_block = f"<a href='{_html_attr(_admin_url(f'/admin/listings/{listing.id}', api_key))}'>{html.escape(listing.external_id)}</a>"
@@ -1182,12 +1328,67 @@ def alert_delivery_attempt_detail(request: Request, attempt_id: int, db: Session
         f"<tr><th>{html.escape(str(key))}</th><td>{value if key == 'matching listing' else html.escape(str(value or '—'))}</td></tr>"
         for key, value in fields
     )
+    marker_messages = {
+        "retry_success": "Manual retry succeeded. A matching AlertSent was created.",
+        "retry_failed": "Manual retry failed. A delivery attempt row was recorded; AlertSent was not created.",
+        "retry_unknown": "Manual retry result is unknown. A delivery attempt row was recorded; AlertSent was not created.",
+        "retry_skipped": "Manual retry was skipped. A delivery attempt row was recorded; AlertSent was not created.",
+        "retry_not_eligible": "Manual retry was not performed because the attempt is not eligible.",
+    }
+    notice = "".join(
+        f"<div class='note'>{html.escape(message)}</div>"
+        for key, message in marker_messages.items()
+        if request.query_params.get(key) == "1"
+    )
+    confirm = f"retry_delivery_attempt_{attempt.id}"
+    retry_action = _admin_url(f"/admin/alerts/delivery-attempts/{attempt.id}/retry", api_key)
+    inactive_warning = (
+        "<p class='warning'>Listing is currently inactive; manual retry will still send the current stored listing payload.</p>"
+        if listing is not None and hasattr(listing, "is_active") and not listing.is_active
+        else ""
+    )
+    if not eligible:
+        retry_block = f"<p>{html.escape(eligibility_reason)}</p>"
+    elif not settings.admin_ui_technical_ops_enabled:
+        retry_block = "<p>Manual retry is disabled because technical operations are disabled.</p>"
+    else:
+        retry_block = (
+            f"{inactive_warning}"
+            "<p class='warning'>This will send an external alert again for this single channel if eligible. "
+            "This can create a new AlertSent only after successful delivery.</p>"
+            f"<form method='post' action='{_html_attr(retry_action)}'>"
+            f"{_technical_auth_fields(confirm, 'Manual retry targets exactly one original channel and regenerates payload from current DB listing data.')}"
+            "<button type='submit'>Retry single channel</button></form>"
+        )
+    retry_section = f"<section><h2>Ручной повтор доставки</h2>{retry_block}</section>"
     body = (
         f"<h1>Alert delivery attempt {attempt.id}</h1>"
         f"<p><a href='{_html_attr(_admin_url('/admin/alerts', api_key))}'>Back to alerts</a></p>"
-        f"<table>{rows}</table>"
+        f"{notice}<table>{rows}</table>{retry_section}"
     )
     return _render_page("Alert delivery attempt", body)
+
+
+@router.post('/alerts/delivery-attempts/{attempt_id}/retry', dependencies=[Depends(_require_admin_api_key)])
+async def retry_alert_delivery_attempt(request: Request, attempt_id: int, db: Session = Depends(get_db)):
+    if attempt_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid attempt_id")
+    form, raw_form = await _parse_mutable_form(request)
+    _require_technical_write_form(request, form, raw_form)
+    _require_technical_confirmation(form, f"retry_delivery_attempt_{attempt_id}")
+    attempt = db.get(AlertDeliveryAttempt, attempt_id)
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="Delivery attempt not found")
+    eligible, reason, listing = _manual_retry_eligibility(db, attempt)
+    if not eligible or listing is None:
+        raise HTTPException(status_code=400, detail=reason)
+    if _matching_alert_sent(db, attempt) is not None:
+        raise HTTPException(status_code=400, detail="Matching AlertSent already exists")
+    result = await _retry_single_delivery_channel(db, attempt=attempt, listing=listing)
+    api_key = request.query_params.get("api_key")
+    redirect_url = _admin_url(f"/admin/alerts/delivery-attempts/{attempt.id}", api_key)
+    separator = "&" if "?" in redirect_url else "?"
+    return RedirectResponse(f"{redirect_url}{separator}retry_{result}=1", status_code=303)
 
 
 
