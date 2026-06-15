@@ -2002,10 +2002,32 @@ def test_alert_delivery_dashboard_summary_filters_listing_link_and_jsonl_compat(
     assert old_id
 
 
+
+def test_alert_delivery_dashboard_does_not_propagate_query_key_when_disabled(monkeypatch, tmp_path):
+    client, Session = make_raw_client(monkeypatch, allow_query_api_key=False, client_cls=TestClient)
+    monkeypatch.setattr(settings, "jsonl_outbox_path", str(tmp_path / "missing.jsonl"))
+    attempt_id = _add_attempt(Session, listing_external_id="no-query-key", channel="jsonl", status="failed", dedupe_key="jsonl:new:no-query-key")
+    page = client.get("/admin/alerts?api_key=read", headers={"X-API-Key": "read"}).text
+    assert "Попытки доставки уведомлений" in page
+    delivery_section = page.split("Попытки доставки уведомлений", 1)[1]
+    assert "name='api_key' value='read'" not in delivery_section
+    assert f"/admin/alerts/delivery-attempts/{attempt_id}?api_key=read" not in delivery_section
+    assert f"/admin/alerts/delivery-attempts/{attempt_id}'" in delivery_section
+
+
+def test_alert_delivery_dashboard_can_propagate_query_key_when_enabled(monkeypatch, tmp_path):
+    client, Session = make_raw_client(monkeypatch, allow_query_api_key=True, client_cls=TestClient)
+    monkeypatch.setattr(settings, "jsonl_outbox_path", str(tmp_path / "missing.jsonl"))
+    attempt_id = _add_attempt(Session, listing_external_id="query-key", channel="jsonl", status="failed", dedupe_key="jsonl:new:query-key")
+    page = client.get("/admin/alerts?api_key=read").text
+    delivery_section = page.split("Попытки доставки уведомлений", 1)[1]
+    assert "name='api_key' value='read'" in delivery_section
+    assert f"/admin/alerts/delivery-attempts/{attempt_id}?api_key=read" in delivery_section
+
 def test_alert_delivery_invariants_detail_secret_safety_and_no_mutation(monkeypatch, tmp_path):
     client, Session = make_client(monkeypatch)
     monkeypatch.setattr(settings, "jsonl_outbox_path", str(tmp_path / "missing.jsonl"))
-    secret_error = "Authorization: Basic supersecret X-API-Key: supersecret webhook=https://hooks.example.com/services/supersecret?token=supersecret smtp_password=supersecret"
+    secret_error = "Authorization: Basic real-prod-basic-123 Authorization: Bearer real-prod-bearer-456 Authorization: Token real-prod-token-789 X-API-Key: real-prod-api-123 api_key=real-prod-query-123 api-key=real-prod-hyphen-123 apikey=real-prod-compact-123 webhook=https://any-host.example/path/real-prod-webhook-123 telegram=https://api.telegram.org/botreal-prod-telegram-123/sendMessage smtp_password=real-prod-smtp-123"
     detail_id = _add_attempt(Session, listing_external_id="secret-ext", channel="jsonl", status="failed", dedupe_key="jsonl:new:secret", payload_hash="bad", last_error=secret_error, next_retry_at=datetime.utcnow())
     _add_alert_sent(Session, listing_external_id="secret-ext", channel="jsonl", dedupe_key="jsonl:new:secret")
     _add_attempt(Session, listing_external_id="no-sent", channel="jsonl", status="success", dedupe_key="jsonl:new:no-sent", sent_at=datetime.utcnow())
@@ -2021,11 +2043,13 @@ def test_alert_delivery_invariants_detail_secret_safety_and_no_mutation(monkeypa
     assert "non_success_with_sent_at: 1" in page
     assert "non_null_next_retry_at: 1" in page
     assert "bad_payload_hash_count: 1" in page
-    assert "supersecret" not in page
+    for leaked in ("real-prod-basic-123", "real-prod-bearer-456", "real-prod-token-789", "real-prod-api-123", "real-prod-query-123", "real-prod-hyphen-123", "real-prod-compact-123", "real-prod-webhook-123", "real-prod-telegram-123", "real-prod-smtp-123"):
+        assert leaked not in page
     detail = client.get(f"/admin/alerts/delivery-attempts/{detail_id}").text
     assert "matching AlertSent" in detail and "yes" in detail
     assert "secret-ext" in detail
-    assert "supersecret" not in detail
+    for leaked in ("real-prod-basic-123", "real-prod-bearer-456", "real-prod-token-789", "real-prod-api-123", "real-prod-query-123", "real-prod-hyphen-123", "real-prod-compact-123", "real-prod-webhook-123", "real-prod-telegram-123", "real-prod-smtp-123"):
+        assert leaked not in detail
     assert "payload_hash prefix" in detail and "bad" in detail
     assert client.get("/admin/alerts/delivery-attempts/0").status_code == 400
     assert client.get("/admin/alerts/delivery-attempts/999999").status_code == 404

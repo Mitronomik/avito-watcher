@@ -29,6 +29,7 @@ from app.services.outcome_analytics import HumanOutcomeAnalyticsService
 from app.parsers.errors import ParserError
 from app.repositories.search_repository import SearchRepository
 from app.services.monitor_service import MonitorService, runtime_diagnostics
+from app.services.alert_delivery_attempts import sanitize_alert_delivery_error
 from app.services.human_reviews import HumanReviewService, HumanReviewValidationError, build_review_context_key
 from app.workers.status import read_worker_status, summarize_worker_status
 
@@ -953,12 +954,13 @@ def _safe_short_filter(name: str, value: str | None, max_len: int) -> str | None
 
 
 def _redact_alert_error(value: object, limit: int = 180) -> str:
-    text = str(value or "")
-    text = re.sub(r"(?i)(authorization|x-api-key|api[_-]?key|token|secret|auth|password|passwd|cookie|webhook|smtp|telegram|provider_key|access_key|refresh_token|bearer)(\\s*[:=]\\s*)\\S+", r"\\1\\2[redacted]", text)
-    text = re.sub(r"(?i)([?&](?:token|secret|api_key|apikey|auth|password|passwd|key|access_key|refresh_token)=)[^\\s&#]+", r"\\1[redacted]", text)
-    text = re.sub(r"(?i)hooks\\.example\\.com/[^\\s]+", "hooks.example.com/[redacted]", text)
-    text = re.sub(r"(?i)supersecret", "[redacted]", text)
-    return truncate_admin_text(text, limit)
+    return truncate_admin_text(sanitize_alert_delivery_error(str(value or "")), limit)
+
+
+def _admin_query_api_key_input(api_key: str | None) -> str:
+    if not api_key or not settings.admin_ui_allow_query_api_key:
+        return ""
+    return f"<input type='hidden' name='api_key' value='{_html_attr(api_key)}'>"
 
 
 def _attempt_matches_alert_sent_clause() -> object:
@@ -1123,7 +1125,7 @@ def alerts(
         f"<p>Period hours: {effective_hours}; total attempts in selected period: {total_period}; all-time total attempts: {total_all_time}; channels observed: {channel_summary}; latest attempt timestamp: {html.escape(str(latest_attempt or '—'))}; live delivery observed: {'yes' if total_all_time else 'no'}</p>"
         f"<ul>{status_summary}</ul>{attempts_empty}"
         f"<form method='get' action='{_html_attr(_admin_url('/admin/alerts', api_key))}'>"
-        f"<input type='hidden' name='api_key' value='{_html_attr(api_key)}'>"
+        f"{_admin_query_api_key_input(api_key)}"
         f"<div class='row'><label>status<input name='status' value='{_html_attr(normalized_status)}'></label><label>channel<input name='channel' value='{_html_attr(normalized_channel)}'></label><label>listing_external_id<input name='listing_external_id' value='{_html_attr(normalized_listing_external_id)}'></label><label>dedupe_key<input name='dedupe_key' value='{_html_attr(normalized_dedupe_key)}'></label><label>search_job_id<input name='search_job_id' value='{_html_attr(normalized_search_job_id or '')}'></label><label>hours<input name='hours' type='number' min='1' max='720' value='{effective_hours}'></label><label>limit<input name='limit' type='number' min='1' max='200' value='{effective_limit}'></label></div>"
         "<button type='submit'>Apply delivery filters</button></form>"
         f"<h2>Проверка инвариантов доставки</h2><p>Expected healthy values: 0 for all counters.</p><ul>{invariant_items}</ul>{attempts_table}</section>"
