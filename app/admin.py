@@ -28,6 +28,7 @@ from app.models.knowledge_note import KnowledgeNote
 from app.models.human_review import HUMAN_VERDICTS, NEXT_ACTIONS, OUTCOME_STATUSES, HumanReview, HumanReviewAction, InvestmentDecision
 from app.models.agent_task import AgentTask
 from app.models.market_evidence import MarketEvidenceItem, MarketResearchRun
+from app.models.monitor_cycle_run import MonitorCycleRun
 from app.schemas.outcome_analytics import OutcomeAnalyticsRequest
 from app.services.outcome_analytics import HumanOutcomeAnalyticsService
 from app.parsers.errors import ParserError
@@ -1215,6 +1216,80 @@ def _payload_hash_is_bad_clause(dialect_name: str = "") -> object:
     )
 
 
+def _unknown_metric(value: object) -> str:
+    return "unknown" if value is None else html.escape(str(value))
+
+
+def _render_monitor_cycle_history(db: Session, now: datetime) -> str:
+    since_24h = now - timedelta(hours=24)
+    stale_after_seconds = max(settings.monitor_worker_stale_after_seconds, 30 * 60)
+    stale_cutoff = now - timedelta(seconds=stale_after_seconds)
+    status_counts = dict(
+        db.execute(
+            select(MonitorCycleRun.status, func.count())
+            .where(MonitorCycleRun.started_at >= since_24h)
+            .group_by(MonitorCycleRun.status)
+        ).all()
+    )
+    total_24h = sum(status_counts.values())
+    latest_success = db.scalar(
+        select(func.max(MonitorCycleRun.started_at)).where(MonitorCycleRun.status == "success")
+    )
+    latest_failed = db.scalar(
+        select(func.max(MonitorCycleRun.started_at)).where(MonitorCycleRun.status == "failed")
+    )
+    stale_running = db.scalar(
+        select(func.count())
+        .select_from(MonitorCycleRun)
+        .where(
+            MonitorCycleRun.status == "running",
+            MonitorCycleRun.finished_at.is_(None),
+            MonitorCycleRun.started_at < stale_cutoff,
+        )
+    ) or 0
+    rows = db.scalars(
+        select(MonitorCycleRun)
+        .order_by(MonitorCycleRun.started_at.desc(), MonitorCycleRun.id.desc())
+        .limit(20)
+    ).all()
+    summary = (
+        f"<p>last 24h cycles total: {total_24h}; success: {status_counts.get('success', 0)}; "
+        f"partial: {status_counts.get('partial', 0)}; failed: {status_counts.get('failed', 0)}; "
+        f"skipped: {status_counts.get('skipped', 0)}; latest successful cycle: {display_datetime(latest_success)}; "
+        f"latest failed cycle: {display_datetime(latest_failed)}; stale running count: {stale_running}</p>"
+    )
+    table_rows = []
+    for row in rows:
+        stale_note = ""
+        if row.status == "running" and row.finished_at is None and row.started_at < stale_cutoff:
+            stale_note = " <strong>stale running; possible crash</strong>"
+        error_preview = html.escape(redact_admin_value(row.last_error or "—", "last_error")[:220])
+        table_rows.append(
+            "<tr>"
+            f"<td>{row.id}</td><td>{display_datetime(row.started_at)}</td><td>{display_datetime(row.finished_at)}</td>"
+            f"<td>{_unknown_metric(row.duration_ms)}</td><td>{html.escape(row.status)}{stale_note}</td>"
+            f"<td>{_unknown_metric(row.searches_processed)} / {_unknown_metric(row.searches_total)}</td>"
+            f"<td>{_unknown_metric(row.searches_failed)}</td>"
+            f"<td>{_unknown_metric(row.listings_created)} / {_unknown_metric(row.listings_updated)}</td>"
+            f"<td>{_unknown_metric(row.alert_delivery_attempts_created)}</td>"
+            f"<td>{_unknown_metric(row.alerts_sent_created)}</td>"
+            f"<td>{_unknown_metric(row.alert_delivery_failed)}</td>"
+            f"<td>{_unknown_metric(row.alert_delivery_unknown)}</td>"
+            f"<td>{_safe_cell(row.error_type or '—', 'error_type')}</td>"
+            f"<td>{error_preview}</td>"
+            f"<td><code>{html.escape(Path(str(row.worker_status_file)).name if row.worker_status_file else '—')}</code></td>"
+            "</tr>"
+        )
+    body = "".join(table_rows) or "<tr><td colspan='15'>No monitor cycle runs recorded yet.</td></tr>"
+    return (
+        "<section class='section'><h2>История циклов мониторинга / Monitor cycle history</h2>"
+        f"{summary}<table><tr><th>id</th><th>started_at</th><th>finished_at</th><th>duration_ms</th>"
+        "<th>status</th><th>searches processed/total</th><th>searches_failed</th>"
+        "<th>listings created/updated</th><th>alert attempts created</th><th>alerts sent created</th>"
+        "<th>alert failed</th><th>alert unknown</th><th>error_type</th><th>last_error</th><th>worker_status_file</th></tr>"
+        f"{body}</table></section>"
+    )
+
 @router.get('/system', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
 def admin_system(request: Request, db: Session = Depends(get_db)):
     api_key = request.query_params.get("api_key")
@@ -1307,6 +1382,7 @@ def admin_system(request: Request, db: Session = Depends(get_db)):
         alembic_revision = "Not checked in web request; verify with alembic current during deploy."
 
     delivery_integrity_html = _render_delivery_integrity_summary(delivery_integrity_summary, scope_label="all time")
+    monitor_cycle_history_html = _render_monitor_cycle_history(db, now)
     volume_items = "".join(f"<li>{html.escape(k)}: {v}</li>" for k, v in volumes.items())
     body = (
         "<h1>Состояние / System health</h1><p class='preview'>Read-only dashboard from existing worker status and bounded SQL counters. No forms, no POST actions, no external checks.</p>"
@@ -1315,6 +1391,7 @@ def admin_system(request: Request, db: Session = Depends(get_db)):
         f"<section class='section'><h2>Parser diagnostics</h2><table>{parser_rows}</table></section>"
         f"<section class='section'><h2>Search jobs</h2><p>total: {search_total}; active: {active}; inactive: {search_total - active}; with last_error: {search_errors}; oldest last_checked_at: {display_datetime(oldest_last)}; latest last_checked_at: {display_datetime(latest_last)}</p></section>"
         f"<section class='section'><h2>Alert Delivery health</h2><p>delivery attempts total: {_count_model(db, AlertDeliveryAttempt)}; last 24h: {sum(status_24h.values())}; last 7d: {sum(status_7d.values())}; failed 24h/7d: {status_24h.get('failed', 0)}/{status_7d.get('failed', 0)}; unknown 24h/7d: {status_24h.get('unknown', 0)}/{status_7d.get('unknown', 0)}; manual_retry attempts: {manual_retry_count}; alerts_sent total: {_count_model(db, AlertSent)}</p><p>status counts 24h: {_render_counts(status_24h)}<br>status counts 7d: {_render_counts(status_7d)}<br>channel counts 24h: {_render_counts(channel_24h)}<br>channel counts 7d: {_render_counts(channel_7d)}<br>alerts_sent by channel: {_render_counts(_group_counts(db, AlertSent, AlertSent.channel))}</p>{delivery_integrity_html}</section>"
+        f"{monitor_cycle_history_html}"
         f"<section class='section'><h2>Recent failed delivery attempts</h2><table><tr><th>id</th><th>created_at</th><th>channel</th><th>listing_external_id</th><th>status</th><th>error_type</th><th>last_error</th><th>detail</th></tr>{delivery_rows}</table></section>"
         f"<section class='section'><h2>Agent tasks</h2><p>total: {_count_model(db, AgentTask)}; by status: {_render_counts(_group_counts(db, AgentTask, AgentTask.status))}; by task_type/status: {_render_counts({f'{r[0]}/{r[1]}': r[2] for r in db.execute(select(AgentTask.task_type, AgentTask.status, func.count()).group_by(AgentTask.task_type, AgentTask.status)).all()})}; stuck running older than 2h: {stuck_tasks}</p><table><tr><th>id</th><th>task_type</th><th>status</th><th>error_type</th><th>created_at</th><th>updated_at</th><th>started_at</th><th>finished_at</th></tr>{task_rows}</table></section>"
         f"<section class='section'><h2>Analysis summary</h2><p>total: {_count_model(db, ListingAnalysis)}; by status: {_render_counts(_group_counts(db, ListingAnalysis, ListingAnalysis.status))}; by profile/status: {_render_counts({f'{r[0]}/{r[1]}': r[2] for r in db.execute(select(ListingAnalysis.profile, ListingAnalysis.status, func.count()).group_by(ListingAnalysis.profile, ListingAnalysis.status)).all()})}</p><table><tr><th>id</th><th>listing_external_id</th><th>profile</th><th>status</th><th>error_type</th><th>error</th><th>created_at</th><th>updated_at</th></tr>{analysis_rows}</table></section>"

@@ -143,3 +143,45 @@ def test_admin_system_delivery_invariants_agents_analyses_and_alembic(monkeypatc
     assert "abc123" in page
     assert "actual-secret" not in page
     assert "payload_json" not in page and "result_json" not in page
+
+
+def test_admin_system_monitor_cycle_history_redaction_stale_and_unknown(monkeypatch, tmp_path):
+    from app.models.monitor_cycle_run import MonitorCycleRun
+
+    client, Session = _client(monkeypatch, tmp_path)
+    old_started = datetime.utcnow() - timedelta(hours=2)
+    secret_error = (
+        "https://script.google.com/macros/s/fake-secret-deployment-id/exec "
+        "Authorization: Bearer fake-token api_key=fake-secret X-API-Key: fake-secret"
+    )
+    with Session() as s:
+        s.add(MonitorCycleRun(started_at=old_started, status="running", worker_status_file="worker_status.json"))
+        s.add(
+            MonitorCycleRun(
+                started_at=datetime.utcnow() - timedelta(minutes=5),
+                finished_at=datetime.utcnow() - timedelta(minutes=4),
+                duration_ms=1000,
+                status="failed",
+                searches_processed=0,
+                searches_total=0,
+                error_type="RuntimeError",
+                last_error=secret_error,
+                worker_status_file="/path/with/token/worker_status.json",
+            )
+        )
+        s.commit()
+        before = s.scalar(select(func.count()).select_from(MonitorCycleRun))
+    page = client.get("/admin/system", headers={"X-API-Key": "read"}).text
+    assert "Monitor cycle history" in page
+    assert "last 24h cycles total" in page
+    assert "stale running" in page
+    assert "possible crash" in page
+    assert "unknown" in page
+    assert "fake-secret-deployment-id" not in page
+    assert "fake-token" not in page
+    assert "fake-secret" not in page
+    assert "worker_status.json" in page
+    assert "/path/with/token" not in page
+    with Session() as s:
+        after = s.scalar(select(func.count()).select_from(MonitorCycleRun))
+    assert after == before
