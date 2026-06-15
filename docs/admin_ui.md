@@ -407,3 +407,19 @@ Audit status describes the admin action handling outcome (`success`, `failed`, o
 Audit events intentionally do not store secrets, headers, request bodies, raw form payloads, cookies, API keys, payload JSON, raw URLs, raw IP addresses, or raw user-agent strings. Request paths store only `request.url.path` without query strings. Metadata is allowlisted for the audited action.
 
 `/admin/system` shows a compact read-only “Recent admin audit events” section with the latest 20 events and safe scalar columns only. Future PRs may expand audit coverage before adding retention execution or stronger RBAC/access-control features.
+
+## Human review queue / shortlist read model (PR23c)
+
+PR23c is a small bridge/operator feature before PR24. It is **not PR24**; the next formal roadmap item remains **PR24 - Comparable quality scoring**. Do not renumber PR24 or describe this queue as a comparable-quality scoring feature.
+
+`GET /admin/review-queue` adds a compact, read-only human review queue for operators. It reads already persisted rows from existing tables only: `listings`, `listing_analyses`, `alerts_sent`, `alert_delivery_attempts`, `human_reviews`, and `investment_decisions`. No migration, new table, or new column is expected.
+
+Access control follows the centralized PR23b read boundary. The page requires `ADMIN_UI_READ_KEY`, does not require `ADMIN_UI_TECHNICAL_WRITE_KEY`, does not use the technical write key, and does not create admin audit events on GET. Query parameters do not affect authentication and no technical key is accepted or needed for this page.
+
+The route has no POST actions, no forms, no hidden forms, no mutation buttons, and no bulk actions. It does not create shortlist state, persisted priority, assignments, comments, human decisions, investment decisions, alert retries, agent tasks, market evidence, RAG notes, or any other writes. It does not run scoring, recalculate analysis, change verdicts, trigger alerts, call agents, call external APIs, or change monitor cycles.
+
+The read model returns at most one row per listing. It uses latest-row and aggregate subqueries instead of direct one-to-many joins: latest persisted analysis by `created_at desc, id desc` across profiles by default, or within the optional `profile` filter; `alerts_sent` count; latest alert delivery attempt by `created_at desc, id desc`; human review count plus latest review by `updated_at desc, id desc`; and latest investment decision by `created_at desc, id desc`. If a related table has no row, the UI renders `unknown` where the value was not available. A measured count of zero, such as `alert_sent_count=0`, means the aggregate query ran and found no rows; it is not used for unavailable data.
+
+Default ordering is deterministic and display-only: unreviewed listings first, then existing deterministic verdict/score fields when present, then alert count, `last_seen_at`, and listing id as a stable tie-breaker. This ordering is not a new business score, not persisted, and does not reinterpret or change score/verdict semantics.
+
+The page renders bounded data with `limit` default 50 and max 200, plus optional `profile` and `unreviewed_only` filters. Without a profile filter, listings without analysis remain visible with unknown analysis fields; with a profile filter, only listings that have a latest persisted analysis for that profile are shown. `unreviewed_only=true` means no `human_reviews` rows exist for the listing; investment decisions are summarized separately and are not part of that filter. It does not load all listings and sort them in Python. Listing text and links follow existing Admin UI escaping conventions. The page does not render raw `payload_json`, raw `result_json`, full alert payloads, full agent outputs, webhook/notifier/Apps Script delivery URLs, API keys, cookies, authorization headers, or technical write-key fields.

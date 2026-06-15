@@ -32,6 +32,8 @@ def test_read_only_admin_routes_require_read_key_and_do_not_audit(monkeypatch):
     assert client.get("/admin/system", headers={"X-API-Key": "read"}).status_code == 200
     assert client.get("/admin/alerts", headers={"X-API-Key": "read"}).status_code == 200
     assert client.get(f"/admin/alerts/delivery-attempts/{attempt_id}", headers={"X-API-Key": "read"}).status_code == 200
+    assert client.get("/admin/review-queue", headers={"X-API-Key": "read"}).status_code == 200
+    assert client.get("/admin/review-queue", headers={"X-API-Key": "bad"}).status_code == 403
     assert client.get("/admin/alerts", headers={"X-API-Key": "bad"}).status_code == 403
     assert _counts(Session) == before
 
