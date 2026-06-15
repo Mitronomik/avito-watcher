@@ -17,9 +17,29 @@ PR19a adds the operator dashboard at `/admin`, shared navigation/layout, a small
 - `ADMIN_UI_LANGUAGE=ru` uses Russian labels by default. `en` is available for basic navigation labels.
 - `ADMIN_UI_ALLOW_QUERY_API_KEY=false` disables query-string key authentication and prevents new operator links from propagating keys in URLs.
 - `ADMIN_UI_TECHNICAL_OPS_ENABLED=false` hides and blocks technical write operations by default.
-- `ADMIN_UI_READ_KEY`, `ADMIN_UI_WRITE_KEY`, and `ADMIN_UI_TECHNICAL_WRITE_KEY` are admin-specific keys. Existing `API_KEY` is accepted as a fallback only when admin-specific keys are not configured. In production, set `ADMIN_UI_WRITE_KEY` explicitly and separately from the read key so browser form writes require a distinct operator write secret.
+- `ADMIN_UI_READ_KEY`, `ADMIN_UI_WRITE_KEY`, and `ADMIN_UI_TECHNICAL_WRITE_KEY` are admin-specific keys. Read-only admin access now requires an explicit `ADMIN_UI_READ_KEY`; technical POST actions require an explicit `ADMIN_UI_TECHNICAL_WRITE_KEY`. Do not rely on fallback from one key to another.
 
 No secrets, API keys, webhook URLs, SMTP passwords, Telegram bot tokens, or full environment values should be displayed in the UI. Technical payloads are escaped, bounded, and redacted.
+
+
+## Admin access control (PR23b)
+
+PR23b does not add users, RBAC, login, sessions, or a CSRF framework. It centralizes and hardens the existing key-based admin boundary.
+
+Read-only admin pages, including `GET /admin/system`, `GET /admin/alerts`, and `GET /admin/alerts/delivery-attempts/{attempt_id}`, require a valid `ADMIN_UI_READ_KEY`. If `ADMIN_UI_READ_KEY` is not configured, admin read access fails closed. Existing read-key transport is preserved: `X-API-Key` is preferred, and legacy query-string read-key support remains controlled only by `ADMIN_UI_ALLOW_QUERY_API_KEY`. Read-only GET routes are not audited and must not mutate the database.
+
+Technical POST actions require all of the following:
+
+1. a valid read key;
+2. `ADMIN_UI_TECHNICAL_OPS_ENABLED=true` when technical operations are enabled for the environment;
+3. a configured, valid `ADMIN_UI_TECHNICAL_WRITE_KEY` submitted through the existing `admin_technical_write_key` form/body field;
+4. the existing action-specific `confirm_action` value where that action already requires confirmation.
+
+There is no fallback between the read key, technical write key, normal admin write key, or generic API key for this boundary. The technical write key is not accepted from query-string parameters such as `admin_technical_write_key`, `technical_key`, or `write_key`, and no new key transport is introduced.
+
+Manual alert delivery retry keeps its existing domain behavior, eligibility checks, delivery-attempt semantics, `AlertSent` semantics, response behavior, and PR23a audit semantics. Missing or invalid read keys can be rejected before audit. Technical blocks after a valid read boundary preserve the PR23a blocked audit behavior where it already existed. Successful, failed, skipped, unknown, and blocked retry audit statuses remain action-handling statuses, separate from delivery result metadata.
+
+Admin auth and audit code must not store or render submitted key material, key hashes/prefixes, raw headers, cookies, raw request bodies, raw form dumps, `payload_json`, or submitted `confirm_action` values. Audit `request_path` values are path-only (`request.url.path`) and never include query strings.
 
 ## Operator dashboard
 
@@ -222,7 +242,7 @@ PR19d hardens the existing Admin UI technical operations: create search, edit se
 
 Technical operations remain disabled by default. Set `ADMIN_UI_TECHNICAL_OPS_ENABLED=true` and configure a separate `ADMIN_UI_TECHNICAL_WRITE_KEY` before using dangerous controls. If technical mode is enabled but `ADMIN_UI_TECHNICAL_WRITE_KEY` is empty, technical POST routes fail closed with HTTP 403; they do not fall back to the read key, admin write key, or generic API key.
 
-Browser technical forms use a visible password field named `admin_technical_write_key`. API clients and tests may still use `X-API-Key`, but the value must match `ADMIN_UI_TECHNICAL_WRITE_KEY` for technical POSTs. The submitted technical key is stripped before validation and persistence and is never intentionally rendered back into HTML.
+Browser technical forms use a visible password field named `admin_technical_write_key`. For PR23b-covered technical POSTs, the submitted technical key is validated from the form/body field together with the read key; it is not accepted from the URL query string. The submitted technical key is stripped before validation and persistence and is never intentionally rendered back into HTML.
 
 Every dangerous technical POST also requires visible typed confirmation through `confirm_action`. Operators must type the exact action name: `create_search`, `edit_search`, `activate_search`, `deactivate_search`, `reset_baseline`, or `run_once`. Missing or wrong confirmation returns HTTP 400 and does not mutate state.
 
