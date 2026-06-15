@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+
 REDACTED = "<redacted>"
 SANITIZER_ERROR = "<log redaction failed>"
 
@@ -20,35 +21,24 @@ _SENSITIVE_QUERY_KEYS = {
     "refresh_token",
     "secret",
     "signature",
-    "sig",
     "user_content_key",
     "authorization",
-    "auth",
     "password",
-    "passwd",
-    "cookie",
 }
 
-_SENSITIVE_KEY_FRAGMENTS = (
+_SENSITIVE_KEY_NAMES = {
     "api_key",
     "apikey",
     "token",
     "access_token",
     "refresh_token",
-    "secret",
-    "authorization",
-    "auth",
     "password",
-    "passwd",
-    "cookie",
-    "webhook",
-    "smtp",
-    "telegram",
-    "provider_key",
-    "access_key",
+    "secret",
+    "signature",
+    "authorization",
     "bearer",
-    "proxy",
-)
+    "user_content_key",
+}
 
 _APPS_SCRIPT_RE = re.compile(
     r"https://script\.google\.com/macros/s/[^\s/?#]+/(exec|dev)(?:\?[^\s#]*)?",
@@ -68,20 +58,22 @@ _AUTH_HEADER_RE = re.compile(
 _API_KEY_HEADER_RE = re.compile(
     r"(?i)\b(X-API-Key\s*[:=]\s*)([^\s,;\]}')\"]+)"
 )
-
-_KEY_PATTERN = "|".join(re.escape(key) for key in sorted(_SENSITIVE_KEY_FRAGMENTS, key=len, reverse=True))
 _QUOTED_KV_RE = re.compile(
-    rf"(?i)(?P<prefix>['\"]?[A-Za-z0-9_\-]*(?:{_KEY_PATTERN})[A-Za-z0-9_\-]*['\"]?\s*[:=]\s*)(?P<quote>['\"])(?P<value>.*?)(?P=quote)"
+    r"(?P<prefix>(?P<key_quote>['\"]?)(?P<key>[A-Za-z0-9_\-]+)(?P=key_quote)\s*[:=]\s*)"
+    r"(?P<quote>['\"])(?P<value>.*?)(?P=quote)"
 )
 _BARE_KV_RE = re.compile(
-    rf"(?i)(?P<prefix>\b[A-Za-z0-9_\-]*(?:{_KEY_PATTERN})[A-Za-z0-9_\-]*\s*[:=]\s*)(?P<value>[^\s,;&\]}}]+)"
+    r"(?P<prefix>\b(?P<key>[A-Za-z0-9_\-]+)\s*[:=]\s*)(?P<value>[^\s,;&\]}}]+)"
 )
-
 
 
 def _is_sensitive_key(key: str) -> bool:
-    lowered = key.lower()
-    return any(fragment in lowered for fragment in _SENSITIVE_KEY_FRAGMENTS)
+    lowered = key.strip("'\"").lower()
+    if lowered in _SENSITIVE_KEY_NAMES:
+        return True
+    parts = [part for part in re.split(r"[_\-]+", lowered) if part]
+    return any(part in {"token", "password", "secret", "signature", "authorization", "bearer"} for part in parts)
+
 
 def _safe_string(value: object) -> str:
     try:
@@ -106,10 +98,14 @@ def _redact_query_param(match: re.Match[str]) -> str:
 
 
 def _redact_quoted_kv(match: re.Match[str]) -> str:
+    if not _is_sensitive_key(match.group("key")):
+        return match.group(0)
     return f"{match.group('prefix')}{match.group('quote')}{REDACTED}{match.group('quote')}"
 
 
 def _redact_bare_kv(match: re.Match[str]) -> str:
+    if not _is_sensitive_key(match.group("key")):
+        return match.group(0)
     prefix = match.group("prefix")
     if prefix.strip().lower().startswith("authorization"):
         return match.group(0)
@@ -149,35 +145,21 @@ class RedactingFormatter(logging.Formatter):
         return sanitize_log_text(self.wrapped.format(record))
 
 
-def _sanitize_arg(value: object) -> object:
-    sanitized = sanitize_log_text(value)
-    return sanitized if sanitized != _safe_string(value) else value
-
-
 class RedactingFilter(logging.Filter):
-    """Best-effort record-level redaction without mutating original args objects."""
+    """Compatibility no-op filter.
+
+    Redaction must happen after %-style interpolation, so this filter never
+    changes ``record.msg`` or ``record.args``.
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = sanitize_log_text(record.msg)
-        if record.args:
-            if isinstance(record.args, dict):
-                record.args = {
-                    key: (REDACTED if _is_sensitive_key(str(key)) else _sanitize_arg(value))
-                    for key, value in record.args.items()
-                }
-            elif isinstance(record.args, tuple):
-                record.args = tuple(_sanitize_arg(value) for value in record.args)
-            else:
-                record.args = _sanitize_arg(record.args)
         return True
 
 
 def install_log_redaction() -> None:
-    """Install redaction on existing root handlers used by app and worker logs."""
+    """Install rendered-output redaction on existing root handlers."""
     root = logging.getLogger()
     for handler in root.handlers:
-        if not any(isinstance(existing, RedactingFilter) for existing in handler.filters):
-            handler.addFilter(RedactingFilter())
         formatter = handler.formatter
         if not isinstance(formatter, RedactingFormatter):
             handler.setFormatter(RedactingFormatter(formatter))
