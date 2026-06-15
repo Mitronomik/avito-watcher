@@ -65,6 +65,8 @@ def _is_sensitive_url(host: str, path: str) -> bool:
 def _redact_url(match: re.Match[str]) -> str:
     url = match.group(0)
     parts = urlsplit(url)
+    if parts.netloc.lower() == "script.google.com" and parts.path.lower().startswith("/macros/s/"):
+        return "https://script.google.com/.../exec"
     if _is_sensitive_url(parts.netloc, parts.path):
         return _URL_REDACTED
     if not parts.query:
