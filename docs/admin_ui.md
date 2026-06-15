@@ -342,3 +342,9 @@ Ledger writes are best-effort and isolated from monitor business work. If insert
 Stored and rendered errors are sanitized and truncated. Raw tracebacks, Apps Script deployment URLs, bearer tokens, API keys, authorization headers, SMTP/Telegram/proxy secrets, and full worker status paths must not be stored or displayed. The worker stores only a basename such as `worker_status.json` for `worker_status_file`.
 
 Deployment requires applying the new migration `0016_monitor_cycle_runs` before relying on the history section.
+
+## Runtime log redaction
+
+Runtime logs redact known sensitive external URL fragments, Apps Script deployment IDs, Google macro echo query tokens, authorization fragments, and common secret query/key-value patterns. This affects log rendering only and does not mutate configured delivery URLs or HTTP requests.
+
+Use fake values only when testing log redaction, for example `https://script.google.com/macros/s/fake-deployment-id/exec?token=fake-token`; rendered logs should keep useful host/path context while replacing sensitive fragments with redaction markers.

@@ -5,6 +5,7 @@ import random
 import time
 from datetime import datetime, timezone
 
+from app.core.log_sanitizer import install_log_redaction
 from app.db.init_db import init_db
 from app.parsers.avito_parser import AvitoParser
 from app.parsers.proxy_manager import ProxyManager
@@ -121,6 +122,7 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    install_log_redaction()
     with MonitorWorkerLock(settings.monitor_worker_lock_path):
         init_db()
         parser = _build_parser()
