@@ -11,6 +11,8 @@ from app.parsers.proxy_manager import ProxyManager
 from app.parsers.proxy_url import validate_proxy_urls
 from app.core.config import settings
 from app.services.monitor_service import MonitorService, runtime_diagnostics
+from app.services.monitor_cycle_runs import MonitorCycleRunService, collect_cycle_metrics
+from app.models.monitor_cycle_run import MONITOR_CYCLE_STATUS_FAILED, MONITOR_CYCLE_STATUS_SUCCESS
 from app.workers.status import build_worker_status, write_worker_status_atomic
 
 logger = logging.getLogger(__name__)
@@ -125,27 +127,35 @@ def main() -> None:
         logger.info("monitor worker runtime diagnostics: %s", runtime_diagnostics())
         while True:
             cycle_started_at = datetime.now(timezone.utc)
+            ledger = MonitorCycleRunService()
+            cycle_run_id = ledger.start_cycle(started_at=cycle_started_at)
             results = None
             try:
                 results = run_monitor_cycle(parser)
             except Exception as exc:
                 logger.exception("worker cycle failed")
+                cycle_finished_at = datetime.now(timezone.utc)
                 _write_cycle_status(
                     parser,
                     cycle_started_at=cycle_started_at,
-                    cycle_finished_at=datetime.now(timezone.utc),
+                    cycle_finished_at=cycle_finished_at,
                     cycle_ok=False,
                     results=results,
                     error=exc,
                 )
+                metrics = collect_cycle_metrics(results, started_at=cycle_started_at)
+                ledger.finish_cycle(cycle_run_id, status=MONITOR_CYCLE_STATUS_FAILED, finished_at=cycle_finished_at, metrics=metrics, error=exc)
             else:
+                cycle_finished_at = datetime.now(timezone.utc)
                 _write_cycle_status(
                     parser,
                     cycle_started_at=cycle_started_at,
-                    cycle_finished_at=datetime.now(timezone.utc),
+                    cycle_finished_at=cycle_finished_at,
                     cycle_ok=True,
                     results=results,
                 )
+                metrics = collect_cycle_metrics(results, started_at=cycle_started_at)
+                ledger.finish_cycle(cycle_run_id, status=MONITOR_CYCLE_STATUS_SUCCESS, finished_at=cycle_finished_at, metrics=metrics)
             sleep_for = WORKER_CADENCE_SEC + random.uniform(
                 -WORKER_CADENCE_JITTER_SEC,
                 WORKER_CADENCE_JITTER_SEC,

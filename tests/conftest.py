@@ -67,6 +67,7 @@ from app.models.market_evidence import MarketEvidenceItem, MarketResearchRun  # 
 from app.models.human_review import HumanReview, HumanReviewAction, InvestmentDecision  # noqa: F401
 
 from app.models.search_job import SearchJob  # noqa: F401
+from app.models.monitor_cycle_run import MonitorCycleRun  # noqa: F401
 
 
 @pytest.fixture(autouse=True)

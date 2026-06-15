@@ -317,3 +317,28 @@ grep -iE "Authorization: Bearer|X-API-Key:|actual-known-token-fragment|actual-kn
 ```
 
 Expected result: `/admin/system` returns `200`, contains the expected health sections, does not expose actual secret values, does not include query-string API keys when `ADMIN_UI_ALLOW_QUERY_API_KEY=false`, and leaves DB counts unchanged before/after the GET. Do not enable technical ops, do not run run-once, do not trigger retry, and do not tail logs from the web request.
+
+## Monitor cycle history (PR21c)
+
+PR21c adds a durable operational ledger for top-level monitor worker cycles. The new `monitor_cycle_runs` table is populated by the worker around each top-level monitor cycle invocation, with one row per cycle rather than one row per search job.
+
+The ledger is observability only. It does not control the worker, schedule monitoring, retry deliveries, reset baselines, or change parser, scoring, alert delivery, retry, agent, research, or RAG behavior.
+
+`/admin/system` now includes a read-only **Monitor cycle history** section that shows the latest 20 cycles and a last-24-hours summary by `started_at`. The page remains server-rendered HTML with no forms, no POST action, no shell/log access, no external network checks, and no mutations from GET.
+
+Metric semantics are intentionally conservative:
+
+```text
+NULL = unknown / not captured
+0 = measured and actually zero
+```
+
+The UI renders nullable unknown metrics as `unknown` instead of pretending they are zero. Metrics are sourced from existing monitor results/status payloads when safely available; unavailable metrics, including alert delivery deltas that are not already available from runtime results, remain `NULL`.
+
+A `running` row can remain if the worker crashes after inserting the start row and before the final update. `/admin/system` displays old running rows as a stale running / possible crash signal, but it does not repair or mutate those rows.
+
+Ledger writes are best-effort and isolated from monitor business work. If inserting or updating `monitor_cycle_runs` fails, the worker logs a sanitized warning and continues; ledger failures must not roll back listings, searches, alert attempts, or sent-alert records.
+
+Stored and rendered errors are sanitized and truncated. Raw tracebacks, Apps Script deployment URLs, bearer tokens, API keys, authorization headers, SMTP/Telegram/proxy secrets, and full worker status paths must not be stored or displayed. The worker stores only a basename such as `worker_status.json` for `worker_status_file`.
+
+Deployment requires applying the new migration `0016_monitor_cycle_runs` before relying on the history section.

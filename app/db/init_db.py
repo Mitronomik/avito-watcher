@@ -12,6 +12,7 @@ from app.models.listing_detail_snapshot import ListingDetailSnapshot  # noqa: F4
 from app.models.listing_enrichment import ListingEnrichment  # noqa: F401
 from app.models.market_evidence import MarketEvidenceItem, MarketResearchRun  # noqa: F401
 from app.models.human_review import HumanReview, HumanReviewAction, InvestmentDecision  # noqa: F401
+from app.models.monitor_cycle_run import MonitorCycleRun  # noqa: F401
 
 
 
