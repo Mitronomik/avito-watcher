@@ -86,8 +86,10 @@ Optional copy example with placeholders only:
 
 ```bash
 # Example only. Store backups outside the source tree in real production.
+BACKUP_DIR=/secure/off-repo/backup/location
+mkdir -p "$BACKUP_DIR"
 docker compose --env-file .env -f deploy/docker-compose.prod.yml cp \
-  postgres:/tmp/avito_watcher_backup.dump ./backups/avito_watcher_backup.dump
+  postgres:/tmp/avito_watcher_backup.dump "$BACKUP_DIR/avito_watcher_backup.dump"
 ```
 
 ## Restore principles
