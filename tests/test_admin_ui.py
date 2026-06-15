@@ -13,6 +13,8 @@ from app.admin import redact_admin_json, redact_admin_value
 from app.db.base import Base
 from app.main import create_app
 from app.models.listing import Listing
+from app.models.alert_delivery_attempt import AlertDeliveryAttempt
+from app.models.alert_sent import AlertSent
 from app.models.listing_analysis import ListingAnalysis
 from app.models.human_review import HumanReview, HumanReviewAction, InvestmentDecision
 from app.models.search_job import SearchJob
@@ -1910,3 +1912,149 @@ def test_pr19c_outcome_analytics_uses_service(monkeypatch):
     assert "stats-hash-test" in resp.text
     assert "test limitation" in resp.text
     assert client.post("/admin/outcome-analytics").status_code in {404, 405}
+
+
+def _add_attempt(Session, **kwargs):
+    with Session() as s:
+        row = AlertDeliveryAttempt(
+            listing_external_id=kwargs.get("listing_external_id", "ext-1"),
+            channel=kwargs.get("channel", "jsonl"),
+            dedupe_key=kwargs.get("dedupe_key", "jsonl:new:ext-1"),
+            payload_hash=kwargs.get("payload_hash", "a" * 64),
+            status=kwargs.get("status", "success"),
+            attempt_count=kwargs.get("attempt_count", 1),
+            sent_at=kwargs.get("sent_at"),
+            next_retry_at=kwargs.get("next_retry_at"),
+            last_error=kwargs.get("last_error"),
+            search_job_id=kwargs.get("search_job_id"),
+            search_name=kwargs.get("search_name"),
+            error_type=kwargs.get("error_type"),
+            created_at=kwargs.get("created_at", datetime.utcnow()),
+            updated_at=kwargs.get("updated_at", datetime.utcnow()),
+        )
+        s.add(row)
+        s.commit()
+        s.refresh(row)
+        return row.id
+
+
+def _add_alert_sent(Session, **kwargs):
+    with Session() as s:
+        row = AlertSent(
+            listing_external_id=kwargs.get("listing_external_id", "ext-1"),
+            channel=kwargs.get("channel", "jsonl"),
+            dedupe_key=kwargs.get("dedupe_key", "jsonl:new:ext-1"),
+            created_at=kwargs.get("created_at", datetime.utcnow()),
+        )
+        s.add(row)
+        s.commit()
+        return row.id
+
+
+def test_alert_delivery_dashboard_access_empty_and_post_read_only(monkeypatch, tmp_path):
+    client, _ = make_raw_client(monkeypatch, allow_query_api_key=False, client_cls=TestClient)
+    monkeypatch.setattr(settings, "jsonl_outbox_path", str(tmp_path / "missing.jsonl"))
+    assert client.get("/admin/alerts", headers={"X-API-Key": "read"}).status_code == 200
+    assert client.get("/admin/alerts").status_code == 403
+    assert client.get("/admin/alerts?api_key=legacy").status_code == 403
+    assert client.post("/admin/alerts", headers={"X-API-Key": "tech"}).status_code in {404, 405}
+    page = client.get("/admin/alerts", headers={"X-API-Key": "read"}).text
+    assert "Попытки доставки ещё не зафиксированы" in page
+    assert "success_without_alert_sent: 0" in page
+    assert "bad_payload_hash_count: 0" in page
+
+
+def test_alert_delivery_dashboard_summary_filters_listing_link_and_jsonl_compat(monkeypatch, tmp_path):
+    client, Session = make_client(monkeypatch)
+    outbox = tmp_path / "alerts.jsonl"
+    outbox.write_text(json.dumps({"timestamp": "2026", "search_name": "alpha", "title": "legacy"}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(settings, "jsonl_outbox_path", str(outbox))
+    listing_id = create_listing(Session, external_id="ext-ok", title="safe")
+    _add_attempt(Session, listing_external_id="ext-ok", channel="jsonl", status="success", dedupe_key="jsonl:new:ext-ok", sent_at=datetime.utcnow(), search_name="search-a")
+    _add_alert_sent(Session, listing_external_id="ext-ok", channel="jsonl", dedupe_key="jsonl:new:ext-ok")
+    _add_attempt(Session, listing_external_id="ext-failed", channel="google_sheets", status="failed", dedupe_key="google:new:ext-failed")
+    _add_attempt(Session, listing_external_id="ext-skip", channel="email", status="skipped", dedupe_key="email:new:ext-skip")
+    _add_attempt(Session, listing_external_id="ext-unknown", channel="telegram", status="unknown", dedupe_key="telegram:new:ext-unknown")
+    page = client.get("/admin/alerts?hours=168&limit=50").text
+    assert "legacy" in page
+    assert "Попытки доставки уведомлений" in page
+    assert "total attempts in selected period: 4" in page
+    assert "success: 1" in page and "failed: 1" in page and "skipped: 1" in page and "unknown: 1" in page
+    assert "jsonl: 1" in page and "telegram: 1" in page
+    assert f"/admin/listings/{listing_id}" in page
+    assert "search-a" in page
+    assert "yes" in page
+    assert "aaaaaaaaaaaa" in page
+    assert "ext-failed" in client.get("/admin/alerts?status=failed").text
+    assert "ext-ok" not in client.get("/admin/alerts?status=failed").text
+    assert "ext-ok" in client.get("/admin/alerts?channel=jsonl").text
+    assert "ext-ok" in client.get("/admin/alerts?listing_external_id=ext-ok").text
+    assert "ext-ok" in client.get("/admin/alerts?dedupe_key=jsonl:new:ext-ok").text
+    assert client.get("/admin/alerts?limit=1").text.count("delivery-attempts/") == 1
+    old_id = _add_attempt(Session, listing_external_id="old", channel="jsonl", status="failed", dedupe_key="jsonl:new:old", created_at=datetime(2020, 1, 1))
+    assert "old" not in client.get("/admin/alerts?hours=1").text
+    assert client.get("/admin/alerts?status=bad").status_code == 400
+    assert client.get("/admin/alerts?limit=bad").status_code == 400
+    assert client.get("/admin/alerts?limit=201").status_code == 200
+    assert client.get("/admin/alerts?hours=0").status_code == 400
+    assert client.get("/admin/alerts?hours=721").status_code == 400
+    assert client.get("/admin/alerts?search_job_id=bad").status_code == 400
+    assert old_id
+
+
+
+def test_alert_delivery_dashboard_does_not_propagate_query_key_when_disabled(monkeypatch, tmp_path):
+    client, Session = make_raw_client(monkeypatch, allow_query_api_key=False, client_cls=TestClient)
+    monkeypatch.setattr(settings, "jsonl_outbox_path", str(tmp_path / "missing.jsonl"))
+    attempt_id = _add_attempt(Session, listing_external_id="no-query-key", channel="jsonl", status="failed", dedupe_key="jsonl:new:no-query-key")
+    page = client.get("/admin/alerts?api_key=read", headers={"X-API-Key": "read"}).text
+    assert "Попытки доставки уведомлений" in page
+    delivery_section = page.split("Попытки доставки уведомлений", 1)[1]
+    assert "name='api_key' value='read'" not in delivery_section
+    assert f"/admin/alerts/delivery-attempts/{attempt_id}?api_key=read" not in delivery_section
+    assert f"/admin/alerts/delivery-attempts/{attempt_id}'" in delivery_section
+
+
+def test_alert_delivery_dashboard_can_propagate_query_key_when_enabled(monkeypatch, tmp_path):
+    client, Session = make_raw_client(monkeypatch, allow_query_api_key=True, client_cls=TestClient)
+    monkeypatch.setattr(settings, "jsonl_outbox_path", str(tmp_path / "missing.jsonl"))
+    attempt_id = _add_attempt(Session, listing_external_id="query-key", channel="jsonl", status="failed", dedupe_key="jsonl:new:query-key")
+    page = client.get("/admin/alerts?api_key=read").text
+    delivery_section = page.split("Попытки доставки уведомлений", 1)[1]
+    assert "name='api_key' value='read'" in delivery_section
+    assert f"/admin/alerts/delivery-attempts/{attempt_id}?api_key=read" in delivery_section
+
+def test_alert_delivery_invariants_detail_secret_safety_and_no_mutation(monkeypatch, tmp_path):
+    client, Session = make_client(monkeypatch)
+    monkeypatch.setattr(settings, "jsonl_outbox_path", str(tmp_path / "missing.jsonl"))
+    secret_error = "Authorization: Basic real-prod-basic-123 Authorization: Bearer real-prod-bearer-456 Authorization: Token real-prod-token-789 X-API-Key: real-prod-api-123 api_key=real-prod-query-123 api-key=real-prod-hyphen-123 apikey=real-prod-compact-123 webhook=https://any-host.example/path/real-prod-webhook-123 telegram=https://api.telegram.org/botreal-prod-telegram-123/sendMessage smtp_password=real-prod-smtp-123"
+    detail_id = _add_attempt(Session, listing_external_id="secret-ext", channel="jsonl", status="failed", dedupe_key="jsonl:new:secret", payload_hash="bad", last_error=secret_error, next_retry_at=datetime.utcnow())
+    _add_alert_sent(Session, listing_external_id="secret-ext", channel="jsonl", dedupe_key="jsonl:new:secret")
+    _add_attempt(Session, listing_external_id="no-sent", channel="jsonl", status="success", dedupe_key="jsonl:new:no-sent", sent_at=datetime.utcnow())
+    _add_attempt(Session, listing_external_id="missing-sent-at", channel="email", status="success", dedupe_key="email:new:missing")
+    _add_alert_sent(Session, listing_external_id="sent-on-failed", channel="email", dedupe_key="email:new:failed")
+    _add_attempt(Session, listing_external_id="sent-on-failed", channel="email", status="failed", dedupe_key="email:new:failed", sent_at=datetime.utcnow())
+    with Session() as s:
+        before = {AlertDeliveryAttempt.__tablename__: s.scalar(select(func.count()).select_from(AlertDeliveryAttempt)), AlertSent.__tablename__: s.scalar(select(func.count()).select_from(AlertSent)), Listing.__tablename__: s.scalar(select(func.count()).select_from(Listing)), ListingAnalysis.__tablename__: s.scalar(select(func.count()).select_from(ListingAnalysis)), SearchJob.__tablename__: s.scalar(select(func.count()).select_from(SearchJob))}
+    page = client.get("/admin/alerts").text
+    assert "success_without_alert_sent: 2" in page
+    assert "non_success_with_alert_sent: 2" in page
+    assert "success_missing_sent_at: 1" in page
+    assert "non_success_with_sent_at: 1" in page
+    assert "non_null_next_retry_at: 1" in page
+    assert "bad_payload_hash_count: 1" in page
+    for leaked in ("real-prod-basic-123", "real-prod-bearer-456", "real-prod-token-789", "real-prod-api-123", "real-prod-query-123", "real-prod-hyphen-123", "real-prod-compact-123", "real-prod-webhook-123", "real-prod-telegram-123", "real-prod-smtp-123"):
+        assert leaked not in page
+    detail = client.get(f"/admin/alerts/delivery-attempts/{detail_id}").text
+    assert "matching AlertSent" in detail and "yes" in detail
+    assert "secret-ext" in detail
+    for leaked in ("real-prod-basic-123", "real-prod-bearer-456", "real-prod-token-789", "real-prod-api-123", "real-prod-query-123", "real-prod-hyphen-123", "real-prod-compact-123", "real-prod-webhook-123", "real-prod-telegram-123", "real-prod-smtp-123"):
+        assert leaked not in detail
+    assert "payload_hash prefix" in detail and "bad" in detail
+    assert client.get("/admin/alerts/delivery-attempts/0").status_code == 400
+    assert client.get("/admin/alerts/delivery-attempts/999999").status_code == 404
+    assert client.post(f"/admin/alerts/delivery-attempts/{detail_id}").status_code in {404, 405}
+    client.get(f"/admin/alerts/delivery-attempts/{detail_id}")
+    with Session() as s:
+        after = {AlertDeliveryAttempt.__tablename__: s.scalar(select(func.count()).select_from(AlertDeliveryAttempt)), AlertSent.__tablename__: s.scalar(select(func.count()).select_from(AlertSent)), Listing.__tablename__: s.scalar(select(func.count()).select_from(Listing)), ListingAnalysis.__tablename__: s.scalar(select(func.count()).select_from(ListingAnalysis)), SearchJob.__tablename__: s.scalar(select(func.count()).select_from(SearchJob))}
+    assert after == before
