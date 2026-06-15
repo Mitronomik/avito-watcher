@@ -44,6 +44,7 @@ from app.services.retention_dry_run import get_retention_dry_run_report
 from app.services.admin_audit import record_admin_audit_event
 from app.services.admin_auth import admin_api_key_header, require_admin_read_access, require_admin_technical_access
 from app.services.human_reviews import HumanReviewService, HumanReviewValidationError, build_review_context_key
+from app.services.human_review_queue import get_human_review_queue_rows, normalize_review_queue_limit, parse_unreviewed_only
 from app.workers.status import PARSER_STATUS_FIELDS, read_worker_status, summarize_worker_status
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,120}$")
@@ -54,13 +55,13 @@ UI_TEXT = {
     "ru": {
         "nav.dashboard": "Панель", "nav.listings": "Объекты", "nav.searches": "Поиски",
         "nav.alerts": "Уведомления", "nav.analyses": "Анализы", "nav.system": "Состояние",
-        "nav.technical": "Технический режим", "nav.evidence": "Рыночные данные", "nav.agents": "Агенты", "nav.outcome_analytics": "Аналитика решений", "dashboard.title": "Панель оператора",
+        "nav.technical": "Технический режим", "nav.evidence": "Рыночные данные", "nav.agents": "Агенты", "nav.outcome_analytics": "Аналитика решений", "nav.review_queue": "Очередь review", "dashboard.title": "Панель оператора",
         "no_data": "Нет данных", "technical.details": "Технические детали",
     },
     "en": {
         "nav.dashboard": "Dashboard", "nav.listings": "Listings", "nav.searches": "Searches",
         "nav.alerts": "Alerts", "nav.analyses": "Analyses", "nav.system": "System status",
-        "nav.technical": "Technical mode", "nav.evidence": "Evidence", "nav.agents": "Agents", "nav.outcome_analytics": "Outcome analytics", "dashboard.title": "Operator dashboard",
+        "nav.technical": "Technical mode", "nav.evidence": "Evidence", "nav.agents": "Agents", "nav.outcome_analytics": "Outcome analytics", "nav.review_queue": "Review queue", "dashboard.title": "Operator dashboard",
         "no_data": "No data", "technical.details": "Technical details",
     },
 }
@@ -276,7 +277,7 @@ def _keywords(value: str) -> list[str] | None:
 
 
 def _admin_nav() -> str:
-    links = [("/admin", "nav.dashboard"), ("/admin/listings", "nav.listings"), ("/admin/searches", "nav.searches"), ("/admin/alerts", "nav.alerts"), ("/admin/listing-analyses", "nav.analyses"), ("/admin/evidence", "nav.evidence"), ("/admin/agents", "nav.agents"), ("/admin/outcome-analytics", "nav.outcome_analytics"), ("/admin/system", "nav.system"), ("/admin/technical", "nav.technical")]
+    links = [("/admin", "nav.dashboard"), ("/admin/listings", "nav.listings"), ("/admin/searches", "nav.searches"), ("/admin/alerts", "nav.alerts"), ("/admin/listing-analyses", "nav.analyses"), ("/admin/evidence", "nav.evidence"), ("/admin/agents", "nav.agents"), ("/admin/outcome-analytics", "nav.outcome_analytics"), ("/admin/review-queue", "nav.review_queue"), ("/admin/system", "nav.system"), ("/admin/technical", "nav.technical")]
     return "<nav>" + " · ".join(f"<a href='{href}'>{html.escape(_t(key))}</a>" for href, key in links) + "</nav>"
 
 def _render_page(title: str, body: str) -> HTMLResponse:
@@ -1959,6 +1960,62 @@ def listing_analyses(
     return _render_page('Listing analyses', body)
 
 
+
+
+@router.get('/review-queue', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
+def review_queue(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: str | None = Query(default=None),
+    profile: str | None = Query(default=None),
+    unreviewed_only: str | None = Query(default=None),
+):
+    api_key = request.query_params.get('api_key')
+    effective_limit = normalize_review_queue_limit(limit)
+    normalized_profile = (profile or '').strip() or None
+    only_unreviewed = parse_unreviewed_only(unreviewed_only)
+    rows = get_human_review_queue_rows(db, limit=effective_limit, profile=normalized_profile, unreviewed_only=only_unreviewed)
+    row_html = []
+    for row in rows:
+        detail_link = f"<a href='{_html_attr(_admin_url(f'/admin/listings/{row.listing_id}', api_key))}'>details</a>"
+        source_link = _safe_external_link(row.url, 'source') if row.url else '—'
+        risk_flags = 'unknown' if row.risk_flags is None else (', '.join(display_risk_flag(flag) for flag in row.risk_flags) or '—')
+        analysis = (
+            f"profile={html.escape(row.analysis_profile or 'unknown')}<br>"
+            f"status={html.escape(row.analysis_status or 'unknown')}<br>"
+            f"score={html.escape(str(row.analysis_score)) if row.analysis_score is not None else 'unknown'}<br>"
+            f"verdict={display_verdict(row.analysis_verdict)} ({html.escape(row.analysis_verdict or 'unknown')})<br>"
+            f"updated={display_datetime(row.analysis_updated_at)}"
+            if row.analysis_id is not None else 'unknown'
+        )
+        alerts = f"sent_count={row.alert_sent_count}<br>latest_attempt={html.escape(row.latest_attempt_status or 'unknown')}<br>attempt_at={display_datetime(row.latest_attempt_at)}"
+        review = (
+            f"count={row.human_review_count}<br>"
+            f"status={html.escape(row.latest_review_status or 'unknown')}<br>"
+            f"human_verdict={display_human_verdict(row.latest_human_verdict)} ({html.escape(row.latest_human_verdict or 'unknown')})<br>"
+            f"outcome={display_outcome_status(row.latest_outcome_status)} ({html.escape(row.latest_outcome_status or 'unknown')})<br>"
+            f"updated={display_datetime(row.latest_review_at)}"
+        )
+        decision = 'unknown' if row.latest_decision_type is None else f"{html.escape(row.latest_decision_type)} / {html.escape(row.latest_decision_status or 'unknown')}<br>{display_datetime(row.latest_decision_at)}"
+        row_html.append(
+            f"<tr><td>{html.escape(str(row.listing_id))}<br>{detail_link}<br>{source_link}</td>"
+            f"<td>{html.escape(row.external_id)}</td><td>{html.escape(_truncate(row.title, 120))}</td>"
+            f"<td>{html.escape(str(row.price if row.price is not None else '—'))}</td><td>{html.escape(str(row.area_m2 if row.area_m2 is not None else '—'))}</td>"
+            f"<td>{html.escape(_truncate(row.address, 120))}</td><td>{display_datetime(row.first_seen_at)}<br>{display_datetime(row.last_seen_at)}</td>"
+            f"<td>{analysis}<br>risks={risk_flags}</td><td>{alerts}</td><td>{review}</td><td>{decision}</td></tr>"
+        )
+    empty = '<p>No review queue candidates found.</p>' if not row_html else ''
+    table = '' if not row_html else "<table><tr><th>listing</th><th>external_id</th><th>title</th><th>price</th><th>area</th><th>address</th><th>seen</th><th>latest analysis</th><th>alerts</th><th>human review</th><th>investment decision</th></tr>" + ''.join(row_html) + '</table>'
+    body = (
+        "<h1>Human review queue</h1>"
+        "<p class='note'>Read-only human review queue. No scoring, analysis, alert, agent, or human decision is changed by this page.</p>"
+        "<p class='preview'>PR23c bridge/operator view, not PR24. Ordering is display-only: unreviewed listings first, then existing verdict/score, alert count, last_seen_at, and listing id. Unknown values are not fake zeros.</p>"
+        f"<p><a href='{_html_attr(_admin_url('/admin/listings', api_key))}'>Listings</a> · <a href='{_html_attr(_admin_url('/admin/listing-analyses', api_key))}'>Listing analyses</a> · <a href='{_html_attr(_admin_url('/admin/outcome-analytics', api_key))}'>Outcome analytics</a></p>"
+        f"<div class='section'><h3>Filters</h3><p>limit: {effective_limit}; profile: {html.escape(normalized_profile or 'all profiles')}; unreviewed_only: {display_boolean(only_unreviewed)}</p>"
+        f"<p class='preview'>Use query parameters <code>limit</code> (max 200), <code>profile</code>, and <code>unreviewed_only=true</code>. This page has no POST actions or forms.</p></div>"
+        f"{empty}{table}"
+    )
+    return _render_page('Human review queue', body)
 
 
 @router.get('/listings', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
