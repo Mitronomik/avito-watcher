@@ -64,19 +64,15 @@ cd ~/apps/avito-watcher
 git pull --ff-only origin main
 git log -1 --oneline
 
-
 docker compose --env-file .env -f deploy/docker-compose.prod.yml config >/dev/null
-
 
 docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm \
   -e PYTHONPATH=/app \
   app alembic heads
 
-
 docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm \
   -e PYTHONPATH=/app \
   app alembic current
-
 
 docker compose --env-file .env -f deploy/docker-compose.prod.yml build app
 docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d app
@@ -127,11 +123,11 @@ The app then served Admin UI requests successfully, confirming startup completed
 Read key was loaded from `.env` locally on the production host and passed only via request header:
 
 ```bash
-ADMIN_READ_KEY="$([
+ADMIN_READ_KEY="$(
   grep -E '^ADMIN_UI_READ_KEY=' .env \
   | cut -d= -f2- \
   | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
-])"
+)"
 
 curl -sS -o /tmp/pr21a_system.html -w "%{http_code}\n" \
   -H "X-API-Key: $ADMIN_READ_KEY" \
