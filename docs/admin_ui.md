@@ -253,3 +253,64 @@ The active form is rendered only when `ADMIN_UI_TECHNICAL_OPS_ENABLED=true` and 
 Eligibility requires status `failed`, `skipped`, or `unknown`; a present listing; non-empty channel and dedupe key; dedupe consistency with `{channel}:new:{listing_external_id}`; and no exact matching `AlertSent`. Successful attempts and success-without-AlertSent invariant rows remain non-retryable in PR20c because repair/audit workflows belong to a future PR.
 
 On POST, the route validates technical auth and confirmation, validates eligibility, rechecks matching `AlertSent` immediately before the external call, and then sends only the original channel. The regenerated alert payload comes from current database listing data rather than raw stored payload replay, so a retry attempt gets a fresh payload hash. A successful delivery creates `AlertSent`; failed/skipped/unknown outcomes create only an `AlertDeliveryAttempt` marked with `search_name=manual_retry` or `manual_retry:{original_search_name}`; auth, confirmation, and eligibility failures create no attempt rows. Audit logging remains future PR23 scope.
+
+## PR21a read-only production health dashboard
+
+PR21a adds `GET /admin/system`, a read-only production health page for operators. The page uses the existing Admin UI read authentication and returns server-rendered HTML. It does not require the write key, does not require the technical key, and intentionally has no forms or POST actions.
+
+The dashboard is a bounded read model only. It uses:
+
+- the existing worker status file helpers (`read_worker_status` and `summarize_worker_status`);
+- parser diagnostic fields that already exist in the worker status payload;
+- bounded SQL counters for searches, alert deliveries, agent tasks, analyses, and data volumes;
+- the same PR20 alert-delivery invariant definitions used by the alert dashboard;
+- the `alembic_version` table when it can be read safely from the DB.
+
+The page explicitly does **not**:
+
+- mutate the database;
+- add a migration;
+- create a scheduler, queue, heartbeat table, SLA engine, or observability engine;
+- run parser, worker, retry, run-once, reset-baseline, or technical actions;
+- shell out to Alembic, Docker, or system commands from the web request;
+- read Docker/app/worker logs;
+- read `debug_html` files;
+- read `.env` or secrets;
+- perform external HTTP/network checks;
+- replace production smoke/deploy checks;
+- implement PR45/SLA/time-series observability scope.
+
+Technical actions remain separate in `/admin/technical`. `/admin/system` is safe visibility only and does not replace `/admin/technical`.
+
+### Safe production smoke checklist for PR21a
+
+```bash
+cd ~/apps/avito-watcher
+git pull --ff-only origin main
+git log -1 --oneline
+docker compose --env-file .env -f deploy/docker-compose.prod.yml config >/dev/null
+docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm \
+  -e PYTHONPATH=/app \
+  app alembic heads
+docker compose --env-file .env -f deploy/docker-compose.prod.yml run --rm \
+  -e PYTHONPATH=/app \
+  app alembic current
+docker compose --env-file .env -f deploy/docker-compose.prod.yml build app
+docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d app
+curl -i http://127.0.0.1:8010/health
+```
+
+Admin smoke:
+
+```bash
+ADMIN_READ_KEY="$(grep -E '^ADMIN_UI_READ_KEY=' .env | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
+curl -sS -o /tmp/pr21a_system.html -w "%{http_code}\n" \
+  -H "X-API-Key: $ADMIN_READ_KEY" \
+  "http://127.0.0.1:8010/admin/system"
+
+grep -E "System health|Состояние|Worker|Delivery|Alert|Agent|Alembic" /tmp/pr21a_system.html
+grep -i "api_key=" /tmp/pr21a_system.html || true
+grep -iE "Authorization: Bearer|X-API-Key:|actual-known-token-fragment|actual-known-password-fragment" /tmp/pr21a_system.html || true
+```
+
+Expected result: `/admin/system` returns `200`, contains the expected health sections, does not expose actual secret values, does not include query-string API keys when `ADMIN_UI_ALLOW_QUERY_API_KEY=false`, and leaves DB counts unchanged before/after the GET. Do not enable technical ops, do not run run-once, do not trigger retry, and do not tail logs from the web request.
