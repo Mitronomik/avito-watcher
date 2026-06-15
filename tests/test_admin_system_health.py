@@ -200,7 +200,7 @@ def test_admin_system_backup_restore_retention_readiness_policy_only(monkeypatch
     assert "Restore procedure" in page and "documented" in page
     assert "Retention mode" in page and "policy-only" in page
     assert "Retention execution" in page and "disabled / not implemented" in page
-    assert "Retention dry-run" in page and "not implemented" in page
+    assert "Retention dry-run" in page and "available / read-only" in page
     assert "Latest backup" in page and "unknown" in page
     assert "Backup metadata source" in page and "not configured" in page
     assert "Data volume summary" in page and "listings: 1" in page and "search_jobs: 1" in page
@@ -234,6 +234,13 @@ def test_admin_system_backup_restore_retention_has_no_destructive_ui_or_secret_p
         "Apply retention",
         "Archive now",
         "Truncate",
+        "Run retention",
+        "Purge old data",
+        "Execute retention",
+        "Удалить",
+        "Архивировать",
+        "Очистить",
+        "Запустить очистку",
     ]:
         assert forbidden.lower() not in lower
     for leaked in [
@@ -251,3 +258,75 @@ def test_admin_system_backup_restore_retention_has_no_destructive_ui_or_secret_p
     ]:
         assert leaked.lower() not in lower
     assert client.post("/admin/system", headers={"X-API-Key": "read"}).status_code in {404, 405}
+
+
+def test_admin_system_retention_dry_run_counts_and_safety(monkeypatch, tmp_path):
+    from app.models.listing_detail_snapshot import ListingDetailSnapshot
+    from app.models.listing_enrichment import ListingEnrichment
+    from app.models.monitor_cycle_run import MonitorCycleRun
+    from app.services.retention_dry_run import get_retention_dry_run_report
+
+    client, Session = _client(monkeypatch, tmp_path)
+    old_200 = datetime.utcnow() - timedelta(days=200)
+    old_100 = datetime.utcnow() - timedelta(days=100)
+    recent = datetime.utcnow() - timedelta(days=1)
+    with Session() as s:
+        s.add(AlertDeliveryAttempt(listing_external_id="old", channel="telegram", dedupe_key="telegram:new:old", payload_hash="d" * 64, status="failed", created_at=old_100))
+        s.add(AlertDeliveryAttempt(listing_external_id="new", channel="telegram", dedupe_key="telegram:new:new", payload_hash="e" * 64, status="failed", created_at=recent))
+        s.add(MonitorCycleRun(started_at=old_100, status="success"))
+        s.add(MonitorCycleRun(started_at=recent, status="success"))
+        s.add(AgentTask(task_type="review", status="success", dedupe_key="old-success", created_at=old_200))
+        s.add(AgentTask(task_type="review", status="running", dedupe_key="old-running", created_at=old_200))
+        s.add(AgentTask(task_type="review", status="failed", dedupe_key="new-failed", created_at=recent))
+        s.add(ListingDetailSnapshot(listing_external_id="snap-old", source_kind="detail", content_hash="f" * 64, created_at=old_200))
+        s.add(ListingDetailSnapshot(listing_external_id="snap-new", source_kind="detail", content_hash="g" * 64, created_at=recent))
+        s.add(ListingEnrichment(listing_external_id="en-old", enrichment_type="x", source_type="snapshot", source_id=1, status="success", validation_status="valid", prompt_version="p", schema_version="s", extraction_profile="e", input_hash="h" * 64, source_content_hash="i" * 64, output_hash="j" * 64, created_at=old_200))
+        s.add(ListingEnrichment(listing_external_id="en-new", enrichment_type="x", source_type="snapshot", source_id=2, status="success", validation_status="valid", prompt_version="p", schema_version="s", extraction_profile="e", input_hash="k" * 64, source_content_hash="l" * 64, output_hash="m" * 64, created_at=recent))
+        s.commit()
+
+    with Session() as s:
+        report = get_retention_dry_run_report(s, datetime.utcnow())
+    by_table = {row.table_name: row for row in report.rows}
+    assert by_table["alert_delivery_attempts"].dry_run_candidate_count == 1
+    assert by_table["alert_delivery_attempts"].total_count == 2
+    assert by_table["monitor_cycle_runs"].dry_run_candidate_count == 1
+    assert by_table["monitor_cycle_runs"].total_count == 2
+    assert by_table["agent_tasks"].dry_run_candidate_count == 1
+    assert by_table["agent_tasks"].total_count == 3
+    assert by_table["listing_detail_snapshots"].dry_run_candidate_count == 1
+    assert by_table["listing_detail_snapshots"].total_count == 2
+    assert by_table["listing_enrichments"].dry_run_candidate_count == 1
+    assert by_table["listing_enrichments"].total_count == 2
+
+    page = client.get("/admin/system", headers={"X-API-Key": "read"}).text
+    assert "Dry-run отчёт по retention" in page
+    assert "Dry-run only." in page
+    assert "No rows are deleted, archived, updated, or scheduled for deletion" in page
+    assert "dry_run_candidate_count" in page
+    assert "alert_delivery_attempts" in page and "monitor_cycle_runs" in page
+    assert "listing_detail_snapshots" in page and "listing_enrichments" in page
+    assert "agent_tasks" in page and "Terminal statuses only" in page
+    assert "started_at" in page
+    assert "old-running" not in page and "snap-old" not in page and "en-old" not in page
+    assert "telegram:new:old" not in page
+    assert "payload_json" not in page and "attributes_json" not in page
+    assert "DELETE" not in page and "ARCHIVE" not in page
+    assert "<form" not in page.lower() and "<button" not in page.lower()
+
+
+def test_retention_dry_run_helper_empty_supported_tables_are_zero(monkeypatch, tmp_path):
+    from app.services.retention_dry_run import get_retention_dry_run_report
+
+    _, Session = _client(monkeypatch, tmp_path)
+    with Session() as s:
+        report = get_retention_dry_run_report(s, datetime.utcnow())
+    by_table = {row.table_name: row for row in report.rows}
+    assert by_table["alert_delivery_attempts"].dry_run_candidate_count == 0
+    assert by_table["monitor_cycle_runs"].dry_run_candidate_count == 0
+    assert by_table["agent_tasks"].dry_run_candidate_count == 0
+    assert by_table["listing_detail_snapshots"].dry_run_candidate_count == 0
+    assert by_table["listing_enrichments"].dry_run_candidate_count == 0
+    assert all(row.status == "supported" for row in report.rows)
+    assert all(row.dry_run_candidate_count is not None for row in report.rows)
+    assert all(not hasattr(row, "ids") for row in report.rows)
+    assert all("DELETE" not in row.notes.upper() and "ARCHIVE" not in row.notes.upper() for row in report.rows)

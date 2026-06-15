@@ -40,6 +40,7 @@ from app.repositories.alert_delivery_attempt_repository import AlertDeliveryAtte
 from app.utils.formatting import build_listing_message
 from app.services.alert_delivery_attempts import compute_alert_payload_hash
 from app.services.alert_delivery_attempts import sanitize_alert_delivery_error
+from app.services.retention_dry_run import get_retention_dry_run_report
 from app.services.human_reviews import HumanReviewService, HumanReviewValidationError, build_review_context_key
 from app.workers.status import PARSER_STATUS_FIELDS, read_worker_status, summarize_worker_status
 
@@ -1297,7 +1298,7 @@ def _render_backup_restore_retention_readiness() -> str:
         ("Restore procedure", "documented"),
         ("Retention mode", "policy-only"),
         ("Retention execution", "disabled / not implemented"),
-        ("Retention dry-run", "not implemented"),
+        ("Retention dry-run", "available / read-only"),
         ("Latest backup", "unknown"),
         ("Backup metadata source", "not configured"),
     ]
@@ -1309,6 +1310,39 @@ def _render_backup_restore_retention_readiness() -> str:
         "<section class='section'><h2>Готовность backup / restore / retention</h2>"
         "<p>Read-only policy/readiness signals only; no operator actions are available here.</p>"
         f"<table>{body}</table></section>"
+    )
+
+
+def _display_retention_metric(value: int | None) -> str:
+    return "unknown" if value is None else str(value)
+
+
+def _render_retention_dry_run_report(db: Session, now: datetime) -> str:
+    report = get_retention_dry_run_report(db, now)
+    rows = []
+    for row in report.rows:
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(row.table_name)}</td>"
+            f"<td>{html.escape(row.policy_label)}</td>"
+            f"<td>{row.dry_run_candidate_after_days}</td>"
+            f"<td>{html.escape(row.timestamp_column or 'unknown')}</td>"
+            f"<td>{_display_retention_metric(row.dry_run_candidate_count)}</td>"
+            f"<td>{_display_retention_metric(row.total_count)}</td>"
+            f"<td>{display_datetime(row.oldest_candidate_at)}</td>"
+            f"<td>{display_datetime(row.newest_candidate_at)}</td>"
+            f"<td>{html.escape(row.status)}</td>"
+            f"<td>{html.escape(row.notes)}</td>"
+            "</tr>"
+        )
+    body = "".join(rows) or "<tr><td colspan='10'>unknown</td></tr>"
+    return (
+        "<section class='section'><h2>Dry-run отчёт по retention</h2>"
+        "<p><strong>Dry-run only.</strong> No rows are deleted, archived, updated, or scheduled for deletion by this report.</p>"
+        "<table><tr><th>table</th><th>policy</th><th>dry_run_candidate_after_days</th>"
+        "<th>timestamp_column</th><th>dry_run_candidate_count</th><th>total_count</th>"
+        "<th>oldest_candidate_at</th><th>newest_candidate_at</th><th>status</th><th>notes</th></tr>"
+        f"{body}</table></section>"
     )
 
 @router.get('/system', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
@@ -1419,6 +1453,7 @@ def admin_system(request: Request, db: Session = Depends(get_db)):
         f"<section class='section'><h2>Data volume summary</h2><ul>{volume_items}</ul></section>"
         f"<section class='section'><h2>Alembic</h2><p>current DB revision: <code>{html.escape(alembic_revision)}</code></p></section>"
         f"{_render_backup_restore_retention_readiness()}"
+        f"{_render_retention_dry_run_report(db, now)}"
     )
     return _render_page("System health", body)
 
