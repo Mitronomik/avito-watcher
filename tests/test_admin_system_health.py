@@ -185,3 +185,69 @@ def test_admin_system_monitor_cycle_history_redaction_stale_and_unknown(monkeypa
     with Session() as s:
         after = s.scalar(select(func.count()).select_from(MonitorCycleRun))
     assert after == before
+
+def test_admin_system_backup_restore_retention_readiness_policy_only(monkeypatch, tmp_path):
+    client, Session = _client(monkeypatch, tmp_path)
+    with Session() as s:
+        s.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        s.execute(text("INSERT INTO alembic_version (version_num) VALUES ('rev_pr22a')"))
+        s.add(SearchJob(name="active", source_url="https://www.avito.ru/x"))
+        s.add(Listing(external_id="vol", url="https://www.avito.ru/vol", title="volume"))
+        s.commit()
+    page = client.get("/admin/system", headers={"X-API-Key": "read"}).text
+    assert "Готовность backup / restore / retention" in page
+    assert "docs/ops/backup_restore_retention_policy.md" in page
+    assert "Restore procedure" in page and "documented" in page
+    assert "Retention mode" in page and "policy-only" in page
+    assert "Retention execution" in page and "disabled / not implemented" in page
+    assert "Retention dry-run" in page and "not implemented" in page
+    assert "Latest backup" in page and "unknown" in page
+    assert "Backup metadata source" in page and "not configured" in page
+    assert "Data volume summary" in page and "listings: 1" in page and "search_jobs: 1" in page
+    assert "Alembic" in page and "rev_pr22a" in page
+    for existing in [
+        "Overall status",
+        "Worker cycle status",
+        "Parser diagnostics",
+        "Search jobs",
+        "Alert Delivery health",
+        "Delivery integrity issues (all time)",
+        "Resolved delivery history (all time)",
+        "Recent failed delivery attempts",
+        "Agent tasks",
+        "Analysis summary",
+        "Monitor cycle history",
+    ]:
+        assert existing in page
+
+
+def test_admin_system_backup_restore_retention_has_no_destructive_ui_or_secret_paths(monkeypatch, tmp_path):
+    client, _ = _client(monkeypatch, tmp_path)
+    page = client.get("/admin/system", headers={"X-API-Key": "read"}).text
+    lower = page.lower()
+    assert "<form" not in lower
+    assert "<button" not in lower
+    for forbidden in [
+        "Run backup",
+        "Restore now",
+        "Delete old data",
+        "Apply retention",
+        "Archive now",
+        "Truncate",
+    ]:
+        assert forbidden.lower() not in lower
+    for leaked in [
+        ".env",
+        "DATABASE_URL",
+        "postgres://",
+        "/home/",
+        "/root/",
+        "/var/lib/",
+        "AKfycbx_fake_token_like_value",
+        "script.google.com/macros/s/fake/exec",
+        "webhook",
+        "Authorization: Bearer",
+        "X-API-Key:",
+    ]:
+        assert leaked.lower() not in lower
+    assert client.post("/admin/system", headers={"X-API-Key": "read"}).status_code in {404, 405}

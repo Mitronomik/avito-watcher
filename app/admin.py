@@ -1290,6 +1290,27 @@ def _render_monitor_cycle_history(db: Session, now: datetime) -> str:
         f"{body}</table></section>"
     )
 
+
+def _render_backup_restore_retention_readiness() -> str:
+    rows = [
+        ("Backup policy", "docs/ops/backup_restore_retention_policy.md"),
+        ("Restore procedure", "documented"),
+        ("Retention mode", "policy-only"),
+        ("Retention execution", "disabled / not implemented"),
+        ("Retention dry-run", "not implemented"),
+        ("Latest backup", "unknown"),
+        ("Backup metadata source", "not configured"),
+    ]
+    body = "".join(
+        f"<tr><th>{html.escape(label)}</th><td>{html.escape(value)}</td></tr>"
+        for label, value in rows
+    )
+    return (
+        "<section class='section'><h2>Готовность backup / restore / retention</h2>"
+        "<p>Read-only policy/readiness signals only; no operator actions are available here.</p>"
+        f"<table>{body}</table></section>"
+    )
+
 @router.get('/system', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
 def admin_system(request: Request, db: Session = Depends(get_db)):
     api_key = request.query_params.get("api_key")
@@ -1397,6 +1418,7 @@ def admin_system(request: Request, db: Session = Depends(get_db)):
         f"<section class='section'><h2>Analysis summary</h2><p>total: {_count_model(db, ListingAnalysis)}; by status: {_render_counts(_group_counts(db, ListingAnalysis, ListingAnalysis.status))}; by profile/status: {_render_counts({f'{r[0]}/{r[1]}': r[2] for r in db.execute(select(ListingAnalysis.profile, ListingAnalysis.status, func.count()).group_by(ListingAnalysis.profile, ListingAnalysis.status)).all()})}</p><table><tr><th>id</th><th>listing_external_id</th><th>profile</th><th>status</th><th>error_type</th><th>error</th><th>created_at</th><th>updated_at</th></tr>{analysis_rows}</table></section>"
         f"<section class='section'><h2>Data volume summary</h2><ul>{volume_items}</ul></section>"
         f"<section class='section'><h2>Alembic</h2><p>current DB revision: <code>{html.escape(alembic_revision)}</code></p></section>"
+        f"{_render_backup_restore_retention_readiness()}"
     )
     return _render_page("System health", body)
 
