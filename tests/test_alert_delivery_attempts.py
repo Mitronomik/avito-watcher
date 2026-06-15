@@ -10,6 +10,7 @@ from app.parsers.schemas import ListingCard
 from app.repositories.alert_delivery_attempt_repository import AlertDeliveryAttemptRepository
 from app.repositories.alert_repository import AlertRepository
 from app.services.alert_delivery_attempts import (
+    MAX_ERROR_LENGTH,
     compute_alert_payload_hash,
     sanitize_alert_delivery_error,
 )
@@ -236,6 +237,61 @@ def test_error_sanitizer_redacts_secrets_urls_and_traceback_text():
     assert "[REDACTED]" in sanitized
     assert "ok=value" in sanitized
     assert len(sanitized) <= 1000
+
+
+def test_error_sanitizer_redacts_auth_api_key_and_webhook_regressions():
+    raw = (
+        "Authorization: Basic supersecret "
+        "Authorization: Token tokenvalue "
+        "authorization=authsecret "
+        "X-API-Key: supersecret "
+        "X-Api-Key: mixedsecret "
+        "x_api_key=underscoresecret "
+        "api-key=hyphensecret "
+        "api_key=apisecret "
+        "apikey=compactsecret "
+        "webhook=https://hooks.example.com/services/webhooksecret "
+        "telegram_url=https://api.telegram.org/bottelegramtoken/sendMessage"
+    )
+    sanitized = sanitize_alert_delivery_error(raw)
+
+    for leaked in (
+        "supersecret",
+        "tokenvalue",
+        "authsecret",
+        "mixedsecret",
+        "underscoresecret",
+        "hyphensecret",
+        "apisecret",
+        "compactsecret",
+        "webhooksecret",
+        "telegramtoken",
+        "hooks.example.com",
+        "api.telegram.org",
+    ):
+        assert leaked not in sanitized
+    assert "[REDACTED]" in sanitized
+
+
+def test_error_sanitizer_redacts_webhook_urls_but_preserves_benign_query_values():
+    raw = (
+        "url=https://host/path?secret=supersecret&ok=value "
+        "webhook=https://host/path/supersecret "
+        "plain=https://api.telegram.org/botTOKEN/sendMessage"
+    )
+    sanitized = sanitize_alert_delivery_error(raw)
+
+    assert "ok=value" in sanitized
+    assert "supersecret" not in sanitized
+    assert "botTOKEN" not in sanitized
+    assert "api.telegram.org" not in sanitized
+    assert "webhook=https://host" not in sanitized
+
+
+def test_error_sanitizer_truncates_long_errors():
+    sanitized = sanitize_alert_delivery_error("boom " + ("x" * (MAX_ERROR_LENGTH + 100)))
+
+    assert len(sanitized) == MAX_ERROR_LENGTH
 
 
 def test_baseline_no_delivery_creates_no_attempts(db_session):
