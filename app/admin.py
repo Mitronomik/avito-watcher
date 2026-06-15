@@ -84,10 +84,10 @@ def _redact_obj(value: object, key: str = "") -> object:
         return {str(k): _redact_obj(v, str(k)) for k, v in value.items()}
     if isinstance(value, list):
         return [_redact_obj(v, key) for v in value[:50]]
-    if isinstance(value, (int, float, bool)) or value is None:
-        return value
     if _SECRET_KEY_RE.search(key or ""):
         return "[redacted]"
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
     return redact_admin_value(value, key)
 
 def redact_admin_json(value: object) -> str:
@@ -1422,13 +1422,14 @@ async def run_once(search_id: int, request: Request):
         }
     redacted_result = _redact_obj(result)
     parser_stats = redacted_result.get("parser_stats", {}) if isinstance(redacted_result, dict) else {}
+    delivery_source = result if isinstance(result, dict) else {}
     delivery_channels = sorted(
-        set((redacted_result.get("delivery_attempted_by_channel") or {}).keys())
-        | set((redacted_result.get("delivery_success_by_channel") or {}).keys())
-        | set((redacted_result.get("delivery_skipped_by_channel") or {}).keys())
-        | set((redacted_result.get("delivery_failed_by_channel") or {}).keys())
-        | set((redacted_result.get("delivery_unknown_by_channel") or {}).keys())
-        | set((redacted_result.get("delivery_unsuccessful_by_channel") or {}).keys())
+        set((delivery_source.get("delivery_attempted_by_channel") or {}).keys())
+        | set((delivery_source.get("delivery_success_by_channel") or {}).keys())
+        | set((delivery_source.get("delivery_skipped_by_channel") or {}).keys())
+        | set((delivery_source.get("delivery_failed_by_channel") or {}).keys())
+        | set((delivery_source.get("delivery_unknown_by_channel") or {}).keys())
+        | set((delivery_source.get("delivery_unsuccessful_by_channel") or {}).keys())
     )
     summary_rows = [
         ("ok", redacted_result.get("ok")),
@@ -1454,12 +1455,12 @@ async def run_once(search_id: int, request: Request):
     if delivery_channels:
         delivery_rows = []
         for channel in delivery_channels:
-            attempted = int((redacted_result.get("delivery_attempted_by_channel") or {}).get(channel, 0) or 0)
-            success = int((redacted_result.get("delivery_success_by_channel") or {}).get(channel, 0) or 0)
-            skipped = int((redacted_result.get("delivery_skipped_by_channel") or {}).get(channel, 0) or 0)
-            failed = int((redacted_result.get("delivery_failed_by_channel") or {}).get(channel, 0) or 0)
-            unknown = int((redacted_result.get("delivery_unknown_by_channel") or {}).get(channel, 0) or 0)
-            unsuccessful = int((redacted_result.get("delivery_unsuccessful_by_channel") or {}).get(channel, 0) or 0)
+            attempted = int((delivery_source.get("delivery_attempted_by_channel") or {}).get(channel, 0) or 0)
+            success = int((delivery_source.get("delivery_success_by_channel") or {}).get(channel, 0) or 0)
+            skipped = int((delivery_source.get("delivery_skipped_by_channel") or {}).get(channel, 0) or 0)
+            failed = int((delivery_source.get("delivery_failed_by_channel") or {}).get(channel, 0) or 0)
+            unknown = int((delivery_source.get("delivery_unknown_by_channel") or {}).get(channel, 0) or 0)
+            unsuccessful = int((delivery_source.get("delivery_unsuccessful_by_channel") or {}).get(channel, 0) or 0)
             delivery_rows.append(
                 f"<tr><td>{html.escape(channel)}</td><td>{attempted}</td><td>{success}</td><td>{skipped}</td><td>{failed}</td><td>{unknown}</td><td>{unsuccessful}</td><td>{_delivery_badge(attempted, unsuccessful, failed, unknown)}</td></tr>"
             )
