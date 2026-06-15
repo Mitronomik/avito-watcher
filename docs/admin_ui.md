@@ -356,8 +356,16 @@ Use fake values only when testing log redaction, for example `https://script.goo
 - restore procedure: documented;
 - retention mode: policy-only;
 - retention execution: disabled / not implemented;
-- retention dry-run: not implemented;
+- retention dry-run: available / read-only;
 - latest backup: unknown unless a future safe metadata source is explicitly added;
 - backup metadata source: not configured.
 
 The section does not execute backups, does not execute restore, does not execute retention, and does not provide forms or action buttons. No migration is expected for this read-only policy/readiness change. The Admin UI must not show secrets, raw environment values, webhook URLs, backup credentials, or sensitive absolute host paths in this section.
+
+## Retention dry-run report
+
+`/admin/system` includes a compact read-only **Dry-run отчёт по retention** section for PR22b. The report shows aggregate-only `dry_run_candidate_count`, `total_count`, oldest candidate timestamp, and newest candidate timestamp for supported operational tables using conservative reporting-only thresholds.
+
+This dry-run report does not implement retention execution. It has no forms, buttons, POST actions, detail pages, candidate row lists, row IDs, URLs, payload JSON, generated DELETE/ARCHIVE SQL, or scheduler. Retention execution remains `disabled / not implemented`, while retention dry-run visibility is `available / read-only`.
+
+Dry-run semantics are intentionally strict: `0` means measured zero; `unknown` means the metric could not be measured safely; `not_supported` means clear timestamp/status semantics are missing. Candidate counts do not imply approval for deletion or archive. The required progression is: policy -> dry-run report -> backup precondition -> explicit operator approval -> gated execution -> audit trail -> rollback/restore plan.

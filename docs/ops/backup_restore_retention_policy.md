@@ -199,3 +199,27 @@ policy
 ```
 
 PR22a implements only the policy step and safe read-only visibility. It does not add retention execution, retention dry-run execution, deletion code, archive code, truncate code, or automatic retention jobs.
+
+## PR22b read-only retention dry-run report
+
+PR22b adds read-only retention dry-run visibility only. It does not implement retention execution, deletion, archive, truncation, scheduler/cron, POST action, executor API, candidate row list, row IDs, or generated DELETE/ARCHIVE SQL.
+
+Current progression state:
+
+- policy: implemented;
+- dry-run report: implemented;
+- execution: not implemented.
+
+The `/admin/system` dry-run report uses initial conservative reporting-only thresholds for operational tables. These thresholds are not execution policy and must be reviewed again before any future retention execution PR. A `dry_run_candidate_count` means only that rows matched the current reporting threshold at read time; it does not mean those rows are approved for deletion or archive.
+
+Unknown and unsupported values are strict:
+
+- `0` means the metric was measured and no rows matched;
+- `unknown` means the metric was not measured or could not be safely evaluated;
+- `not_supported` means the table/model lacks clear timestamp or status semantics for safe dry-run reporting.
+
+The required future progression remains:
+
+policy -> dry-run report -> backup precondition -> explicit operator approval -> gated execution -> audit trail -> rollback/restore plan
+
+No future execution may treat the PR22b report as operator approval. No row IDs, URLs, payload JSON, secrets, raw environment values, sensitive paths, or delete/archive SQL are produced by this report.
