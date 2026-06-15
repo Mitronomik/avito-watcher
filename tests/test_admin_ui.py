@@ -2135,7 +2135,7 @@ def test_alert_delivery_manual_retry_success_single_channel_and_dedupe(monkeypat
     _patch_retry_service(monkeypatch, [_RetryChannel("jsonl", True, calls), _RetryChannel("telegram", True, calls)])
     client, Session = make_raw_client(monkeypatch, technical_ops_enabled=True, allow_query_api_key=False, client_cls=TestClient)
     create_listing(Session, external_id="retry-ok", title="Retry ok", price=123)
-    attempt_id = _add_attempt(Session, listing_external_id="retry-ok", channel="jsonl", status="failed", dedupe_key="jsonl:new:retry-ok", attempt_count=1, payload_hash="b" * 64)
+    attempt_id = _add_attempt(Session, listing_external_id="retry-ok", channel="jsonl", status="failed", dedupe_key="jsonl:new:retry-ok", attempt_count=1, payload_hash="b" * 64, search_name="original-search")
     resp = client.post(
         f"/admin/alerts/delivery-attempts/{attempt_id}/retry",
         headers={"X-API-Key": "read"},
@@ -2151,7 +2151,40 @@ def test_alert_delivery_manual_retry_success_single_channel_and_dedupe(monkeypat
         assert attempts[-1].status == "success"
         assert attempts[-1].attempt_count == 2
         assert attempts[-1].payload_hash != "b" * 64
+        assert attempts[-1].search_name == "manual_retry:original-search"
         assert s.scalar(select(func.count()).select_from(AlertSent).where(AlertSent.dedupe_key == "jsonl:new:retry-ok")) == 1
+
+
+def test_alert_delivery_manual_retry_helper_rechecks_alert_sent_immediately_before_send(monkeypatch):
+    calls = []
+    _patch_retry_service(monkeypatch, [_RetryChannel("jsonl", True, calls)])
+    client, Session = make_raw_client(monkeypatch, technical_ops_enabled=True, allow_query_api_key=False, client_cls=TestClient)
+    create_listing(Session, external_id="retry-race")
+    attempt_id = _add_attempt(Session, listing_external_id="retry-race", channel="jsonl", status="failed", dedupe_key="jsonl:new:retry-race")
+
+    import app.admin as admin_module
+
+    original_matching = admin_module._matching_alert_sent
+    call_count = {"value": 0}
+
+    def racing_matching(db, attempt):
+        call_count["value"] += 1
+        if call_count["value"] == 3:
+            db.add(AlertSent(listing_external_id="retry-race", channel="jsonl", dedupe_key="jsonl:new:retry-race"))
+            db.commit()
+        return original_matching(db, attempt)
+
+    monkeypatch.setattr(admin_module, "_matching_alert_sent", racing_matching)
+    resp = client.post(
+        f"/admin/alerts/delivery-attempts/{attempt_id}/retry",
+        headers={"X-API-Key": "read"},
+        data={"admin_technical_write_key": "tech", "confirm_action": f"retry_delivery_attempt_{attempt_id}"},
+    )
+    assert resp.status_code == 400
+    assert calls == []
+    with Session() as s:
+        assert s.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.dedupe_key == "jsonl:new:retry-race")) == 1
+        assert s.scalar(select(func.count()).select_from(AlertSent).where(AlertSent.dedupe_key == "jsonl:new:retry-race")) == 1
 
 
 def test_alert_delivery_manual_retry_preconditions_create_no_rows(monkeypatch):

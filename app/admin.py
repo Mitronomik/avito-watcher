@@ -1034,7 +1034,7 @@ async def _retry_single_delivery_channel(
     dedupe_key = _delivery_dedupe_key(channel_name, attempt.listing_external_id)
     service = MonitorService()
     card = _listing_card_from_listing(listing)
-    search_name = attempt.search_name or "manual_delivery_retry"
+    search_name = f"manual_retry:{attempt.search_name}" if attempt.search_name else "manual_retry"
     payload = service._build_alert_payload(
         card=card,
         search_name=search_name,
@@ -1087,6 +1087,9 @@ async def _retry_single_delivery_channel(
         record("unknown", "channel not configured for manual retry")
         db.commit()
         return "unknown"
+
+    if _matching_alert_sent(db, attempt) is not None:
+        raise HTTPException(status_code=400, detail="Matching AlertSent already exists")
 
     try:
         delivered = await channel.send_listing_alert(message, payload)
