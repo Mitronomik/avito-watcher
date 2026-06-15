@@ -5,12 +5,8 @@ from dataclasses import dataclass, asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import func, select
-
 from app.core.config import settings
 from app.db.session import SessionLocal
-from app.models.alert_delivery_attempt import AlertDeliveryAttempt
-from app.models.alert_sent import AlertSent
 from app.models.monitor_cycle_run import (
     MONITOR_CYCLE_STATUSES,
     MONITOR_CYCLE_STATUS_FAILED,
@@ -152,21 +148,3 @@ def _sum_result_keys(results: list[dict] | None, keys: tuple[str, ...]) -> int |
                 found = True
                 break
     return total if found else None
-
-
-def count_alert_delivery_attempts() -> int | None:
-    try:
-        with SessionLocal() as db:
-            return db.scalar(select(func.count()).select_from(AlertDeliveryAttempt)) or 0
-    except Exception as exc:  # pragma: no cover
-        logger.warning("monitor cycle ledger count attempts failed: %s", sanitize_alert_delivery_error(str(exc)))
-        return None
-
-
-def count_alerts_sent() -> int | None:
-    try:
-        with SessionLocal() as db:
-            return db.scalar(select(func.count()).select_from(AlertSent)) or 0
-    except Exception as exc:  # pragma: no cover
-        logger.warning("monitor cycle ledger count alerts failed: %s", sanitize_alert_delivery_error(str(exc)))
-        return None

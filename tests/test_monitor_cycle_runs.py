@@ -103,6 +103,8 @@ def test_collect_cycle_metrics_one_top_level_result_list():
     assert metrics.searches_failed == 1
     assert metrics.listings_created == 1
     assert metrics.analysis_failed is None
+    assert metrics.alert_delivery_attempts_created is None
+    assert metrics.alerts_sent_created is None
 
 
 def test_sanitize_monitor_cycle_error_redacts_required_secrets():

@@ -333,7 +333,7 @@ NULL = unknown / not captured
 0 = measured and actually zero
 ```
 
-The UI renders nullable unknown metrics as `unknown` instead of pretending they are zero. Metrics are sourced from existing monitor results or cheap bounded counters where safe; unavailable metrics remain `NULL`.
+The UI renders nullable unknown metrics as `unknown` instead of pretending they are zero. Metrics are sourced from existing monitor results/status payloads when safely available; unavailable metrics, including alert delivery deltas that are not already available from runtime results, remain `NULL`.
 
 A `running` row can remain if the worker crashes after inserting the start row and before the final update. `/admin/system` displays old running rows as a stale running / possible crash signal, but it does not repair or mutate those rows.
 

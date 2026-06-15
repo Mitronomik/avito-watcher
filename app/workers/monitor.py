@@ -11,12 +11,7 @@ from app.parsers.proxy_manager import ProxyManager
 from app.parsers.proxy_url import validate_proxy_urls
 from app.core.config import settings
 from app.services.monitor_service import MonitorService, runtime_diagnostics
-from app.services.monitor_cycle_runs import (
-    MonitorCycleRunService,
-    collect_cycle_metrics,
-    count_alert_delivery_attempts,
-    count_alerts_sent,
-)
+from app.services.monitor_cycle_runs import MonitorCycleRunService, collect_cycle_metrics
 from app.models.monitor_cycle_run import MONITOR_CYCLE_STATUS_FAILED, MONITOR_CYCLE_STATUS_SUCCESS
 from app.workers.status import build_worker_status, write_worker_status_atomic
 
@@ -134,8 +129,6 @@ def main() -> None:
             cycle_started_at = datetime.now(timezone.utc)
             ledger = MonitorCycleRunService()
             cycle_run_id = ledger.start_cycle(started_at=cycle_started_at)
-            attempts_before = count_alert_delivery_attempts()
-            alerts_before = count_alerts_sent()
             results = None
             try:
                 results = run_monitor_cycle(parser)
@@ -151,10 +144,6 @@ def main() -> None:
                     error=exc,
                 )
                 metrics = collect_cycle_metrics(results, started_at=cycle_started_at)
-                attempts_after = count_alert_delivery_attempts()
-                alerts_after = count_alerts_sent()
-                metrics.alert_delivery_attempts_created = (attempts_after - attempts_before) if attempts_before is not None and attempts_after is not None else None
-                metrics.alerts_sent_created = (alerts_after - alerts_before) if alerts_before is not None and alerts_after is not None else None
                 ledger.finish_cycle(cycle_run_id, status=MONITOR_CYCLE_STATUS_FAILED, finished_at=cycle_finished_at, metrics=metrics, error=exc)
             else:
                 cycle_finished_at = datetime.now(timezone.utc)
@@ -166,10 +155,6 @@ def main() -> None:
                     results=results,
                 )
                 metrics = collect_cycle_metrics(results, started_at=cycle_started_at)
-                attempts_after = count_alert_delivery_attempts()
-                alerts_after = count_alerts_sent()
-                metrics.alert_delivery_attempts_created = (attempts_after - attempts_before) if attempts_before is not None and attempts_after is not None else None
-                metrics.alerts_sent_created = (alerts_after - alerts_before) if alerts_before is not None and alerts_after is not None else None
                 ledger.finish_cycle(cycle_run_id, status=MONITOR_CYCLE_STATUS_SUCCESS, finished_at=cycle_finished_at, metrics=metrics)
             sleep_for = WORKER_CADENCE_SEC + random.uniform(
                 -WORKER_CADENCE_JITTER_SEC,
