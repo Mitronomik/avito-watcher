@@ -5,19 +5,21 @@ import json
 import re
 import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import APIKeyHeader
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.orm import Session, raiseload
 
 from app.cli import _build_parser, _parser_stats_snapshot
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.listing import Listing
+from app.models.alert_delivery_attempt import AlertDeliveryAttempt
+from app.models.alert_sent import AlertSent
 from app.models.listing_analysis import ListingAnalysis
 from app.models.human_review import HUMAN_VERDICTS, NEXT_ACTIONS, OUTCOME_STATUSES, HumanReviewAction
 from app.models.agent_task import AgentTask
@@ -913,12 +915,113 @@ def searches(request: Request, db: Session = Depends(get_db)):
     return _render_page("Поиски", f"<h1>Поиски</h1>{notice}<p class='preview'>Технические операции скрыты и заблокированы по умолчанию.</p>{technical_links}{runtime_block}<table><tr><th>id</th><th>Название / источник</th><th>Статус</th><th>Ошибки</th><th>Последняя ошибка</th><th>Последний успех</th><th>Следующий запуск</th><th>Интервал, сек</th><th>Технические действия</th></tr>{''.join(rows)}</table>")
 
 
+ALERT_ATTEMPT_STATUSES = {"success", "failed", "skipped", "unknown"}
+PAYLOAD_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _parse_int_param(name: str, value: str | None, default: int, minimum: int, maximum: int) -> int:
+    raw = (value or "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = int(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid {name}") from exc
+    if parsed < minimum or parsed > maximum:
+        raise HTTPException(status_code=400, detail=f"Invalid {name}")
+    return parsed
+
+
+def _parse_optional_positive_int(name: str, value: str | None) -> int | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = int(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid {name}") from exc
+    if parsed <= 0:
+        raise HTTPException(status_code=400, detail=f"Invalid {name}")
+    return parsed
+
+
+def _safe_short_filter(name: str, value: str | None, max_len: int) -> str | None:
+    normalized = (value or "").strip() or None
+    if normalized and len(normalized) > max_len:
+        raise HTTPException(status_code=400, detail=f"Invalid {name}")
+    return normalized
+
+
+def _redact_alert_error(value: object, limit: int = 180) -> str:
+    text = str(value or "")
+    text = re.sub(r"(?i)(authorization|x-api-key|api[_-]?key|token|secret|auth|password|passwd|cookie|webhook|smtp|telegram|provider_key|access_key|refresh_token|bearer)(\\s*[:=]\\s*)\\S+", r"\\1\\2[redacted]", text)
+    text = re.sub(r"(?i)([?&](?:token|secret|api_key|apikey|auth|password|passwd|key|access_key|refresh_token)=)[^\\s&#]+", r"\\1[redacted]", text)
+    text = re.sub(r"(?i)hooks\\.example\\.com/[^\\s]+", "hooks.example.com/[redacted]", text)
+    text = re.sub(r"(?i)supersecret", "[redacted]", text)
+    return truncate_admin_text(text, limit)
+
+
+def _attempt_matches_alert_sent_clause() -> object:
+    return (
+        (AlertSent.dedupe_key == AlertDeliveryAttempt.dedupe_key)
+        & (AlertSent.listing_external_id == AlertDeliveryAttempt.listing_external_id)
+        & (AlertSent.channel == AlertDeliveryAttempt.channel)
+    )
+
+
+def _matching_alert_sent_exists() -> object:
+    return select(AlertSent.id).where(_attempt_matches_alert_sent_clause()).limit(1).exists()
+
+
+def _payload_hash_is_bad_clause(dialect_name: str = "") -> object:
+    if dialect_name == "sqlite":
+        valid_hash = AlertDeliveryAttempt.payload_hash.op("GLOB")("[0-9a-f]" * 64)
+    else:
+        valid_hash = AlertDeliveryAttempt.payload_hash.op("~")("^[0-9a-f]{64}$")
+    return or_(
+        AlertDeliveryAttempt.payload_hash.is_(None),
+        AlertDeliveryAttempt.payload_hash == "",
+        func.length(AlertDeliveryAttempt.payload_hash) != 64,
+        ~valid_hash,
+    )
+
+
 @router.get('/alerts', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
-def alerts(request: Request, limit: int = Query(default=50), search_name: str | None = Query(default=None)):
+def alerts(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: str | None = Query(default="50"),
+    search_name: str | None = Query(default=None),
+    status_filter: str | None = Query(default=None, alias="status"),
+    channel: str | None = Query(default=None),
+    listing_external_id: str | None = Query(default=None),
+    dedupe_key: str | None = Query(default=None),
+    search_job_id: str | None = Query(default=None),
+    hours: str | None = Query(default="168"),
+):
     api_key = request.query_params.get("api_key")
-    effective_limit = max(1, min(limit, 500))
+    raw_limit = (limit or "").strip()
+    if raw_limit:
+        try:
+            jsonl_limit = max(1, min(int(raw_limit), 500))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid limit") from None
+    else:
+        jsonl_limit = 50
+    if raw_limit:
+        effective_limit = max(1, min(jsonl_limit, 200))
+    else:
+        effective_limit = 50
+    effective_hours = _parse_int_param("hours", hours, 168, 1, 720)
+    normalized_status = _safe_short_filter("status", status_filter, 32)
+    if normalized_status and normalized_status not in ALERT_ATTEMPT_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid status")
+    normalized_channel = _safe_short_filter("channel", channel, 32)
+    normalized_listing_external_id = _safe_short_filter("listing_external_id", listing_external_id, 128)
+    normalized_dedupe_key = _safe_short_filter("dedupe_key", dedupe_key, 255)
+    normalized_search_job_id = _parse_optional_positive_int("search_job_id", search_job_id)
     normalized_search_name = (search_name or "").strip() or None
-    rows_data, total_loaded, invalid_count = _read_jsonl_alerts(settings.jsonl_outbox_path, normalized_search_name, effective_limit)
+    rows_data, total_loaded, invalid_count = _read_jsonl_alerts(settings.jsonl_outbox_path, normalized_search_name, jsonl_limit)
     rows = []
     for item in rows_data:
         link = str(item.get("url", ""))
@@ -936,8 +1039,95 @@ def alerts(request: Request, limit: int = Query(default=50), search_name: str | 
     empty = "<p>No alerts found yet.</p>" if not rows else ""
     table = "" if not rows else f"<table><tr><th>timestamp</th><th>search_name</th><th>title</th><th>price</th><th>area_m2</th><th>address</th><th>published_label</th><th>llm_summary</th><th>url</th></tr>{''.join(rows)}</table>"
     form_action = _admin_url('/admin/alerts', api_key)
-    current_limit = _html_attr(effective_limit)
+    current_limit = _html_attr(jsonl_limit)
     current_search = _html_attr(normalized_search_name)
+    since = datetime.utcnow() - timedelta(hours=effective_hours)
+    base_filters = [AlertDeliveryAttempt.created_at >= since]
+    if normalized_status:
+        base_filters.append(AlertDeliveryAttempt.status == normalized_status)
+    if normalized_channel:
+        base_filters.append(AlertDeliveryAttempt.channel == normalized_channel)
+    if normalized_listing_external_id:
+        base_filters.append(AlertDeliveryAttempt.listing_external_id == normalized_listing_external_id)
+    if normalized_dedupe_key:
+        base_filters.append(AlertDeliveryAttempt.dedupe_key == normalized_dedupe_key)
+    if normalized_search_job_id is not None:
+        base_filters.append(AlertDeliveryAttempt.search_job_id == normalized_search_job_id)
+
+    total_period = db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(*base_filters)) or 0
+    total_all_time = db.scalar(select(func.count()).select_from(AlertDeliveryAttempt)) or 0
+    status_counts = dict(db.execute(select(AlertDeliveryAttempt.status, func.count()).where(*base_filters).group_by(AlertDeliveryAttempt.status)).all())
+    channel_counts = dict(db.execute(select(AlertDeliveryAttempt.channel, func.count()).where(*base_filters).group_by(AlertDeliveryAttempt.channel)).all())
+    latest_attempt = db.scalar(select(func.max(AlertDeliveryAttempt.created_at)).where(*base_filters))
+    attempt_rows = db.scalars(select(AlertDeliveryAttempt).where(*base_filters).order_by(AlertDeliveryAttempt.created_at.desc(), AlertDeliveryAttempt.id.desc()).limit(effective_limit)).all()
+    external_ids = [row.listing_external_id for row in attempt_rows if row.listing_external_id]
+    listing_by_external = {}
+    if external_ids:
+        listing_by_external = {
+            listing.external_id: listing.id
+            for listing in db.scalars(select(Listing).where(Listing.external_id.in_(external_ids)).limit(effective_limit)).all()
+        }
+    match_keys = {(row.dedupe_key, row.listing_external_id, row.channel) for row in attempt_rows}
+    matched_keys = set()
+    if match_keys:
+        matched_keys = set(
+            db.execute(
+                select(AlertSent.dedupe_key, AlertSent.listing_external_id, AlertSent.channel).where(
+                    tuple_(AlertSent.dedupe_key, AlertSent.listing_external_id, AlertSent.channel).in_(match_keys)
+                )
+            ).all()
+        )
+    has_alert_sent = {
+        row.id: (row.dedupe_key, row.listing_external_id, row.channel) in matched_keys
+        for row in attempt_rows
+    }
+    invariant_counts = {
+        "success_without_alert_sent": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.status == "success", ~_matching_alert_sent_exists())) or 0,
+        "non_success_with_alert_sent": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.status.in_(["failed", "skipped", "unknown"]), _matching_alert_sent_exists())) or 0,
+        "success_missing_sent_at": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.status == "success", AlertDeliveryAttempt.sent_at.is_(None))) or 0,
+        "non_success_with_sent_at": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.status.in_(["failed", "skipped", "unknown"]), AlertDeliveryAttempt.sent_at.is_not(None))) or 0,
+        "non_null_next_retry_at": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.next_retry_at.is_not(None))) or 0,
+        "bad_payload_hash_count": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(_payload_hash_is_bad_clause(db.bind.dialect.name if db.bind else ""))) or 0,
+    }
+    attempt_table_rows = []
+    for row in attempt_rows:
+        listing_id = listing_by_external.get(row.listing_external_id)
+        listing_cell = html.escape(row.listing_external_id)
+        if listing_id:
+            listing_cell = f"<a href='{_html_attr(_admin_url(f'/admin/listings/{listing_id}', api_key))}'>{html.escape(row.listing_external_id)}</a>"
+        attempt_table_rows.append(
+            "<tr>"
+            f"<td>{row.id}</td><td>{html.escape(str(row.created_at or '—'))}</td><td>{listing_cell}</td>"
+            f"<td>{html.escape(row.channel)}</td><td>{html.escape(row.status)}</td><td>{row.attempt_count}</td>"
+            f"<td>{html.escape(str(row.sent_at or '—'))}</td><td>{html.escape(str(row.next_retry_at or '—'))}</td>"
+            f"<td>{html.escape(row.search_name or '—')}</td><td>{html.escape((row.payload_hash or '')[:12])}</td>"
+            f"<td>{html.escape(_redact_alert_error(row.last_error))}</td><td>{'yes' if has_alert_sent[row.id] else 'no'}</td>"
+            f"<td><a href='{_html_attr(_admin_url(f'/admin/alerts/delivery-attempts/{row.id}', api_key))}'>details</a></td>"
+            "</tr>"
+        )
+    attempts_empty = ""
+    if total_all_time == 0:
+        attempts_empty = "<p>Попытки доставки ещё не зафиксированы. Это нормально, если после PR20a не было новых доставок уведомлений.</p>"
+    channel_summary = ", ".join(f"{html.escape(str(k))}: {v}" for k, v in sorted(channel_counts.items())) or "—"
+    status_summary = "".join(f"<li>{status}: {status_counts.get(status, 0)}</li>" for status in ["success", "failed", "skipped", "unknown"])
+    invariant_items = "".join(f"<li>{html.escape(key)}: {value}</li>" for key, value in invariant_counts.items())
+    attempts_table = (
+        "<table><tr><th>id</th><th>created_at</th><th>listing_external_id</th><th>channel</th><th>status</th><th>attempt_count</th><th>sent_at</th><th>next_retry_at</th><th>search_name</th><th>payload_hash prefix</th><th>last_error preview</th><th>AlertSent match</th><th>details</th></tr>"
+        + "".join(attempt_table_rows)
+        + "</table>"
+        if attempt_table_rows
+        else ""
+    )
+    delivery_section = (
+        "<section><h2>Попытки доставки уведомлений</h2>"
+        f"<p>Period hours: {effective_hours}; total attempts in selected period: {total_period}; all-time total attempts: {total_all_time}; channels observed: {channel_summary}; latest attempt timestamp: {html.escape(str(latest_attempt or '—'))}; live delivery observed: {'yes' if total_all_time else 'no'}</p>"
+        f"<ul>{status_summary}</ul>{attempts_empty}"
+        f"<form method='get' action='{_html_attr(_admin_url('/admin/alerts', api_key))}'>"
+        f"<input type='hidden' name='api_key' value='{_html_attr(api_key)}'>"
+        f"<div class='row'><label>status<input name='status' value='{_html_attr(normalized_status)}'></label><label>channel<input name='channel' value='{_html_attr(normalized_channel)}'></label><label>listing_external_id<input name='listing_external_id' value='{_html_attr(normalized_listing_external_id)}'></label><label>dedupe_key<input name='dedupe_key' value='{_html_attr(normalized_dedupe_key)}'></label><label>search_job_id<input name='search_job_id' value='{_html_attr(normalized_search_job_id or '')}'></label><label>hours<input name='hours' type='number' min='1' max='720' value='{effective_hours}'></label><label>limit<input name='limit' type='number' min='1' max='200' value='{effective_limit}'></label></div>"
+        "<button type='submit'>Apply delivery filters</button></form>"
+        f"<h2>Проверка инвариантов доставки</h2><p>Expected healthy values: 0 for all counters.</p><ul>{invariant_items}</ul>{attempts_table}</section>"
+    )
     body = (
         f"<h1>История уведомлений</h1><p><a href='{_html_attr(_admin_url('/admin/searches', api_key))}'>Back to searches</a> · <a href='{_html_attr(_admin_url('/admin/listings', api_key))}'>Listings</a> · <a href='{_html_attr(_admin_url('/admin/listing-analyses', api_key))}'>Listing analyses</a></p>"
         f"<p>JSONL file: <code>{html.escape(settings.jsonl_outbox_path)}</code></p>"
@@ -945,9 +1135,57 @@ def alerts(request: Request, limit: int = Query(default=50), search_name: str | 
         f"<form method='get' action='{_html_attr(form_action)}'><input type='hidden' name='api_key' value='{_html_attr(api_key)}'>"
         f"<div class='row'><label>search_name<input name='search_name' value='{current_search}'></label></div>"
         f"<div class='row'><label>limit<input name='limit' type='number' min='1' max='500' value='{current_limit}'></label></div>"
-        f"<button type='submit'>Apply</button></form>{empty}{table}"
+        f"<button type='submit'>Apply</button></form>{empty}{table}{delivery_section}"
     )
     return _render_page('Alerts', body)
+
+
+@router.get('/alerts/delivery-attempts/{attempt_id}', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
+def alert_delivery_attempt_detail(request: Request, attempt_id: int, db: Session = Depends(get_db)):
+    if attempt_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid attempt_id")
+    api_key = request.query_params.get("api_key")
+    attempt = db.get(AlertDeliveryAttempt, attempt_id)
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="Delivery attempt not found")
+    alert_sent = db.scalar(select(AlertSent).where(
+        AlertSent.dedupe_key == attempt.dedupe_key,
+        AlertSent.listing_external_id == attempt.listing_external_id,
+        AlertSent.channel == attempt.channel,
+    ).limit(1))
+    listing = db.scalar(select(Listing).where(Listing.external_id == attempt.listing_external_id).limit(1))
+    listing_block = "—"
+    if listing is not None:
+        listing_block = f"<a href='{_html_attr(_admin_url(f'/admin/listings/{listing.id}', api_key))}'>{html.escape(listing.external_id)}</a>"
+    fields = [
+        ("id", attempt.id),
+        ("created_at", attempt.created_at),
+        ("updated_at", attempt.updated_at),
+        ("listing_external_id", attempt.listing_external_id),
+        ("channel", attempt.channel),
+        ("dedupe_key", attempt.dedupe_key),
+        ("payload_hash prefix", (attempt.payload_hash or "")[:12]),
+        ("status", attempt.status),
+        ("attempt_count", attempt.attempt_count),
+        ("sent_at", attempt.sent_at),
+        ("next_retry_at", attempt.next_retry_at),
+        ("search_job_id", attempt.search_job_id),
+        ("search_name", attempt.search_name),
+        ("error_type", attempt.error_type),
+        ("last_error", _redact_alert_error(attempt.last_error, 500)),
+        ("matching AlertSent", "yes" if alert_sent else "no"),
+        ("matching listing", listing_block),
+    ]
+    rows = "".join(
+        f"<tr><th>{html.escape(str(key))}</th><td>{value if key == 'matching listing' else html.escape(str(value or '—'))}</td></tr>"
+        for key, value in fields
+    )
+    body = (
+        f"<h1>Alert delivery attempt {attempt.id}</h1>"
+        f"<p><a href='{_html_attr(_admin_url('/admin/alerts', api_key))}'>Back to alerts</a></p>"
+        f"<table>{rows}</table>"
+    )
+    return _render_page("Alert delivery attempt", body)
 
 
 

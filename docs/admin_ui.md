@@ -235,3 +235,11 @@ Query-string API keys remain disabled by default through `ADMIN_UI_ALLOW_QUERY_A
 No database migration is expected for PR19d. This is not PR20 alert retry/outbox work, not PR21 health dashboard work, and not PR23 access control/audit logging work.
 
 Production smoke should be safe: verify the app health and Alembic state, confirm technical operations are disabled by default, confirm read-only pages still work, then enable technical operations only for a controlled smoke search. Snapshot relevant table counts before and after, verify read keys and wrong confirmations cannot mutate, and avoid real `run-once` in production unless explicitly approved. If `run-once` is approved, use a harmless smoke search and monitor logs closely.
+
+## Alert delivery dashboard
+
+`GET /admin/alerts` preserves the existing JSONL alert view and adds a read-only alert delivery dashboard for the PR20a `alert_delivery_attempts` ledger. The section shows bounded recent delivery attempts, status/channel summaries, a `hours=168` default period, filters for status/channel/listing external id/dedupe key/search job id, live-delivery observed state, and delivery invariant counters.
+
+`GET /admin/alerts/delivery-attempts/{attempt_id}` shows one safe delivery attempt detail page with matching `AlertSent` and listing context when available. The page renders only safe scalar fields, a payload hash prefix, and redacted/truncated errors. It never renders raw payloads or secrets.
+
+The dashboard is read-only. It adds no POST mutation routes, retry button, manual retry, automatic retry, scheduler, worker health, parser health, queue lag, SLA metrics, or migration. Admin read authentication is sufficient; write and technical keys are not required.

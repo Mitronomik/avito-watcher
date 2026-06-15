@@ -68,3 +68,47 @@ Production smoke should not force production parsing unless explicitly approved.
 8. Verify failed/skipped/unknown outcomes do not create `alerts_sent`. In production, these may be validated through logs/tests rather than deliberately breaking real channels.
 9. Check logs for exceptions and secret leaks.
 10. Confirm there are no agent, research, scoring, or human-review side effects.
+
+## Read-only delivery dashboard (PR20b)
+
+PR20b adds read-only Admin UI observability for the PR20a `alert_delivery_attempts` ledger. It shows what PR20a recorded; it does not retry, schedule retry, mutate the outbox ledger, mutate `alerts_sent`, or add a migration.
+
+Routes:
+
+- `GET /admin/alerts` keeps the existing JSONL alert history and adds the **Попытки доставки уведомлений** delivery attempts section.
+- `GET /admin/alerts/delivery-attempts/{attempt_id}` shows one safe delivery attempt detail page.
+
+The dashboard defaults to `hours=168` and bounds the period filter to `1..720` hours. Recent rows are bounded by `limit`, default `50`, with a maximum visible delivery-attempt limit of `200`. Supported filters are `status` (`success`, `failed`, `skipped`, `unknown`), `channel` (max 32 chars), `listing_external_id` (max 128 chars), `dedupe_key` (max 255 chars), `search_job_id` (positive integer; available because the PR20a ledger schema includes it), `hours`, and `limit`. Invalid filters return HTTP 400 rather than falling back to an unbounded query.
+
+The main dashboard shows summary cards/text for selected-period total attempts, all-time total attempts, per-status counts, observed channels, latest attempt timestamp, and whether live delivery has been observed. If no attempts exist, it renders the empty state: no delivery attempts have been observed yet, which is expected if no pending alerts were delivered after PR20a deployment.
+
+The recent attempts table shows bounded safe fields only: id, created time, listing external id, channel, status, attempt count, `sent_at`, `next_retry_at`, search name, payload hash prefix, redacted/truncated last-error preview, matching `AlertSent` state, and a details link. Raw payloads are never stored or rendered. `last_error` is redacted and truncated again at render time, including obvious secret keys and sensitive URL query parameters.
+
+The detail page shows safe scalar fields for a single `AlertDeliveryAttempt`, matching `AlertSent` presence, and a matching listing link when one exists. It does not show raw payload, secrets, retry controls, POST forms, manual actions, or technical controls.
+
+Delivery invariant counters are visible on `/admin/alerts`; healthy values are `0` for every counter. Each counter counts `AlertDeliveryAttempt` rows, not distinct dedupe keys:
+
+- `success_without_alert_sent`: `status = success` and no matching `AlertSent` exists.
+- `non_success_with_alert_sent`: `status in failed/skipped/unknown` and a matching `AlertSent` exists.
+- `success_missing_sent_at`: `status = success` and `sent_at is null`.
+- `non_success_with_sent_at`: `status in failed/skipped/unknown` and `sent_at is not null`.
+- `non_null_next_retry_at`: `next_retry_at is not null`; this should normally be zero in PR20a/PR20b because retry scheduling is not implemented.
+- `bad_payload_hash_count`: `payload_hash` is null/empty or does not match `^[0-9a-f]{64}$`.
+
+Matching `AlertSent` semantics are exact: same `dedupe_key`, same `listing_external_id`, and same `channel`. The dashboard does not infer fuzzy matches.
+
+PR20b is intentionally not a health dashboard: it does not add worker heartbeat, parser health, queue lag, delivery-latency trends, SLA metrics, PR21 health-dashboard scope, or PR45 production uptime scope.
+
+### PR20b production smoke plan
+
+1. Pull current main and verify the deployed commit.
+2. Run `alembic heads` and `alembic current`; no new PR20b migration is expected and the head should remain the current PR20a/main head.
+3. Build/restart the app as needed; worker restart is not required unless deployment packaging requires it.
+4. Check `/health`.
+5. Snapshot counts for `alert_delivery_attempts`, `alerts_sent`, `listings`, `listing_analyses`, `search_jobs`, `agent_tasks`, `market_research_runs`, `market_evidence_items`, `knowledge_notes`, `listing_enrichments`, `listing_detail_snapshots`, `human_reviews`, `human_review_actions`, and `investment_decisions`.
+6. Open `/admin/alerts` with the read key and verify the page works with an empty ledger or existing attempts.
+7. Verify safe filters such as `limit=10`, `hours=168`, `status=failed`, plus invalid status/limit returning 400.
+8. If an attempt exists, open `/admin/alerts/delivery-attempts/{attempt_id}`.
+9. Verify invariant counters and unsupported POST routes (`POST /admin/alerts`, `POST /admin/alerts/delivery-attempts/{attempt_id}`) do not mutate state.
+10. Snapshot the same DB counts and confirm they are unchanged.
+11. Check logs for tracebacks, errors, and secret leakage. Do not trigger run-once, technical ops, manual retry, or automatic retry.
