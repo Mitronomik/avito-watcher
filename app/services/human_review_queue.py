@@ -164,7 +164,14 @@ def get_human_review_queue_rows(
         .outerjoin(latest_decision_ids, latest_decision_ids.c.external_id == Listing.external_id)
         .outerjoin(InvestmentDecision, InvestmentDecision.id == latest_decision_ids.c.decision_id)
     )
+    if normalized_profile:
+        # A profile filter narrows the queue to listings that actually have a
+        # latest persisted analysis for that profile; the no-profile queue keeps
+        # listings without analyses and renders their analysis fields as unknown.
+        stmt = stmt.where(latest_analysis.c.analysis_id.is_not(None))
     if only_unreviewed:
+        # PR23c unreviewed_only means no human_reviews rows for this listing.
+        # Investment decisions are summarized independently and are not a filter.
         stmt = stmt.where(review_count == 0)
     stmt = stmt.order_by(
         review_count.asc(),

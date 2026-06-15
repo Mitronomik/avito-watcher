@@ -100,6 +100,69 @@ def test_review_queue_read_model_one_row_latest_aggregates_and_unknowns(monkeypa
     assert "unknown" in page
 
 
+
+def test_review_queue_profile_filter_requires_analysis_for_profile(monkeypatch):
+    client, Session = make_raw_client(monkeypatch, allow_query_api_key=False)
+    create_listing(Session, external_id="commercial", title="Commercial match")
+    create_listing(Session, external_id="flat", title="Flat only")
+    create_listing(Session, external_id="missing", title="No analysis")
+    create_listing_analysis(
+        Session,
+        listing_external_id="commercial",
+        profile="commercial_rent",
+        score=8.0,
+        verdict="strong",
+        input_hash="commercial-rent",
+        created_at=datetime(2026, 1, 3),
+    )
+    create_listing_analysis(
+        Session,
+        listing_external_id="flat",
+        profile="flat_sale",
+        score=9.0,
+        verdict="strong",
+        input_hash="flat-sale",
+        created_at=datetime(2026, 1, 4),
+    )
+
+    filtered = get_human_review_queue_rows(Session(), profile="commercial_rent")
+    assert [row.external_id for row in filtered] == ["commercial"]
+
+    html = client.get("/admin/review-queue?profile=commercial_rent", headers={"X-API-Key": "read"}).text
+    assert "commercial" in html
+    assert "Commercial match" in html
+    assert "flat" not in html
+    assert "Flat only" not in html
+    assert "missing" not in html
+    assert "No analysis" not in html
+
+
+def test_review_queue_without_profile_keeps_listings_without_analysis(monkeypatch):
+    client, Session = make_raw_client(monkeypatch, allow_query_api_key=False)
+    create_listing(Session, external_id="analyzed", title="Analyzed")
+    create_listing(Session, external_id="no-analysis", title="No analysis")
+    create_listing_analysis(
+        Session,
+        listing_external_id="analyzed",
+        profile="commercial_rent",
+        score=8.0,
+        verdict="strong",
+        input_hash="analyzed-commercial-rent",
+        created_at=datetime(2026, 1, 3),
+    )
+
+    rows = get_human_review_queue_rows(Session(), profile=None)
+    by_ext = {row.external_id: row for row in rows}
+    assert set(by_ext) == {"analyzed", "no-analysis"}
+    assert by_ext["no-analysis"].analysis_id is None
+    assert by_ext["no-analysis"].analysis_status is None
+
+    html = client.get("/admin/review-queue", headers={"X-API-Key": "read"}).text
+    assert "analyzed" in html
+    assert "no-analysis" in html
+    assert "unknown" in html
+
+
 def test_review_queue_filters_limit_and_deterministic_order(monkeypatch):
     _, Session = make_raw_client(monkeypatch, allow_query_api_key=False)
     create_listing(Session, external_id="reviewed", last_seen_at=datetime(2026, 1, 4))
