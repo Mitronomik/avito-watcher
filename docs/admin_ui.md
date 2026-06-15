@@ -215,3 +215,23 @@ No migration is expected for PR19c. The pages read existing PR15/PR18b tables an
 7. Confirm all counts are unchanged.
 8. Confirm no worker, agent, research, delivery, LLM, or external integration task was triggered.
 9. Confirm worker/app logs contain no new errors after deploy.
+
+## Technical operations hardening (PR19d)
+
+PR19d hardens the existing Admin UI technical operations: create search, edit search, activate/deactivate search, reset baseline, and run once. These actions are dangerous because they can change monitoring state, reset baseline behavior, trigger parsing, affect future alert delivery, and change which Avito listings are monitored.
+
+Technical operations remain disabled by default. Set `ADMIN_UI_TECHNICAL_OPS_ENABLED=true` and configure a separate `ADMIN_UI_TECHNICAL_WRITE_KEY` before using dangerous controls. If technical mode is enabled but `ADMIN_UI_TECHNICAL_WRITE_KEY` is empty, technical POST routes fail closed with HTTP 403; they do not fall back to the read key, admin write key, or generic API key.
+
+Browser technical forms use a visible password field named `admin_technical_write_key`. API clients and tests may still use `X-API-Key`, but the value must match `ADMIN_UI_TECHNICAL_WRITE_KEY` for technical POSTs. The submitted technical key is stripped before validation and persistence and is never intentionally rendered back into HTML.
+
+Every dangerous technical POST also requires visible typed confirmation through `confirm_action`. Operators must type the exact action name: `create_search`, `edit_search`, `activate_search`, `deactivate_search`, `reset_baseline`, or `run_once`. Missing or wrong confirmation returns HTTP 400 and does not mutate state.
+
+Query-string API keys remain disabled by default through `ADMIN_UI_ALLOW_QUERY_API_KEY=false`. PR19d does not introduce new query-string key flows and new browser technical forms do not rely on query-string keys or append keys to return URLs.
+
+`run-once` is especially risky: it may parse Avito and may send alerts depending on existing monitor and delivery rules. Its result page renders escaped, redacted JSON so secret-like fields, auth headers, webhook URLs, cookies, SMTP passwords, Telegram tokens, provider keys, and sensitive URL query parameters are not displayed.
+
+`reset-baseline` is also risky: it can cause the next cycle to behave like a first baseline run and must be used only on an intended search.
+
+No database migration is expected for PR19d. This is not PR20 alert retry/outbox work, not PR21 health dashboard work, and not PR23 access control/audit logging work.
+
+Production smoke should be safe: verify the app health and Alembic state, confirm technical operations are disabled by default, confirm read-only pages still work, then enable technical operations only for a controlled smoke search. Snapshot relevant table counts before and after, verify read keys and wrong confirmations cannot mutate, and avoid real `run-once` in production unless explicitly approved. If `run-once` is approved, use a harmless smoke search and monitor logs closely.

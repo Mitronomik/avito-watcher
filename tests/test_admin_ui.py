@@ -3,6 +3,7 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
+
 from sqlalchemy import create_engine, select, func
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -16,6 +17,36 @@ from app.models.listing_analysis import ListingAnalysis
 from app.models.human_review import HumanReview, HumanReviewAction, InvestmentDecision
 from app.models.search_job import SearchJob
 from app.parsers.errors import ParserError, ParserErrorType
+
+
+class AdminTestClient(TestClient):
+    def get(self, url, *args, **kwargs):
+        if "headers" not in kwargs and str(url) != "/admin?api_key=secret":
+            kwargs["headers"] = {"X-API-Key": "tech"}
+        return super().get(url, *args, **kwargs)
+
+    def post(self, url, *args, **kwargs):
+        data = kwargs.get("data")
+        headers = {**kwargs.get("headers", {}), "X-API-Key": "tech"}
+        kwargs["headers"] = headers
+        if data is None:
+            data = {}
+        if isinstance(data, dict) and "confirm_action" not in data:
+            path = str(url).split("?", 1)[0]
+            if path == "/admin/searches":
+                data = {**data, "confirm_action": "create_search"}
+            elif path.endswith("/activate"):
+                data = {**data, "confirm_action": "activate_search"}
+            elif path.endswith("/deactivate"):
+                data = {**data, "confirm_action": "deactivate_search"}
+            elif path.endswith("/reset-baseline"):
+                data = {**data, "confirm_action": "reset_baseline"}
+            elif path.endswith("/run-once"):
+                data = {**data, "confirm_action": "run_once"}
+            elif "/admin/searches/" in path:
+                data = {**data, "confirm_action": "edit_search"}
+            kwargs["data"] = data
+        return super().post(url, *args, **kwargs)
 
 
 def test_create_app_default_admin_routes_disabled():
@@ -52,9 +83,11 @@ def make_client(monkeypatch, *, technical_ops_enabled: bool = True, allow_query_
     monkeypatch.setattr(settings, "api_key", "")
     monkeypatch.setattr(settings, "admin_ui_technical_ops_enabled", technical_ops_enabled)
     monkeypatch.setattr(settings, "admin_ui_allow_query_api_key", allow_query_api_key)
+    monkeypatch.setattr(settings, "admin_ui_technical_write_key", "tech")
     test_app = create_app(admin_ui_enabled=True)
     test_app.dependency_overrides[db_session_module.get_db] = override_db
-    return TestClient(test_app), Session
+    client = AdminTestClient(test_app)
+    return client, Session
 
 
 def create_job(Session, name="test_job"):
@@ -1276,7 +1309,7 @@ def test_pr19a_query_api_key_disabled_by_default(monkeypatch):
     client, _ = make_client(monkeypatch, allow_query_api_key=False)
     monkeypatch.setattr(settings, "api_key", "secret")
     assert client.get("/admin?api_key=secret").status_code == 403
-    assert client.get("/admin", headers={"X-API-Key": "secret"}).status_code == 200
+    assert client.get("/admin", headers={"X-API-Key": "tech"}).status_code == 200
 
 
 def test_pr19a_redaction_helpers():
