@@ -243,3 +243,13 @@ Production smoke should be safe: verify the app health and Alembic state, confir
 `GET /admin/alerts/delivery-attempts/{attempt_id}` shows one safe delivery attempt detail page with matching `AlertSent` and listing context when available. The page renders only safe scalar fields, a payload hash prefix, and redacted/truncated errors. It never renders raw payloads or secrets.
 
 The dashboard is read-only. It adds no POST mutation routes, retry button, manual retry, automatic retry, scheduler, worker health, parser health, queue lag, SLA metrics, or migration. Admin read authentication is sufficient; write and technical keys are not required.
+
+## PR20c manual retry for alert delivery attempts
+
+The alert delivery attempt detail page now contains a manual retry section for one dangerous technical action: retrying exactly one failed/skipped/unknown delivery attempt into its original channel. No retry action is added to the `/admin/alerts` list page, and there is no bulk retry, retry-all, automatic retry, scheduler, queue, or retry policy engine.
+
+The active form is rendered only when `ADMIN_UI_TECHNICAL_OPS_ENABLED=true` and the attempt is eligible. Submitting the form requires the dedicated `ADMIN_UI_TECHNICAL_WRITE_KEY` in `admin_technical_write_key` and a visible typed `confirm_action` value of `retry_delivery_attempt_{attempt_id}`. The technical key is not rendered back into HTML, hidden fields, redirects, or stored database fields. Query-string key propagation follows the existing admin setting for legacy read links, but technical keys are still not printed.
+
+Eligibility requires status `failed`, `skipped`, or `unknown`; a present listing; non-empty channel and dedupe key; dedupe consistency with `{channel}:new:{listing_external_id}`; and no exact matching `AlertSent`. Successful attempts and success-without-AlertSent invariant rows remain non-retryable in PR20c because repair/audit workflows belong to a future PR.
+
+On POST, the route validates technical auth and confirmation, validates eligibility, rechecks matching `AlertSent` immediately before the external call, and then sends only the original channel. The regenerated alert payload comes from current database listing data rather than raw stored payload replay, so a retry attempt gets a fresh payload hash. A successful delivery creates `AlertSent`; failed/skipped/unknown outcomes create only an `AlertDeliveryAttempt` marked with `search_name=manual_retry` or `manual_retry:{original_search_name}`; auth, confirmation, and eligibility failures create no attempt rows. Audit logging remains future PR23 scope.

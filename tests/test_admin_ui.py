@@ -2058,3 +2058,191 @@ def test_alert_delivery_invariants_detail_secret_safety_and_no_mutation(monkeypa
     with Session() as s:
         after = {AlertDeliveryAttempt.__tablename__: s.scalar(select(func.count()).select_from(AlertDeliveryAttempt)), AlertSent.__tablename__: s.scalar(select(func.count()).select_from(AlertSent)), Listing.__tablename__: s.scalar(select(func.count()).select_from(Listing)), ListingAnalysis.__tablename__: s.scalar(select(func.count()).select_from(ListingAnalysis)), SearchJob.__tablename__: s.scalar(select(func.count()).select_from(SearchJob))}
     assert after == before
+
+class _RetryChannel:
+    def __init__(self, name="jsonl", result=True, calls=None):
+        self.channel_name = name
+        self.result = result
+        self.calls = calls if calls is not None else []
+
+    async def send_listing_alert(self, message, payload):
+        self.calls.append((self.channel_name, message, payload))
+        if isinstance(self.result, BaseException):
+            raise self.result
+        return self.result
+
+
+def _patch_retry_service(monkeypatch, channels):
+    import app.admin as admin_module
+
+    class FakeService:
+        def __init__(self):
+            self.notifier = type("Notifier", (), {"channels": channels})()
+
+        def _build_alert_payload(self, card, search_name, summary, score, tags, analysis=None):
+            return {
+                "search_name": search_name,
+                "external_id": card.external_id,
+                "title": card.title,
+                "price": card.price,
+                "area_m2": card.area_m2,
+                "rooms": card.rooms,
+                "address": card.address,
+                "published_label": card.published_label,
+                "published_at": card.published_at.isoformat() if card.published_at else None,
+                "url": card.url,
+                "summary": summary,
+                "score": score,
+                "tags": tags,
+                "manual_test_nonce": len(channels),
+            }
+
+        def _now(self):
+            return datetime(2026, 1, 1, 12, 0, 0)
+
+    monkeypatch.setattr(admin_module, "MonitorService", FakeService)
+
+
+def test_alert_delivery_manual_retry_auth_confirmation_and_visible_form(monkeypatch):
+    client, Session = make_raw_client(monkeypatch, technical_ops_enabled=True, allow_query_api_key=False, client_cls=TestClient)
+    create_listing(Session, external_id="retry-auth", title="Retry auth")
+    attempt_id = _add_attempt(Session, listing_external_id="retry-auth", channel="jsonl", status="failed", dedupe_key="jsonl:new:retry-auth")
+    page = client.get(f"/admin/alerts/delivery-attempts/{attempt_id}", headers={"X-API-Key": "read"}).text
+    assert "Ручной повтор доставки" in page
+    assert "retry_delivery_attempt_" in page
+    assert "name='confirm_action'" in page or 'name="confirm_action"' in page
+    assert "type='hidden' name='confirm_action'" not in page and 'type="hidden" name="confirm_action"' not in page
+    assert "admin_technical_write_key' value='tech" not in page
+    assert 'admin_technical_write_key" value="tech' not in page
+
+    url = f"/admin/alerts/delivery-attempts/{attempt_id}/retry"
+    assert client.post(url, headers={"X-API-Key": "read"}, data={}).status_code == 403
+    assert client.post(url, headers={"X-API-Key": "read"}, data={"admin_technical_write_key": "read", "confirm_action": f"retry_delivery_attempt_{attempt_id}"}).status_code == 403
+    assert client.post(url, headers={"X-API-Key": "read"}, data={"admin_technical_write_key": "write", "confirm_action": f"retry_delivery_attempt_{attempt_id}"}).status_code == 403
+    assert client.post(url, headers={"X-API-Key": "read"}, data={"admin_technical_write_key": "tech"}).status_code == 400
+    assert client.post(url, headers={"X-API-Key": "read"}, data={"admin_technical_write_key": "tech", "confirm_action": "wrong"}).status_code == 400
+
+    disabled_client, DisabledSession = make_raw_client(monkeypatch, technical_ops_enabled=False, allow_query_api_key=False, client_cls=TestClient)
+    create_listing(DisabledSession, external_id="retry-disabled")
+    disabled_id = _add_attempt(DisabledSession, listing_external_id="retry-disabled", channel="jsonl", status="failed", dedupe_key="jsonl:new:retry-disabled")
+    disabled_page = disabled_client.get(f"/admin/alerts/delivery-attempts/{disabled_id}", headers={"X-API-Key": "read"}).text
+    assert "Manual retry is disabled because technical operations are disabled" in disabled_page
+    assert disabled_client.post(f"/admin/alerts/delivery-attempts/{disabled_id}/retry", headers={"X-API-Key": "read"}, data={"admin_technical_write_key": "tech", "confirm_action": f"retry_delivery_attempt_{disabled_id}"}).status_code == 403
+
+
+def test_alert_delivery_manual_retry_success_single_channel_and_dedupe(monkeypatch):
+    calls = []
+    _patch_retry_service(monkeypatch, [_RetryChannel("jsonl", True, calls), _RetryChannel("telegram", True, calls)])
+    client, Session = make_raw_client(monkeypatch, technical_ops_enabled=True, allow_query_api_key=False, client_cls=TestClient)
+    create_listing(Session, external_id="retry-ok", title="Retry ok", price=123)
+    attempt_id = _add_attempt(Session, listing_external_id="retry-ok", channel="jsonl", status="failed", dedupe_key="jsonl:new:retry-ok", attempt_count=1, payload_hash="b" * 64, search_name="original-search")
+    resp = client.post(
+        f"/admin/alerts/delivery-attempts/{attempt_id}/retry",
+        headers={"X-API-Key": "read"},
+        data={"admin_technical_write_key": "tech", "confirm_action": f"retry_delivery_attempt_{attempt_id}"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "retry_success=1" in resp.headers["location"]
+    assert [c[0] for c in calls] == ["jsonl"]
+    with Session() as s:
+        attempts = s.scalars(select(AlertDeliveryAttempt).where(AlertDeliveryAttempt.dedupe_key == "jsonl:new:retry-ok").order_by(AlertDeliveryAttempt.id)).all()
+        assert len(attempts) == 2
+        assert attempts[-1].status == "success"
+        assert attempts[-1].attempt_count == 2
+        assert attempts[-1].payload_hash != "b" * 64
+        assert attempts[-1].search_name == "manual_retry:original-search"
+        assert s.scalar(select(func.count()).select_from(AlertSent).where(AlertSent.dedupe_key == "jsonl:new:retry-ok")) == 1
+
+
+def test_alert_delivery_manual_retry_helper_rechecks_alert_sent_immediately_before_send(monkeypatch):
+    calls = []
+    _patch_retry_service(monkeypatch, [_RetryChannel("jsonl", True, calls)])
+    client, Session = make_raw_client(monkeypatch, technical_ops_enabled=True, allow_query_api_key=False, client_cls=TestClient)
+    create_listing(Session, external_id="retry-race")
+    attempt_id = _add_attempt(Session, listing_external_id="retry-race", channel="jsonl", status="failed", dedupe_key="jsonl:new:retry-race")
+
+    import app.admin as admin_module
+
+    original_matching = admin_module._matching_alert_sent
+    call_count = {"value": 0}
+
+    def racing_matching(db, attempt):
+        call_count["value"] += 1
+        if call_count["value"] == 3:
+            db.add(AlertSent(listing_external_id="retry-race", channel="jsonl", dedupe_key="jsonl:new:retry-race"))
+            db.commit()
+        return original_matching(db, attempt)
+
+    monkeypatch.setattr(admin_module, "_matching_alert_sent", racing_matching)
+    resp = client.post(
+        f"/admin/alerts/delivery-attempts/{attempt_id}/retry",
+        headers={"X-API-Key": "read"},
+        data={"admin_technical_write_key": "tech", "confirm_action": f"retry_delivery_attempt_{attempt_id}"},
+    )
+    assert resp.status_code == 400
+    assert calls == []
+    with Session() as s:
+        assert s.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.dedupe_key == "jsonl:new:retry-race")) == 1
+        assert s.scalar(select(func.count()).select_from(AlertSent).where(AlertSent.dedupe_key == "jsonl:new:retry-race")) == 1
+
+
+def test_alert_delivery_manual_retry_preconditions_create_no_rows(monkeypatch):
+    calls = []
+    _patch_retry_service(monkeypatch, [_RetryChannel("jsonl", True, calls)])
+    client, Session = make_raw_client(monkeypatch, technical_ops_enabled=True, allow_query_api_key=False, client_cls=TestClient)
+    create_listing(Session, external_id="retry-sent")
+    sent_attempt = _add_attempt(Session, listing_external_id="retry-sent", channel="jsonl", status="failed", dedupe_key="jsonl:new:retry-sent")
+    _add_alert_sent(Session, listing_external_id="retry-sent", channel="jsonl", dedupe_key="jsonl:new:retry-sent")
+    create_listing(Session, external_id="retry-success")
+    success_attempt = _add_attempt(Session, listing_external_id="retry-success", channel="jsonl", status="success", dedupe_key="jsonl:new:retry-success")
+    create_listing(Session, external_id="retry-bad-key")
+    bad_key_attempt = _add_attempt(Session, listing_external_id="retry-bad-key", channel="jsonl", status="failed", dedupe_key="telegram:new:retry-bad-key")
+    missing_listing_attempt = _add_attempt(Session, listing_external_id="retry-missing", channel="jsonl", status="failed", dedupe_key="jsonl:new:retry-missing")
+
+    with Session() as s:
+        before_attempts = s.scalar(select(func.count()).select_from(AlertDeliveryAttempt))
+        before_sent = s.scalar(select(func.count()).select_from(AlertSent))
+
+    for attempt_id in [sent_attempt, success_attempt, bad_key_attempt, missing_listing_attempt]:
+        resp = client.post(
+            f"/admin/alerts/delivery-attempts/{attempt_id}/retry",
+            headers={"X-API-Key": "read"},
+            data={"admin_technical_write_key": "tech", "confirm_action": f"retry_delivery_attempt_{attempt_id}"},
+        )
+        assert resp.status_code == 400
+
+    assert calls == []
+    with Session() as s:
+        assert s.scalar(select(func.count()).select_from(AlertDeliveryAttempt)) == before_attempts
+        assert s.scalar(select(func.count()).select_from(AlertSent)) == before_sent
+
+
+def test_alert_delivery_manual_retry_failed_skipped_unknown_and_missing_channel(monkeypatch):
+    for result, expected_status in [(RuntimeError("token=secret-value"), "failed"), (False, "skipped"), (object(), "unknown")]:
+        calls = []
+        _patch_retry_service(monkeypatch, [_RetryChannel("jsonl", result, calls)])
+        client, Session = make_raw_client(monkeypatch, technical_ops_enabled=True, allow_query_api_key=False, client_cls=TestClient)
+        ext = f"retry-{expected_status}"
+        create_listing(Session, external_id=ext)
+        attempt_id = _add_attempt(Session, listing_external_id=ext, channel="jsonl", status="failed", dedupe_key=f"jsonl:new:{ext}")
+        resp = client.post(f"/admin/alerts/delivery-attempts/{attempt_id}/retry", headers={"X-API-Key": "read"}, data={"admin_technical_write_key": "tech", "confirm_action": f"retry_delivery_attempt_{attempt_id}"}, follow_redirects=False)
+        assert resp.status_code == 303
+        assert f"retry_{expected_status}=1" in resp.headers["location"]
+        with Session() as s:
+            retry = s.scalars(select(AlertDeliveryAttempt).where(AlertDeliveryAttempt.dedupe_key == f"jsonl:new:{ext}").order_by(AlertDeliveryAttempt.id)).all()[-1]
+            assert retry.status == expected_status
+            assert s.scalar(select(func.count()).select_from(AlertSent).where(AlertSent.dedupe_key == f"jsonl:new:{ext}")) == 0
+            assert "secret-value" not in (retry.last_error or "")
+
+    _patch_retry_service(monkeypatch, [_RetryChannel("telegram", True, [])])
+    client, Session = make_raw_client(monkeypatch, technical_ops_enabled=True, allow_query_api_key=False, client_cls=TestClient)
+    create_listing(Session, external_id="retry-missing-channel")
+    attempt_id = _add_attempt(Session, listing_external_id="retry-missing-channel", channel="jsonl", status="failed", dedupe_key="jsonl:new:retry-missing-channel")
+    resp = client.post(f"/admin/alerts/delivery-attempts/{attempt_id}/retry", headers={"X-API-Key": "read"}, data={"admin_technical_write_key": "tech", "confirm_action": f"retry_delivery_attempt_{attempt_id}"}, follow_redirects=False)
+    assert resp.status_code == 303
+    with Session() as s:
+        retry = s.scalars(select(AlertDeliveryAttempt).where(AlertDeliveryAttempt.dedupe_key == "jsonl:new:retry-missing-channel").order_by(AlertDeliveryAttempt.id)).all()[-1]
+        assert retry.status == "unknown"
+        assert retry.error_type == "channel_not_configured"
+        assert "channel not configured" in retry.last_error
