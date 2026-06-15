@@ -49,7 +49,7 @@ UI_TEXT = {
         "no_data": "No data", "technical.details": "Technical details",
     },
 }
-_SECRET_KEY_RE = re.compile(r"(key|token|secret|password|webhook|authorization|api_key|smtp_password|telegram_bot_token|google_sheets_webhook_secret)", re.I)
+_SECRET_KEY_RE = re.compile(r"(secret|token|api_key|apikey|authorization|auth|password|passwd|cookie|webhook|smtp|telegram|provider_key|access_key|refresh_token|bearer|key)", re.I)
 
 def _lang() -> str:
     return settings.admin_ui_language if settings.admin_ui_language in UI_TEXT else "ru"
@@ -65,6 +65,16 @@ def redact_admin_value(value: object, key: str = "") -> str:
     if _SECRET_KEY_RE.search(key or ""):
         return "[redacted]"
     text = str(value or "")
+    parsed = urlparse(text)
+    if parsed.scheme in {"http", "https"} and parsed.query:
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        changed = False
+        for query_key in list(query):
+            if _SECRET_KEY_RE.search(query_key):
+                query[query_key] = ["[redacted]"]
+                changed = True
+        if changed:
+            text = urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
     if "script.google.com" in text:
         return "https://script.google.com/.../exec"
     return truncate_admin_text(text, 500)
@@ -166,7 +176,7 @@ def _configured_write_key() -> str:
     return settings.admin_ui_write_key or settings.admin_ui_read_key or settings.api_key
 
 def _configured_technical_key() -> str:
-    return settings.admin_ui_technical_write_key or settings.admin_ui_write_key or settings.api_key
+    return settings.admin_ui_technical_write_key
 
 def _request_key_ok(key_header: str | None, api_key_qs: str | None, expected: str) -> bool:
     if not expected:
@@ -191,6 +201,8 @@ def _require_technical_write(
     if not settings.admin_ui_technical_ops_enabled:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Technical operations are disabled")
     expected = _configured_technical_key()
+    if not expected:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Technical write key is not configured")
     if _request_key_ok(key_header, api_key_qs, expected):
         return
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid technical admin key")
@@ -243,7 +255,7 @@ def _extract_return_url(request: Request, form: dict[str, str] | None = None) ->
 
 
 def _back_links(api_key: str | None, return_url: str | None) -> str:
-    back_target = _append_query_param(return_url, 'api_key', api_key) if return_url else _admin_url('/admin/searches', api_key)
+    back_target = return_url if return_url else _admin_url('/admin/searches', api_key)
     list_target = _admin_url('/admin/searches', api_key)
     return f"<p><a href='{html.escape(back_target)}'>Back</a></p><p><a href='{html.escape(list_target)}'>Back to search list</a></p>"
 
@@ -251,7 +263,7 @@ def _back_links(api_key: str | None, return_url: str | None) -> str:
 def _success_redirect(request: Request, api_key: str | None, marker: str, form: dict[str, str] | None = None) -> RedirectResponse:
     target = _extract_return_url(request, form)
     if target:
-        return RedirectResponse(_append_query_param(target, 'api_key', api_key), status_code=303)
+        return RedirectResponse(target, status_code=303)
     return RedirectResponse(_admin_url(f'/admin/searches?{marker}=1', api_key), status_code=303)
 
 def _is_avito_url(url: str) -> bool:
@@ -389,6 +401,46 @@ def _delivery_badge(attempted: int, unsuccessful: int, failed: int, unknown: int
 async def _parse_form(request: Request) -> dict[str, str]:
     data = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
     return {k: v[-1] if v else "" for k, v in data.items()}
+
+
+async def _parse_mutable_form(request: Request) -> tuple[dict[str, str], dict[str, list[str]]]:
+    data = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+    return {k: v[-1] if v else "" for k, v in data.items()}, data
+
+
+def _require_technical_write_form(request: Request, form: dict[str, str], raw_form: dict[str, list[str]] | None = None) -> None:
+    if not settings.admin_ui_technical_ops_enabled:
+        form.pop("admin_technical_write_key", None)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Technical operations are disabled")
+    expected = _configured_technical_key()
+    if not expected:
+        form.pop("admin_technical_write_key", None)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Technical write key is not configured")
+    form_keys = (raw_form or {}).get("admin_technical_write_key")
+    if form_keys is not None and len(form_keys) != 1:
+        form.pop("admin_technical_write_key", None)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid technical admin key")
+    header_key = request.headers.get("X-API-Key")
+    form_key = form.pop("admin_technical_write_key", None)
+    query_key = request.query_params.get("api_key") if settings.admin_ui_allow_query_api_key else None
+    if header_key == expected or form_key == expected or query_key == expected:
+        return
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid technical admin key")
+
+
+def _require_technical_confirmation(form: dict[str, str], expected_action: str) -> None:
+    if (form.get("confirm_action") or "").strip() != expected_action:
+        raise HTTPException(status_code=400, detail=f"Confirmation required: {expected_action}")
+
+
+def _technical_auth_fields(expected_action: str, warning: str = "") -> str:
+    return (
+        "<div class='section'><h3>Dangerous technical actions</h3>"
+        "<div class='note'>These actions can change monitoring state, reset baseline, trigger parsing, and affect alert delivery.</div>"
+        f"{f'<p class=\"preview\">{html.escape(warning)}</p>' if warning else ''}"
+        "<div class='row'><label>Technical write key<input name='admin_technical_write_key' type='password' autocomplete='off' required></label></div>"
+        f"<div class='row'><label>Type <code>{html.escape(expected_action)}</code> to confirm<input name='confirm_action' autocomplete='off' required></label></div></div>"
+    )
 
 
 def _safe_external_link(url: str | None, label: str = "open") -> str:
@@ -755,7 +807,7 @@ def technical():
         f"<p><strong>Technical operations:</strong> {ops}<br>"
         f"<strong>Admin mode:</strong> {html.escape(settings.admin_ui_mode)}<br>"
         f"<strong>Language:</strong> {html.escape(_lang())}</p>"
-        + ("<p>Технические действия выключены. Чтобы включить, установите <code>ADMIN_UI_TECHNICAL_OPS_ENABLED=true</code>.</p>" if not settings.admin_ui_technical_ops_enabled else "<p>Технические действия включены.</p>")
+        + ("<p>Technical operations are disabled. Set <code>ADMIN_UI_TECHNICAL_OPS_ENABLED=true</code> and configure <code>ADMIN_UI_TECHNICAL_WRITE_KEY</code> to enable dangerous actions.</p>" if not settings.admin_ui_technical_ops_enabled else "<p>Технические действия включены.</p>")
         + f"<section class='section'><h2>Состояние worker</h2>{_render_worker_cycle_status()}</section>"
         "<p><a href='/admin/searches'>Поиски и технические операции поиска</a> · <a href='/admin/listing-analyses'>Список анализов</a></p>"
     )
@@ -791,12 +843,13 @@ def searches(request: Request, db: Session = Depends(get_db)):
         if settings.admin_ui_technical_ops_enabled:
             toggle_action = 'deactivate' if s.is_active else 'activate'
             toggle_label = 'deactivate' if s.is_active else 'activate'
+            toggle_confirm = 'deactivate_search' if s.is_active else 'activate_search'
             action_html = (
-                f"<details><summary>Technical actions</summary><div class='note'>These actions can change monitoring behavior. Use only if you understand the effect.</div>"
-                f"<code>python3 -m app.cli run-once --search-id {s.id}</code><br><a href='{_admin_url(f'/admin/searches/{s.id}/edit', api_key)}'>edit</a> {open_avito}"
-                f"<form method='post' action='{_admin_url(f'/admin/searches/{s.id}/' + toggle_action, api_key)}'><button>{toggle_label}</button></form>"
-                f"<form method='post' action='{_admin_url(f'/admin/searches/{s.id}/reset-baseline', api_key)}'><button>reset baseline</button></form>"
-                f"<form method='post' action='{_admin_url(f'/admin/searches/{s.id}/run-once', api_key)}'><button>run once</button></form></details>"
+                "<details><summary>Dangerous technical actions</summary><div class='note'>These actions can change monitoring state, reset baseline, trigger parsing, and affect alert delivery.</div>"
+                f"<code>python3 -m app.cli run-once --search-id {s.id}</code><br><a href='{_admin_url(f'/admin/searches/{s.id}/edit', api_key)}'>edit search form</a> {open_avito}"
+                f"<form method='post' action='{_admin_url(f'/admin/searches/{s.id}/' + toggle_action, api_key)}'>{_technical_auth_fields(toggle_confirm)}<button>{toggle_label}</button></form>"
+                f"<form method='post' action='{_admin_url(f'/admin/searches/{s.id}/reset-baseline', api_key)}'>{_technical_auth_fields('reset_baseline', 'Reset baseline can cause the next cycle to behave like a first baseline run and must be used carefully.')}<button>reset baseline</button></form>"
+                f"<form method='post' action='{_admin_url(f'/admin/searches/{s.id}/run-once', api_key)}'>{_technical_auth_fields('run_once', 'Run once may parse Avito and may send alerts depending on existing monitor/delivery rules.')}<button>run once</button></form></details>"
             )
         else:
             action_html = "<span class='preview'>Технические действия выключены</span>"
@@ -1193,13 +1246,15 @@ def new_search_form(request: Request):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Technical operations are disabled')
     api_key = request.query_params.get("api_key")
     return_url = _extract_return_url(request) or _admin_url('/admin/searches', api_key)
-    return _render_page('New search', f"<h1>New search</h1><form method='post' action='{_admin_url('/admin/searches', api_key)}'>{_job_form(return_url=return_url)}<button type='submit'>Create</button></form>")
+    return _render_page('New search', f"<h1>New search</h1><form method='post' action='{_admin_url('/admin/searches', api_key)}'>{_job_form(return_url=return_url)}{_technical_auth_fields('create_search')}<button type='submit'>Create</button></form>")
 
 
-@router.post('/searches', dependencies=[Depends(_require_technical_write)])
+@router.post('/searches')
 async def create_search(request: Request, db: Session = Depends(get_db)):
     api_key = request.query_params.get("api_key")
-    form = await _parse_form(request)
+    form, raw_form = await _parse_mutable_form(request)
+    _require_technical_write_form(request, form, raw_form)
+    _require_technical_confirmation(form, "create_search")
     form.setdefault('human_title', '')
     form.setdefault('name', '')
     form.setdefault('source_url', '')
@@ -1221,7 +1276,7 @@ async def create_search(request: Request, db: Session = Depends(get_db)):
     except (ValueError, TypeError) as exc:
         return_url = _extract_return_url(request, form) or _admin_url('/admin/searches', api_key)
         links = _back_links(api_key, _safe_admin_return_url(form.get('return_url')))
-        return _render_page('Validation error', f"<h1>New search</h1><div class='error'>Nothing was saved because validation failed.</div>{links}<form method='post' action='{_admin_url('/admin/searches', api_key)}'>{_job_form(type('O',(),form), str(exc), return_url=return_url)}<button type='submit'>Create</button></form>")
+        return _render_page('Validation error', f"<h1>New search</h1><div class='error'>Nothing was saved because validation failed.</div>{links}<form method='post' action='{_admin_url('/admin/searches', api_key)}'>{_job_form(type('O',(),form), str(exc), return_url=return_url)}{_technical_auth_fields('create_search')}<button type='submit'>Create</button></form>")
     item = SearchRepository(db).create(name=name, source_url=form['source_url'].strip(), filters_json=filters, poll_interval_sec=poll)
     item.is_active = 'is_active' in form
     item.baseline_initialized = False
@@ -1240,17 +1295,19 @@ def edit_form(search_id: int, request: Request, db: Session = Depends(get_db)):
     if job is None:
         raise HTTPException(404)
     return_url = _extract_return_url(request) or _admin_url('/admin/searches', api_key)
-    return _render_page('Edit search', f"<h1>Edit search #{search_id}</h1><form method='post' action='{_admin_url(f'/admin/searches/{search_id}', api_key)}'>{_job_form(job, return_url=return_url)}<button type='submit'>Save</button></form>")
+    return _render_page('Edit search', f"<h1>Edit search #{search_id}</h1><form method='post' action='{_admin_url(f'/admin/searches/{search_id}', api_key)}'>{_job_form(job, return_url=return_url)}{_technical_auth_fields('edit_search')}<button type='submit'>Save</button></form>")
 
 
-@router.post('/searches/{search_id}', dependencies=[Depends(_require_technical_write)])
+@router.post('/searches/{search_id}')
 async def update_search(search_id: int, request: Request, db: Session = Depends(get_db)):
     api_key = request.query_params.get("api_key")
     repo = SearchRepository(db)
     job = repo.get(search_id)
     if job is None:
         raise HTTPException(404)
-    form = await _parse_form(request)
+    form, raw_form = await _parse_mutable_form(request)
+    _require_technical_write_form(request, form, raw_form)
+    _require_technical_confirmation(form, "edit_search")
     form.setdefault('human_title', '')
     form.setdefault('name', '')
     form.setdefault('source_url', '')
@@ -1276,7 +1333,7 @@ async def update_search(search_id: int, request: Request, db: Session = Depends(
         return_url = _extract_return_url(request, form) or _admin_url('/admin/searches', api_key)
         links = _back_links(api_key, _safe_admin_return_url(form.get('return_url')))
         form_job = type('O', (), {**form, 'filters_json': job.filters_json, 'is_active': 'is_active' in form})
-        return _render_page('Validation error', f"<h1>Edit search #{search_id}</h1><div class='error'>Nothing was saved because validation failed.</div>{links}<form method='post' action='{_admin_url(f'/admin/searches/{search_id}', api_key)}'>{_job_form(form_job, str(exc), return_url=return_url)}<button type='submit'>Save</button></form>")
+        return _render_page('Validation error', f"<h1>Edit search #{search_id}</h1><div class='error'>Nothing was saved because validation failed.</div>{links}<form method='post' action='{_admin_url(f'/admin/searches/{search_id}', api_key)}'>{_job_form(form_job, str(exc), return_url=return_url)}{_technical_auth_fields('edit_search')}<button type='submit'>Save</button></form>")
     job.name = name
     job.source_url = form['source_url'].strip()
     job.poll_interval_sec = poll
@@ -1286,31 +1343,40 @@ async def update_search(search_id: int, request: Request, db: Session = Depends(
     return _success_redirect(request, api_key, 'updated', form=form)
 
 
-@router.post('/searches/{search_id}/activate', dependencies=[Depends(_require_technical_write)])
-def activate(search_id: int, request: Request, db: Session = Depends(get_db)):
+@router.post('/searches/{search_id}/activate')
+async def activate(search_id: int, request: Request, db: Session = Depends(get_db)):
     api_key = request.query_params.get("api_key")
+    form, raw_form = await _parse_mutable_form(request)
+    _require_technical_write_form(request, form, raw_form)
+    _require_technical_confirmation(form, "activate_search")
     job = SearchRepository(db).get(search_id)
     if job is None:
         raise HTTPException(404)
     job.is_active = True
     db.commit()
-    return _success_redirect(request, api_key, 'updated')
+    return _success_redirect(request, api_key, 'updated', form=form)
 
 
-@router.post('/searches/{search_id}/deactivate', dependencies=[Depends(_require_technical_write)])
-def deactivate(search_id: int, request: Request, db: Session = Depends(get_db)):
+@router.post('/searches/{search_id}/deactivate')
+async def deactivate(search_id: int, request: Request, db: Session = Depends(get_db)):
     api_key = request.query_params.get("api_key")
+    form, raw_form = await _parse_mutable_form(request)
+    _require_technical_write_form(request, form, raw_form)
+    _require_technical_confirmation(form, "deactivate_search")
     job = SearchRepository(db).get(search_id)
     if job is None:
         raise HTTPException(404)
     job.is_active = False
     db.commit()
-    return _success_redirect(request, api_key, 'updated')
+    return _success_redirect(request, api_key, 'updated', form=form)
 
 
-@router.post('/searches/{search_id}/reset-baseline', dependencies=[Depends(_require_technical_write)])
-def reset_baseline(search_id: int, request: Request, db: Session = Depends(get_db)):
+@router.post('/searches/{search_id}/reset-baseline')
+async def reset_baseline(search_id: int, request: Request, db: Session = Depends(get_db)):
     api_key = request.query_params.get("api_key")
+    form, raw_form = await _parse_mutable_form(request)
+    _require_technical_write_form(request, form, raw_form)
+    _require_technical_confirmation(form, "reset_baseline")
     job = SearchRepository(db).get(search_id)
     if job is None:
         raise HTTPException(404)
@@ -1318,12 +1384,15 @@ def reset_baseline(search_id: int, request: Request, db: Session = Depends(get_d
     job.baseline_initialized_at = None
     job.next_run_at = None
     db.commit()
-    return _success_redirect(request, api_key, 'updated')
+    return _success_redirect(request, api_key, 'updated', form=form)
 
 
-@router.post('/searches/{search_id}/run-once', response_class=HTMLResponse, dependencies=[Depends(_require_technical_write)])
-def run_once(search_id: int, request: Request):
+@router.post('/searches/{search_id}/run-once', response_class=HTMLResponse)
+async def run_once(search_id: int, request: Request):
     api_key = request.query_params.get("api_key")
+    form, raw_form = await _parse_mutable_form(request)
+    _require_technical_write_form(request, form, raw_form)
+    _require_technical_confirmation(form, "run_once")
     parser_instance = _build_parser()
     service = MonitorService(parser=parser_instance)
     started_at = time.perf_counter()
@@ -1351,26 +1420,28 @@ def run_once(search_id: int, request: Request):
             "parser_stats": _parser_stats_snapshot(parser_instance),
             "runtime": runtime_diagnostics(),
         }
-    parser_stats = result.get("parser_stats", {}) if isinstance(result, dict) else {}
+    redacted_result = _redact_obj(result)
+    parser_stats = redacted_result.get("parser_stats", {}) if isinstance(redacted_result, dict) else {}
+    delivery_source = result if isinstance(result, dict) else {}
     delivery_channels = sorted(
-        set((result.get("delivery_attempted_by_channel") or {}).keys())
-        | set((result.get("delivery_success_by_channel") or {}).keys())
-        | set((result.get("delivery_skipped_by_channel") or {}).keys())
-        | set((result.get("delivery_failed_by_channel") or {}).keys())
-        | set((result.get("delivery_unknown_by_channel") or {}).keys())
-        | set((result.get("delivery_unsuccessful_by_channel") or {}).keys())
+        set((delivery_source.get("delivery_attempted_by_channel") or {}).keys())
+        | set((delivery_source.get("delivery_success_by_channel") or {}).keys())
+        | set((delivery_source.get("delivery_skipped_by_channel") or {}).keys())
+        | set((delivery_source.get("delivery_failed_by_channel") or {}).keys())
+        | set((delivery_source.get("delivery_unknown_by_channel") or {}).keys())
+        | set((delivery_source.get("delivery_unsuccessful_by_channel") or {}).keys())
     )
     summary_rows = [
-        ("ok", result.get("ok")),
-        ("error", result.get("error")),
-        ("created", result.get("created")),
-        ("alerted", result.get("alerted")),
-        ("filtered", result.get("filtered")),
-        ("total_seen", result.get("total_seen")),
-        ("pages_seen", result.get("pages_seen")),
-        ("pages_attempted", result.get("pages_attempted")),
-        ("pagination_stopped_reason", result.get("pagination_stopped_reason")),
-        ("page_errors_count", len(result.get("page_errors", []) or [])),
+        ("ok", redacted_result.get("ok")),
+        ("error", redacted_result.get("error")),
+        ("created", redacted_result.get("created")),
+        ("alerted", redacted_result.get("alerted")),
+        ("filtered", redacted_result.get("filtered")),
+        ("total_seen", redacted_result.get("total_seen")),
+        ("pages_seen", redacted_result.get("pages_seen")),
+        ("pages_attempted", redacted_result.get("pages_attempted")),
+        ("pagination_stopped_reason", redacted_result.get("pagination_stopped_reason")),
+        ("page_errors_count", len(redacted_result.get("page_errors", []) or [])),
         ("parser_engine_used", parser_stats.get("engine_used")),
         ("layout_changed_hint", parser_stats.get("layout_changed_hint")),
         ("timeout_failure_count", parser_stats.get("timeout_failure_count")),
@@ -1384,12 +1455,12 @@ def run_once(search_id: int, request: Request):
     if delivery_channels:
         delivery_rows = []
         for channel in delivery_channels:
-            attempted = int((result.get("delivery_attempted_by_channel") or {}).get(channel, 0) or 0)
-            success = int((result.get("delivery_success_by_channel") or {}).get(channel, 0) or 0)
-            skipped = int((result.get("delivery_skipped_by_channel") or {}).get(channel, 0) or 0)
-            failed = int((result.get("delivery_failed_by_channel") or {}).get(channel, 0) or 0)
-            unknown = int((result.get("delivery_unknown_by_channel") or {}).get(channel, 0) or 0)
-            unsuccessful = int((result.get("delivery_unsuccessful_by_channel") or {}).get(channel, 0) or 0)
+            attempted = int((delivery_source.get("delivery_attempted_by_channel") or {}).get(channel, 0) or 0)
+            success = int((delivery_source.get("delivery_success_by_channel") or {}).get(channel, 0) or 0)
+            skipped = int((delivery_source.get("delivery_skipped_by_channel") or {}).get(channel, 0) or 0)
+            failed = int((delivery_source.get("delivery_failed_by_channel") or {}).get(channel, 0) or 0)
+            unknown = int((delivery_source.get("delivery_unknown_by_channel") or {}).get(channel, 0) or 0)
+            unsuccessful = int((delivery_source.get("delivery_unsuccessful_by_channel") or {}).get(channel, 0) or 0)
             delivery_rows.append(
                 f"<tr><td>{html.escape(channel)}</td><td>{attempted}</td><td>{success}</td><td>{skipped}</td><td>{failed}</td><td>{unknown}</td><td>{unsuccessful}</td><td>{_delivery_badge(attempted, unsuccessful, failed, unknown)}</td></tr>"
             )
@@ -1398,7 +1469,7 @@ def run_once(search_id: int, request: Request):
         "<h1>Run once result</h1>"
         f"<h2>Summary</h2><table><tr><th>metric</th><th>value</th></tr>{summary_table}</table>"
         f"{delivery_table}"
-        f"<pre>{html.escape(json.dumps(result, ensure_ascii=False, indent=2))}</pre>"
+        f"<pre>{html.escape(json.dumps(redacted_result, ensure_ascii=False, default=str, indent=2))}</pre>"
         f"<p><a href='{_admin_url('/admin/searches', api_key)}'>Back</a></p>"
     )
     return _render_page('Run once', body)

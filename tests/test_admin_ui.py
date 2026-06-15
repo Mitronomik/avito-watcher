@@ -3,6 +3,7 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
+
 from sqlalchemy import create_engine, select, func
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -16,6 +17,36 @@ from app.models.listing_analysis import ListingAnalysis
 from app.models.human_review import HumanReview, HumanReviewAction, InvestmentDecision
 from app.models.search_job import SearchJob
 from app.parsers.errors import ParserError, ParserErrorType
+
+
+class AdminTestClient(TestClient):
+    def get(self, url, *args, **kwargs):
+        if "headers" not in kwargs and str(url) != "/admin?api_key=secret":
+            kwargs["headers"] = {"X-API-Key": "read"}
+        return super().get(url, *args, **kwargs)
+
+    def post(self, url, *args, **kwargs):
+        data = kwargs.get("data")
+        headers = {**kwargs.get("headers", {}), "X-API-Key": "tech"}
+        kwargs["headers"] = headers
+        if data is None:
+            data = {}
+        if isinstance(data, dict) and "confirm_action" not in data:
+            path = str(url).split("?", 1)[0]
+            if path == "/admin/searches":
+                data = {**data, "confirm_action": "create_search"}
+            elif path.endswith("/activate"):
+                data = {**data, "confirm_action": "activate_search"}
+            elif path.endswith("/deactivate"):
+                data = {**data, "confirm_action": "deactivate_search"}
+            elif path.endswith("/reset-baseline"):
+                data = {**data, "confirm_action": "reset_baseline"}
+            elif path.endswith("/run-once"):
+                data = {**data, "confirm_action": "run_once"}
+            elif "/admin/searches/" in path:
+                data = {**data, "confirm_action": "edit_search"}
+            kwargs["data"] = data
+        return super().post(url, *args, **kwargs)
 
 
 def test_create_app_default_admin_routes_disabled():
@@ -39,6 +70,26 @@ def test_admin_root_disabled_and_enabled_with_header_key(monkeypatch):
 
 
 def make_client(monkeypatch, *, technical_ops_enabled: bool = True, allow_query_api_key: bool = True):
+    client, Session = make_raw_client(
+        monkeypatch,
+        technical_ops_enabled=technical_ops_enabled,
+        allow_query_api_key=allow_query_api_key,
+        client_cls=AdminTestClient,
+    )
+    return client, Session
+
+
+def make_raw_client(
+    monkeypatch,
+    *,
+    technical_ops_enabled: bool = True,
+    allow_query_api_key: bool = False,
+    technical_write_key: str = "tech",
+    read_key: str = "read",
+    write_key: str = "write",
+    api_key: str = "legacy",
+    client_cls=TestClient,
+):
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -49,12 +100,16 @@ def make_client(monkeypatch, *, technical_ops_enabled: bool = True, allow_query_
         with Session() as s:
             yield s
 
-    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "api_key", api_key)
+    monkeypatch.setattr(settings, "admin_ui_read_key", read_key)
+    monkeypatch.setattr(settings, "admin_ui_write_key", write_key)
     monkeypatch.setattr(settings, "admin_ui_technical_ops_enabled", technical_ops_enabled)
     monkeypatch.setattr(settings, "admin_ui_allow_query_api_key", allow_query_api_key)
+    monkeypatch.setattr(settings, "admin_ui_technical_write_key", technical_write_key)
     test_app = create_app(admin_ui_enabled=True)
     test_app.dependency_overrides[db_session_module.get_db] = override_db
-    return TestClient(test_app), Session
+    client = client_cls(test_app)
+    return client, Session
 
 
 def create_job(Session, name="test_job"):
@@ -1276,7 +1331,7 @@ def test_pr19a_query_api_key_disabled_by_default(monkeypatch):
     client, _ = make_client(monkeypatch, allow_query_api_key=False)
     monkeypatch.setattr(settings, "api_key", "secret")
     assert client.get("/admin?api_key=secret").status_code == 403
-    assert client.get("/admin", headers={"X-API-Key": "secret"}).status_code == 200
+    assert client.get("/admin", headers={"X-API-Key": "read"}).status_code == 200
 
 
 def test_pr19a_redaction_helpers():
@@ -1284,6 +1339,154 @@ def test_pr19a_redaction_helpers():
     rendered = redact_admin_json({"smtp_password": "secret", "url": "https://script.google.com/macros/s/abc/exec"})
     assert "secret" not in rendered
     assert "https://script.google.com/.../exec" in rendered
+    assert "123" not in redact_admin_json({"api_key": 123})
+    token_bool = redact_admin_json({"token": True})
+    assert "true" not in token_bool.lower()
+    url_redacted = redact_admin_json({"url": "https://example.com/hook?token=secret&api_key=123&password=pw&safe=ok"})
+    assert "secret" not in url_redacted
+    assert "123" not in url_redacted
+    assert "pw" not in url_redacted
+    assert "safe=ok" in url_redacted
+
+
+def _valid_create_payload(**extra):
+    payload = {
+        "name": "raw_job",
+        "source_url": "https://www.avito.ru/a",
+        "poll_interval_sec": "180",
+        "confirm_action": "create_search",
+    }
+    payload.update(extra)
+    return payload
+
+
+def test_pr19d_raw_client_technical_ops_disabled_and_read_only_pages(monkeypatch):
+    client, Session = make_raw_client(monkeypatch, technical_ops_enabled=False, allow_query_api_key=False)
+    job_id = create_job(Session, name="disabled_job")
+    listing_id = create_listing(Session, external_id="disabled-listing")
+
+    read_headers = {"X-API-Key": "read"}
+    tech_headers = {"X-API-Key": "tech"}
+    assert client.get("/admin/searches/new", headers=read_headers).status_code == 403
+    assert client.get(f"/admin/searches/{job_id}/edit", headers=read_headers).status_code == 403
+    assert client.post("/admin/searches", headers=tech_headers, data=_valid_create_payload()).status_code == 403
+    assert client.post(f"/admin/searches/{job_id}", headers=tech_headers, data={**_valid_create_payload(name="disabled_job"), "confirm_action": "edit_search"}).status_code == 403
+    assert client.post(f"/admin/searches/{job_id}/activate", headers=tech_headers, data={"confirm_action": "activate_search"}).status_code == 403
+    assert client.post(f"/admin/searches/{job_id}/deactivate", headers=tech_headers, data={"confirm_action": "deactivate_search"}).status_code == 403
+    assert client.post(f"/admin/searches/{job_id}/reset-baseline", headers=tech_headers, data={"confirm_action": "reset_baseline"}).status_code == 403
+    assert client.post(f"/admin/searches/{job_id}/run-once", headers=tech_headers, data={"confirm_action": "run_once"}).status_code == 403
+    for path in ("/admin", "/admin/searches", "/admin/evidence", "/admin/agents", "/admin/outcome-analytics", f"/admin/listings/{listing_id}"):
+        assert client.get(path, headers=read_headers).status_code == 200
+
+
+def test_pr19d_raw_client_key_separation_form_key_duplicates_and_query_auth(monkeypatch):
+    client, Session = make_raw_client(monkeypatch, technical_ops_enabled=True, allow_query_api_key=False)
+    read_headers = {"X-API-Key": "read"}
+    write_headers = {"X-API-Key": "write"}
+    tech_headers = {"X-API-Key": "tech"}
+
+    assert client.post("/admin/searches", headers=read_headers, data=_valid_create_payload(name="read_blocked")).status_code == 403
+    assert client.post("/admin/searches", headers=write_headers, data=_valid_create_payload(name="write_blocked")).status_code == 403
+    assert client.post("/admin/searches?api_key=tech", data=_valid_create_payload(name="query_blocked")).status_code == 403
+
+    ok = client.post("/admin/searches", headers=tech_headers, data=_valid_create_payload(name="header_ok"), follow_redirects=False)
+    assert ok.status_code == 303
+    form_ok = client.post(
+        "/admin/searches",
+        data=_valid_create_payload(name="form_ok", admin_technical_write_key="tech"),
+        follow_redirects=False,
+    )
+    assert form_ok.status_code == 303
+    duplicate = client.post(
+        "/admin/searches",
+        headers=tech_headers,
+        content="name=dup_key&source_url=https%3A%2F%2Fwww.avito.ru%2Fa&poll_interval_sec=180&confirm_action=create_search&admin_technical_write_key=tech&admin_technical_write_key=tech",
+        follow_redirects=False,
+    )
+    assert duplicate.status_code == 403
+    with Session() as s:
+        names = {job.name: job for job in s.query(SearchJob).all()}
+        assert "header_ok" in names
+        assert "form_ok" in names
+        assert "read_blocked" not in names
+        assert "write_blocked" not in names
+        assert "query_blocked" not in names
+        assert "dup_key" not in names
+        assert "admin_technical_write_key" not in (names["form_ok"].filters_json or {})
+
+    query_client, _ = make_raw_client(monkeypatch, technical_ops_enabled=True, allow_query_api_key=True)
+    query_ok = query_client.post("/admin/searches?api_key=tech", data=_valid_create_payload(name="query_ok"), follow_redirects=False)
+    assert query_ok.status_code == 303
+
+
+def test_pr19d_raw_client_confirmation_required_and_no_key_leak(monkeypatch):
+    client, Session = make_raw_client(monkeypatch, technical_ops_enabled=True, allow_query_api_key=False, technical_write_key="raw-form-secret")
+    job_id = create_job(Session, name="confirm_job")
+    tech_headers = {"X-API-Key": "raw-form-secret"}
+
+    missing = client.post(f"/admin/searches/{job_id}/deactivate", headers=tech_headers)
+    wrong = client.post(f"/admin/searches/{job_id}/deactivate", headers=tech_headers, data={"confirm_action": "activate_search"})
+    assert missing.status_code == 400
+    assert wrong.status_code == 400
+    with Session() as s:
+        assert s.get(SearchJob, job_id).is_active is True
+
+    ok = client.post(f"/admin/searches/{job_id}/deactivate", headers=tech_headers, data={"confirm_action": "deactivate_search"}, follow_redirects=False)
+    assert ok.status_code == 303
+    with Session() as s:
+        assert s.get(SearchJob, job_id).is_active is False
+
+    secret = "raw-form-secret"
+    error_page = client.post(
+        "/admin/searches",
+        data=_valid_create_payload(name="leak_test", source_url="https://example.com/not-avito", admin_technical_write_key=secret),
+    )
+    assert error_page.status_code == 200
+    assert "valid avito.ru URL" in error_page.text
+    assert secret not in error_page.text
+    assert "admin_technical_write_key" in error_page.text
+    with Session() as s:
+        assert s.query(SearchJob).filter_by(name="leak_test").first() is None
+
+
+def test_pr19d_raw_client_run_once_auth_confirmation_and_redaction(monkeypatch):
+    client, Session = make_raw_client(monkeypatch, technical_ops_enabled=True, allow_query_api_key=False)
+    job_id = create_job(Session, name="runonce_job")
+    calls = []
+
+    def fail_build_parser():
+        raise AssertionError("parser must not be built before auth and confirmation pass")
+
+    monkeypatch.setattr("app.admin._build_parser", fail_build_parser)
+    assert client.post(f"/admin/searches/{job_id}/run-once", headers={"X-API-Key": "bad"}, data={"confirm_action": "run_once"}).status_code == 403
+    assert client.post(f"/admin/searches/{job_id}/run-once", headers={"X-API-Key": "tech"}).status_code == 400
+
+    class FakeService:
+        def __init__(self, parser=None):
+            calls.append(("init", parser))
+
+        def run_once(self, search_id):
+            calls.append(("run_once", search_id))
+            return {
+                "ok": True,
+                "webhook_url": "https://example.com/hook?token=secret",
+                "telegram_token": "secret",
+                "headers": {"Authorization": "Bearer secret"},
+                "smtp_password": "secret",
+                "nested": {"api_key": 123, "token": True},
+                "parser_stats": {},
+            }
+
+    monkeypatch.setattr("app.admin._build_parser", lambda: object())
+    monkeypatch.setattr("app.admin.MonitorService", FakeService)
+    response = client.post(f"/admin/searches/{job_id}/run-once", headers={"X-API-Key": "tech"}, data={"confirm_action": "run_once"})
+    assert response.status_code == 200
+    assert calls and calls[-1] == ("run_once", job_id)
+    text = response.text
+    assert "secret" not in text
+    assert "Bearer" not in text
+    assert "123" not in text
+    assert '&quot;token&quot;: true' not in text.lower()
 
 
 def test_listing_detail_human_review_workflow_and_safety(monkeypatch):
