@@ -125,7 +125,7 @@ def test_redacting_formatter_sanitizes_final_output_and_exception_traceback():
     assert_not_leaked(output, "fake-secret-deployment-id", "fake-token", "fake-arg-token")
 
 
-def test_redacting_filter_sanitizes_record_message_and_args_without_mutating_originals():
+def test_redacting_filter_is_noop_and_does_not_mutate_msg_or_args():
     secret_args = {"url": APP_SCRIPT_EXEC, "token": "fake-dict-token"}
     record = logging.LogRecord(
         "tests.redacting.filter",
@@ -139,10 +139,47 @@ def test_redacting_filter_sanitizes_record_message_and_args_without_mutating_ori
 
     RedactingFilter().filter(record)
 
-    assert "fake-secret-deployment-id" not in str(record.args)
-    assert "fake-dict-token" not in str(record.args)
+    assert record.msg == "request %s %(token)s"
+    assert record.args is secret_args
     assert secret_args["url"] == APP_SCRIPT_EXEC
     assert secret_args["token"] == "fake-dict-token"
+
+
+def test_installed_redaction_does_not_break_percent_style_formatting(capsys):
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    root = logging.getLogger()
+    old_handlers = root.handlers[:]
+    old_level = root.level
+    try:
+        root.handlers = [handler]
+        root.setLevel(logging.INFO)
+        install_log_redaction()
+        logging.getLogger("tests.redacting.regression").info(
+            "monitor_service.cycle_summary proxy_failures=%s", 0
+        )
+    finally:
+        root.handlers = old_handlers
+        root.setLevel(old_level)
+
+    output = stream.getvalue()
+    captured = capsys.readouterr()
+    assert "monitor_service.cycle_summary proxy_failures=0" in output
+    combined = output + captured.out + captured.err
+    assert "Message:" not in combined
+    assert "Arguments:" not in combined
+    assert "Logging error" not in combined
+
+
+def test_sanitizer_preserves_operational_counters():
+    text = (
+        "proxy_success_count=1 proxy_failure_count=2 "
+        "proxy_quarantine_on_failure_count=3 proxy_failures=0 "
+        "searches_processed=4 sessions_opened=5"
+    )
+
+    assert sanitize_log_text(text) == text
 
 
 def test_installed_redaction_wraps_brace_style_formatter():
