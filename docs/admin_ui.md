@@ -348,3 +348,16 @@ Deployment requires applying the new migration `0016_monitor_cycle_runs` before 
 Runtime logs redact known sensitive external URL fragments, Apps Script deployment IDs, Google macro echo query tokens, authorization fragments, and common secret query/key-value patterns. This affects log rendering only and does not mutate configured delivery URLs or HTTP requests.
 
 Use fake values only when testing log redaction, for example `https://script.google.com/macros/s/fake-deployment-id/exec?token=fake-token`; rendered logs should keep useful host/path context while replacing sensitive fragments with redaction markers.
+
+## Backup / restore / retention readiness
+
+`/admin/system` includes a read-only **Backup / restore / retention readiness** section for PR22a. It links operators to the repository-relative policy path `docs/ops/backup_restore_retention_policy.md` and reports safe readiness values only:
+
+- restore procedure: documented;
+- retention mode: policy-only;
+- retention execution: disabled / not implemented;
+- retention dry-run: not implemented;
+- latest backup: unknown unless a future safe metadata source is explicitly added;
+- backup metadata source: not configured.
+
+The section does not execute backups, does not execute restore, does not execute retention, and does not provide forms or action buttons. No migration is expected for this read-only policy/readiness change. The Admin UI must not show secrets, raw environment values, webhook URLs, backup credentials, or sensitive absolute host paths in this section.
