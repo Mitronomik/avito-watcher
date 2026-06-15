@@ -8,6 +8,7 @@ from app.models.listing import Listing
 from app.models.listing_snapshot import ListingSnapshot
 from app.models.alert_sent import AlertSent
 from app.models.alert_delivery_attempt import AlertDeliveryAttempt
+from app.models.admin_audit_event import AdminAuditEvent
 from app.models.listing_analysis import ListingAnalysis
 from app.models.listing_search_match import ListingSearchMatch
 from app.models.agent_task import AgentTask

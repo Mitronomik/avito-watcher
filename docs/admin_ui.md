@@ -369,3 +369,21 @@ The section does not execute backups, does not execute restore, does not execute
 This dry-run report does not implement retention execution. It has no forms, buttons, POST actions, detail pages, candidate row lists, row IDs, URLs, payload JSON, generated DELETE/ARCHIVE SQL, or scheduler. Retention execution remains `disabled / not implemented`, while retention dry-run visibility is `available / read-only`.
 
 Dry-run semantics are intentionally strict: `0` means measured zero; `unknown` means the metric could not be measured safely; `not_supported` means clear timestamp/status semantics are missing. Candidate counts do not imply approval for deletion or archive. The required progression is: policy -> dry-run report -> backup precondition -> explicit operator approval -> gated execution -> audit trail -> rollback/restore plan.
+
+## Admin audit log ledger
+
+PR23a adds a minimal persistent admin audit ledger in the `admin_audit_events` table. It does **not** add users, RBAC, login, sessions, or any change to the current admin API key behavior.
+
+The first audited action is only the manual alert delivery retry POST:
+
+```text
+POST /admin/alerts/delivery-attempts/{attempt_id}/retry
+```
+
+Read-only GET page views, including `GET /admin/system`, are not audited and remain read-only. Audit writes are best-effort and isolated from the original admin action transaction, so an audit insert failure must not change retry behavior, rollback retry delivery rows, or change the HTTP response.
+
+Audit status describes the admin action handling outcome (`success`, `failed`, or `blocked`) and is separate from the alert delivery domain result. For manual retry, the delivery result is stored only as allowlisted metadata such as `retry_result_status` (`success`, `failed`, `skipped`, or `unknown`).
+
+Audit events intentionally do not store secrets, headers, request bodies, raw form payloads, cookies, API keys, payload JSON, raw URLs, raw IP addresses, or raw user-agent strings. Request paths store only `request.url.path` without query strings. Metadata is allowlisted for the audited action.
+
+`/admin/system` shows a compact read-only “Recent admin audit events” section with the latest 20 events and safe scalar columns only. Future PRs may expand audit coverage before adding retention execution or stronger RBAC/access-control features.

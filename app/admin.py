@@ -29,6 +29,7 @@ from app.models.human_review import HUMAN_VERDICTS, NEXT_ACTIONS, OUTCOME_STATUS
 from app.models.agent_task import AgentTask
 from app.models.market_evidence import MarketEvidenceItem, MarketResearchRun
 from app.models.monitor_cycle_run import MonitorCycleRun
+from app.models.admin_audit_event import AdminAuditEvent
 from app.schemas.outcome_analytics import OutcomeAnalyticsRequest
 from app.services.outcome_analytics import HumanOutcomeAnalyticsService
 from app.parsers.errors import ParserError
@@ -41,6 +42,7 @@ from app.utils.formatting import build_listing_message
 from app.services.alert_delivery_attempts import compute_alert_payload_hash
 from app.services.alert_delivery_attempts import sanitize_alert_delivery_error
 from app.services.retention_dry_run import get_retention_dry_run_report
+from app.services.admin_audit import record_admin_audit_event
 from app.services.human_reviews import HumanReviewService, HumanReviewValidationError, build_review_context_key
 from app.workers.status import PARSER_STATUS_FIELDS, read_worker_status, summarize_worker_status
 
@@ -481,6 +483,80 @@ def _delivery_badge(attempted: int, unsuccessful: int, failed: int, unknown: int
         return _badge("success", "green")
     return _badge("warning", "yellow")
 
+
+
+def _manual_retry_audit_reason(detail: object) -> str:
+    text = str(detail or "").lower()
+    if "technical operations are disabled" in text:
+        return "technical_ops_disabled"
+    if "invalid technical admin key" in text or "technical write key is not configured" in text:
+        return "invalid_technical_key"
+    if "confirmation required" in text:
+        return "missing_confirmation"
+    if "only failed, skipped, or unknown" in text:
+        return "not_retryable"
+    if "matching alertsent already exists" in text:
+        return "matching_alert_sent_exists"
+    if "listing is missing" in text:
+        return "missing_listing"
+    if "dedupe key does not match" in text or "dedupe key is empty" in text or "channel is empty" in text:
+        return "dedupe_mismatch"
+    if "invalid attempt_id" in text:
+        return "invalid_attempt_id"
+    if "not found" in text:
+        return "attempt_not_found"
+    return "wrong_confirmation" if "confirm" in text else "not_retryable"
+
+
+def _audit_retry_metadata(
+    *,
+    reason: str | None = None,
+    retry_result_status: str | None = None,
+    source_attempt: AlertDeliveryAttempt | None = None,
+    source_attempt_id: int | None = None,
+    created_attempt_id: int | None = None,
+    alert_sent_created: bool | None = None,
+) -> dict[str, object]:
+    metadata: dict[str, object] = {}
+    if reason:
+        metadata["reason"] = reason
+    if retry_result_status:
+        metadata["retry_result_status"] = retry_result_status
+    if source_attempt is not None:
+        metadata["source_attempt_id"] = source_attempt.id
+        metadata["channel"] = source_attempt.channel
+        metadata["listing_external_id"] = source_attempt.listing_external_id
+        metadata["target_attempt_status"] = source_attempt.status
+    elif source_attempt_id is not None:
+        metadata["source_attempt_id"] = source_attempt_id
+    if created_attempt_id is not None:
+        metadata["created_attempt_id"] = created_attempt_id
+    if alert_sent_created is not None:
+        metadata["alert_sent_created"] = alert_sent_created
+    return metadata
+
+
+def _record_retry_audit(
+    db: Session,
+    request: Request,
+    *,
+    attempt_id: int,
+    status_value: str,
+    metadata: dict[str, object] | None = None,
+    error_type: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    record_admin_audit_event(
+        db,
+        action="alert_delivery_retry",
+        status=status_value,
+        target_type="alert_delivery_attempt",
+        target_id=str(attempt_id),
+        request=request,
+        metadata=metadata,
+        error_type=error_type,
+        error_message=error_message,
+    )
 
 async def _parse_form(request: Request) -> dict[str, str]:
     data = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
@@ -1398,6 +1474,13 @@ def admin_system(request: Request, db: Session = Depends(get_db)):
         f"<tr><td>{a.id}</td><td>{display_datetime(a.created_at)}</td><td>{_safe_cell(a.channel, 'channel')}</td><td>{_safe_cell(a.listing_external_id, 'listing_external_id')}</td><td>{_safe_cell(a.status, 'status')}</td><td>{_safe_cell(a.error_type or '—', 'error_type')}</td><td>{html.escape(_redact_alert_error(a.last_error, 220))}</td><td><a href='{_html_attr(_admin_url(f'/admin/alerts/delivery-attempts/{a.id}', api_key))}'>details</a></td></tr>"
         for a in recent_delivery
     ) or "<tr><td colspan='8'>No recent failed or unknown attempts.</td></tr>"
+    recent_audit_events = db.scalars(
+        select(AdminAuditEvent).order_by(AdminAuditEvent.created_at.desc(), AdminAuditEvent.id.desc()).limit(20)
+    ).all()
+    audit_rows = "".join(
+        f"<tr><td>{display_datetime(e.created_at)}</td><td>{_safe_cell(e.actor_kind, 'actor_kind')}</td><td>{_safe_cell(e.action, 'action')}</td><td>{_safe_cell(e.target_type or '—', 'target_type')}</td><td>{_safe_cell(e.target_id or '—', 'target_id')}</td><td>{_safe_cell(e.status, 'status')}</td><td>{_safe_cell(e.error_type or '—', 'error_type')}</td><td>{_safe_cell(e.error_message or '—', 'error_message', 160)}</td></tr>"
+        for e in recent_audit_events
+    ) or "<tr><td colspan='8'>No admin audit events yet.</td></tr>"
     manual_retry_count = db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.search_name.like("manual_retry%"))) or 0
 
     failed_tasks = db.scalars(select(AgentTask).where(AgentTask.status == "failed").order_by(AgentTask.updated_at.desc(), AgentTask.id.desc()).limit(20)).all()
@@ -1429,6 +1512,7 @@ def admin_system(request: Request, db: Session = Depends(get_db)):
         "listing_enrichments": _count_model(db, ListingEnrichment),
         "knowledge_notes": _count_model(db, KnowledgeNote),
         "search_jobs": _count_model(db, SearchJob),
+        "admin_audit_events": _count_model(db, AdminAuditEvent),
     }
     try:
         alembic_rows = db.execute(select(text("version_num")).select_from(text("alembic_version"))).all()
@@ -1448,6 +1532,7 @@ def admin_system(request: Request, db: Session = Depends(get_db)):
         f"<section class='section'><h2>Alert Delivery health</h2><p>delivery attempts total: {_count_model(db, AlertDeliveryAttempt)}; last 24h: {sum(status_24h.values())}; last 7d: {sum(status_7d.values())}; failed 24h/7d: {status_24h.get('failed', 0)}/{status_7d.get('failed', 0)}; unknown 24h/7d: {status_24h.get('unknown', 0)}/{status_7d.get('unknown', 0)}; manual_retry attempts: {manual_retry_count}; alerts_sent total: {_count_model(db, AlertSent)}</p><p>status counts 24h: {_render_counts(status_24h)}<br>status counts 7d: {_render_counts(status_7d)}<br>channel counts 24h: {_render_counts(channel_24h)}<br>channel counts 7d: {_render_counts(channel_7d)}<br>alerts_sent by channel: {_render_counts(_group_counts(db, AlertSent, AlertSent.channel))}</p>{delivery_integrity_html}</section>"
         f"{monitor_cycle_history_html}"
         f"<section class='section'><h2>Recent failed delivery attempts</h2><table><tr><th>id</th><th>created_at</th><th>channel</th><th>listing_external_id</th><th>status</th><th>error_type</th><th>last_error</th><th>detail</th></tr>{delivery_rows}</table></section>"
+        f"<section class='section'><h2>Recent admin audit events</h2><p class='preview'>Read-only compact audit ledger. Metadata, request bodies, headers, cookies, API keys, raw IPs, and raw user-agents are not shown.</p><table><tr><th>created_at</th><th>actor_kind</th><th>action</th><th>target_type</th><th>target_id</th><th>status</th><th>error_type</th><th>error_message</th></tr>{audit_rows}</table></section>"
         f"<section class='section'><h2>Agent tasks</h2><p>total: {_count_model(db, AgentTask)}; by status: {_render_counts(_group_counts(db, AgentTask, AgentTask.status))}; by task_type/status: {_render_counts({f'{r[0]}/{r[1]}': r[2] for r in db.execute(select(AgentTask.task_type, AgentTask.status, func.count()).group_by(AgentTask.task_type, AgentTask.status)).all()})}; stuck running older than 2h: {stuck_tasks}</p><table><tr><th>id</th><th>task_type</th><th>status</th><th>error_type</th><th>created_at</th><th>updated_at</th><th>started_at</th><th>finished_at</th></tr>{task_rows}</table></section>"
         f"<section class='section'><h2>Analysis summary</h2><p>total: {_count_model(db, ListingAnalysis)}; by status: {_render_counts(_group_counts(db, ListingAnalysis, ListingAnalysis.status))}; by profile/status: {_render_counts({f'{r[0]}/{r[1]}': r[2] for r in db.execute(select(ListingAnalysis.profile, ListingAnalysis.status, func.count()).group_by(ListingAnalysis.profile, ListingAnalysis.status)).all()})}</p><table><tr><th>id</th><th>listing_external_id</th><th>profile</th><th>status</th><th>error_type</th><th>error</th><th>created_at</th><th>updated_at</th></tr>{analysis_rows}</table></section>"
         f"<section class='section'><h2>Data volume summary</h2><ul>{volume_items}</ul></section>"
@@ -1686,23 +1771,121 @@ def alert_delivery_attempt_detail(request: Request, attempt_id: int, db: Session
 @router.post('/alerts/delivery-attempts/{attempt_id}/retry', dependencies=[Depends(_require_admin_api_key)])
 async def retry_alert_delivery_attempt(request: Request, attempt_id: int, db: Session = Depends(get_db)):
     if attempt_id <= 0:
+        _record_retry_audit(
+            db,
+            request,
+            attempt_id=attempt_id,
+            status_value="blocked",
+            metadata=_audit_retry_metadata(reason="invalid_attempt_id", source_attempt_id=attempt_id),
+        )
         raise HTTPException(status_code=400, detail="Invalid attempt_id")
-    form, raw_form = await _parse_mutable_form(request)
-    _require_technical_write_form(request, form, raw_form)
-    _require_technical_confirmation(form, f"retry_delivery_attempt_{attempt_id}")
-    attempt = db.get(AlertDeliveryAttempt, attempt_id)
-    if attempt is None:
-        raise HTTPException(status_code=404, detail="Delivery attempt not found")
-    eligible, reason, listing = _manual_retry_eligibility(db, attempt)
-    if not eligible or listing is None:
-        raise HTTPException(status_code=400, detail=reason)
-    if _matching_alert_sent(db, attempt) is not None:
-        raise HTTPException(status_code=400, detail="Matching AlertSent already exists")
-    result = await _retry_single_delivery_channel(db, attempt=attempt, listing=listing)
-    api_key = request.query_params.get("api_key")
-    redirect_url = _admin_url(f"/admin/alerts/delivery-attempts/{attempt.id}", api_key)
-    separator = "&" if "?" in redirect_url else "?"
-    return RedirectResponse(f"{redirect_url}{separator}retry_{result}=1", status_code=303)
+    attempt: AlertDeliveryAttempt | None = None
+    audit_recorded = False
+    try:
+        form, raw_form = await _parse_mutable_form(request)
+        try:
+            _require_technical_write_form(request, form, raw_form)
+        except HTTPException as exc:
+            _record_retry_audit(
+                db,
+                request,
+                attempt_id=attempt_id,
+                status_value="blocked",
+                metadata=_audit_retry_metadata(reason=_manual_retry_audit_reason(exc.detail), source_attempt_id=attempt_id),
+            )
+            audit_recorded = True
+            raise
+        try:
+            _require_technical_confirmation(form, f"retry_delivery_attempt_{attempt_id}")
+        except HTTPException as exc:
+            _record_retry_audit(
+                db,
+                request,
+                attempt_id=attempt_id,
+                status_value="blocked",
+                metadata=_audit_retry_metadata(reason=_manual_retry_audit_reason(exc.detail), source_attempt_id=attempt_id),
+            )
+            audit_recorded = True
+            raise
+        attempt = db.get(AlertDeliveryAttempt, attempt_id)
+        if attempt is None:
+            _record_retry_audit(
+                db,
+                request,
+                attempt_id=attempt_id,
+                status_value="blocked",
+                metadata=_audit_retry_metadata(reason="attempt_not_found", source_attempt_id=attempt_id),
+            )
+            audit_recorded = True
+            raise HTTPException(status_code=404, detail="Delivery attempt not found")
+        eligible, reason, listing = _manual_retry_eligibility(db, attempt)
+        if not eligible or listing is None:
+            _record_retry_audit(
+                db,
+                request,
+                attempt_id=attempt_id,
+                status_value="blocked",
+                metadata=_audit_retry_metadata(reason=_manual_retry_audit_reason(reason), source_attempt=attempt),
+            )
+            audit_recorded = True
+            raise HTTPException(status_code=400, detail=reason)
+        if _matching_alert_sent(db, attempt) is not None:
+            _record_retry_audit(
+                db,
+                request,
+                attempt_id=attempt_id,
+                status_value="blocked",
+                metadata=_audit_retry_metadata(reason="matching_alert_sent_exists", source_attempt=attempt),
+            )
+            audit_recorded = True
+            raise HTTPException(status_code=400, detail="Matching AlertSent already exists")
+        before_sent = db.scalar(select(func.count()).select_from(AlertSent).where(AlertSent.dedupe_key == attempt.dedupe_key, AlertSent.listing_external_id == attempt.listing_external_id, AlertSent.channel == attempt.channel)) or 0
+        result = await _retry_single_delivery_channel(db, attempt=attempt, listing=listing)
+        created_attempt_id = db.scalar(
+            select(func.max(AlertDeliveryAttempt.id)).where(
+                AlertDeliveryAttempt.dedupe_key == attempt.dedupe_key,
+                AlertDeliveryAttempt.channel == attempt.channel,
+                AlertDeliveryAttempt.id != attempt.id,
+            )
+        )
+        after_sent = db.scalar(select(func.count()).select_from(AlertSent).where(AlertSent.dedupe_key == attempt.dedupe_key, AlertSent.listing_external_id == attempt.listing_external_id, AlertSent.channel == attempt.channel)) or 0
+        _record_retry_audit(
+            db,
+            request,
+            attempt_id=attempt_id,
+            status_value="success",
+            metadata=_audit_retry_metadata(
+                retry_result_status=result,
+                source_attempt=attempt,
+                created_attempt_id=created_attempt_id,
+                alert_sent_created=after_sent > before_sent,
+            ),
+        )
+        api_key = request.query_params.get("api_key")
+        redirect_url = _admin_url(f"/admin/alerts/delivery-attempts/{attempt.id}", api_key)
+        separator = "&" if "?" in redirect_url else "?"
+        return RedirectResponse(f"{redirect_url}{separator}retry_{result}=1", status_code=303)
+    except HTTPException as exc:
+        if not audit_recorded:
+            _record_retry_audit(
+                db,
+                request,
+                attempt_id=attempt_id,
+                status_value="blocked",
+                metadata=_audit_retry_metadata(reason=_manual_retry_audit_reason(exc.detail), source_attempt=attempt, source_attempt_id=attempt_id if attempt is None else None),
+            )
+        raise
+    except Exception as exc:
+        _record_retry_audit(
+            db,
+            request,
+            attempt_id=attempt_id,
+            status_value="failed",
+            metadata=_audit_retry_metadata(source_attempt=attempt, source_attempt_id=attempt_id if attempt is None else None),
+            error_type=exc.__class__.__name__,
+            error_message=str(exc),
+        )
+        raise
 
 
 
