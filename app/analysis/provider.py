@@ -11,6 +11,8 @@ from app.analysis.investment import calculate_investment_metrics
 from app.analysis.market_comps import (
     MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY,
     SelectedMarketEvidenceContext,
+    assess_comparable_quality,
+    comparable_quality_facts,
     estimate_market_rent,
 )
 from app.models.listing import Listing
@@ -1396,9 +1398,23 @@ class InvestmentAnalysisProvider:
         ):
             pre_flags.append("asset_type_profile_mismatch")
 
+        quality_assessment = (
+            assess_comparable_quality(
+                context=market_evidence_context,
+                expected_asset_type=self.expected_asset_type,
+                target_area_m2=listing.area_m2,
+                target_location_key=market_evidence_context.config.location_key,
+                as_of=market_evidence_context.retrieval_as_of_datetime,
+            )
+            if config.use_market_evidence is True
+            and market_evidence_context is not None
+            else None
+        )
         market_estimate = (
             estimate_market_rent(
-                context=market_evidence_context, area_m2=listing.area_m2
+                context=market_evidence_context,
+                area_m2=listing.area_m2,
+                quality_assessment=quality_assessment,
             )
             if config.use_market_evidence is True
             and market_evidence_context is not None
@@ -1495,8 +1511,13 @@ class InvestmentAnalysisProvider:
                 )
                 if rent_source == "market_evidence" and has_cross_listing:
                     market_flags.append("cross_listing_evidence_requires_human_review")
-                    market_flags.append("cross_listing_evidence_without_quality_score")
                     verdict_cap = _strongest_verdict_cap(verdict_cap, "medium")
+            if quality_assessment is not None:
+                market_flags.extend(quality_assessment.summary.review_reasons)
+            if (
+                market_evidence_context.config.matching_policy
+                == MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY
+            ):
                 if low_diversity:
                     market_flags.append("cross_listing_low_diversity")
                     if rent_source == "market_evidence":
@@ -1640,6 +1661,7 @@ class InvestmentAnalysisProvider:
                             config.estimated_monthly_rent,
                             rent_source == "market_evidence",
                             "cross_listing_low_diversity" in flags,
+                            quality_assessment,
                         )
                     }
                     if config.use_market_evidence is True
@@ -1833,6 +1855,7 @@ def _market_evidence_facts(
     manual_rent: float | None,
     used_as_rent_source: bool = False,
     low_diversity: bool = False,
+    quality_assessment=None,
 ) -> dict:
     facts = {
         "enabled": True,
@@ -1865,7 +1888,8 @@ def _market_evidence_facts(
         "location_key": context.config.location_key,
         "cross_listing_reuse_enabled": context.config.matching_policy
         == MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY,
-        "comp_quality_scoring_used": False,
+        "comp_quality_scoring_used": quality_assessment is not None,
+        **({"comparable_quality": comparable_quality_facts(quality_assessment)} if quality_assessment is not None else {}),
         "selected_listing_external_ids": [i.listing_external_id for i in context.items],
         "selected_same_listing_count": sum(
             1

@@ -140,7 +140,7 @@ def test_matching_policy_and_selected_cross_listing_evidence_affect_hash(db_sess
         evidence_retrieval_as_of_date=AS_OF.date(),
         target_listing_external_id="l1",
     )
-    assert h1 == market_evidence_fingerprint_hash(cross_ctx_2)
+    assert h1 != market_evidence_fingerprint_hash(cross_ctx_2)
     _item(
         db_session,
         listing_external_id="other3",

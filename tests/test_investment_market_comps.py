@@ -34,6 +34,7 @@ def _item(db, **kw):
         expires_at=(AS_OF + timedelta(days=1)).replace(tzinfo=None),
         content_hash=f"h{db.query(MarketEvidenceItem).count()}",
         rent_per_m2_rub=1000.0,
+        area_m2=50.0,
     )
     base.update(kw)
     obj = MarketEvidenceItem(**base)
@@ -455,11 +456,12 @@ def test_cross_listing_rent_source_is_capped_and_facted(db_session):
     assert result.verdict != "strong"
     assert result.verdict == "medium"
     assert "cross_listing_evidence_requires_human_review" in result.risks_json["flags"]
-    assert "cross_listing_evidence_without_quality_score" in result.risks_json["flags"]
+    assert result.facts_json["investment_metrics"]["market_evidence"]["comp_quality_scoring_used"] is True
     facts = result.facts_json["investment_metrics"]["market_evidence"]
     assert facts["matching_policy"] == "same_location_key"
     assert facts["cross_listing_reuse_enabled"] is True
-    assert facts["comp_quality_scoring_used"] is False
+    assert facts["comp_quality_scoring_used"] is True
+    assert facts["comparable_quality"]["comparable_quality_model_version"] == "v0"
     assert facts["cross_listing_verdict_cap_applied"] is True
     assert facts["selected_external_listing_count"] == 3
     assert any("cross-listing" in q for q in result.questions_json["items"])
@@ -529,3 +531,62 @@ def test_manual_primary_not_capped_by_missing_cross_listing_evidence(db_session)
     )
     assert result.facts_json["investment_metrics"]["rent_estimate_source"] == "manual"
     assert result.verdict == "strong"
+
+
+def test_weak_comparable_quality_caps_evidence_confidence_without_score_cap(db_session):
+    for n, rent in enumerate((50_000, 60_000, 70_000), start=1):
+        _item(
+            db_session,
+            listing_external_id="l1",
+            location_key="loc",
+            area_m2=75,
+            rent_per_m2_rub=None,
+            rent_rub_per_month=rent,
+            source_url=f"https://e.test/weak{n}",
+            source_url_normalized=f"https://e.test/weak{n}",
+            checked_at=(AS_OF - timedelta(days=45)).replace(tzinfo=None),
+            expires_at=(AS_OF + timedelta(days=1)).replace(tzinfo=None),
+        )
+    cfg = AnalysisConfig.from_search_filters(
+        "commercial_sale_investment",
+        {
+            "use_market_evidence": True,
+            "market_evidence_matching_policy": "same_listing",
+            "market_evidence_location_key": "loc",
+            "market_evidence_min_confidence": 0.3,
+            "market_evidence_max_age_days": 60,
+            "investment_purchase_price": 1_000_000,
+            "asset_type": "commercial",
+            "deal_type": "sale",
+            "opex_ratio": 0.1,
+            "vacancy_rate": 0,
+            "capex_initial": 0,
+            "min_gross_yield": 0.01,
+            "min_noi_yield": 0.01,
+            "max_payback_years": 10,
+        },
+    )
+    ctx = select_market_evidence(
+        candidates=db_session.query(MarketEvidenceItem).all(),
+        config=cfg,
+        expected_asset_type="commercial",
+        evidence_retrieval_as_of_datetime=AS_OF,
+        evidence_retrieval_as_of_date=AS_OF.date(),
+        target_listing_external_id="l1",
+    )
+    result = InvestmentAnalysisProvider("commercial_sale_investment").analyze(
+        listing=Listing(external_id="l1", title="x", area_m2=50),
+        snapshot=None,
+        input_hash="h",
+        config=cfg,
+        market_evidence_context=ctx,
+    )
+    market = result.facts_json["investment_metrics"]["market_evidence"]
+    quality = market["comparable_quality"]
+    assert result.score >= 80
+    assert result.verdict == "strong"
+    assert market["market_estimate_confidence"] == 0.35
+    assert quality["summary"]["evidence_confidence_cap"] == 0.35
+    assert quality["summary"]["force_review"] is True
+    assert "low_quality_comps_only" in quality["summary"]["review_reasons"]
+    assert "low_quality_comps_only" in result.risks_json["flags"]
