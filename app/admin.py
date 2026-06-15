@@ -1853,7 +1853,7 @@ async def retry_alert_delivery_attempt(request: Request, attempt_id: int, db: Se
             db,
             request,
             attempt_id=attempt_id,
-            status_value="success",
+            status_value="success" if result == "success" else "failed",
             metadata=_audit_retry_metadata(
                 retry_result_status=result,
                 source_attempt=attempt,

@@ -82,7 +82,7 @@ def test_manual_retry_non_success_and_blocked_audit_events(monkeypatch):
 
     with Session() as s:
         events = s.scalars(select(AdminAuditEvent).order_by(AdminAuditEvent.id)).all()
-        assert [e.status for e in events] == ["success", "blocked"]
+        assert [e.status for e in events] == ["failed", "blocked"]
         assert events[0].metadata_json["retry_result_status"] == "skipped"
         assert events[1].metadata_json["reason"] == "matching_alert_sent_exists"
         assert all(set(e.metadata_json) <= ALLOWED_RETRY_METADATA for e in events)
