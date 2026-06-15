@@ -23,7 +23,7 @@ QUALITY_LOW_THRESHOLD = 35
 QUALITY_STALE_DAYS = 30
 QUALITY_MAX_AGE_DAYS = 90
 QUALITY_PENALTIES = {
-    "missing_source_url": 20,
+    "missing_source_url": 30,
     "stale_evidence": 25,
     "area_unknown": 5,
     "area_band_mismatch": 20,
@@ -454,11 +454,14 @@ def _score_comp(*, item: MarketCompInput, expected_asset_type: str, target_area_
         return _rejected(item.id, "insufficient_data")
     if item.rent_per_m2_rub is None and item.rent_rub_per_month is None:
         return _rejected(item.id, "missing_rent_metric")
-    if not item.source_url_normalized:
-        return _penalized_result(item.id, 100 - QUALITY_PENALTIES["missing_source_url"], 100, ["missing_source_url"])
     score = 100
     similarity = 100
-    flags = ["source_url_present", "rent_metric_present"]
+    flags = ["rent_metric_present"]
+    if item.source_url_normalized:
+        flags.append("source_url_present")
+    else:
+        score -= QUALITY_PENALTIES["missing_source_url"]
+        flags.append("missing_source_url")
     age_days = (as_of - item.checked_at.astimezone(UTC)).days
     if age_days > QUALITY_MAX_AGE_DAYS:
         return _rejected(item.id, "stale_evidence")

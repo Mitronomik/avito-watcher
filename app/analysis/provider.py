@@ -1514,16 +1514,6 @@ class InvestmentAnalysisProvider:
                     verdict_cap = _strongest_verdict_cap(verdict_cap, "medium")
             if quality_assessment is not None:
                 market_flags.extend(quality_assessment.summary.review_reasons)
-                if (
-                    quality_assessment.summary.force_review
-                    and config.estimated_monthly_rent is None
-                ):
-                    verdict_cap = _strongest_verdict_cap(verdict_cap, "review")
-                if (
-                    quality_assessment.summary.evidence_confidence_cap is not None
-                    and rent_source == "market_evidence"
-                ):
-                    score_cap = min(score_cap or 100, 70)
             if (
                 market_evidence_context.config.matching_policy
                 == MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY

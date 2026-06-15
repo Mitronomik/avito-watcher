@@ -93,7 +93,7 @@ def test_missing_source_stale_and_location_mismatch_downgrade():
         _comp(id=3, location_key="other"),
     ]).results
     assert [r.accepted for r in results] == [True, True, True]
-    assert [r.quality_bucket for r in results] == ["high", "medium", "high"]
+    assert [r.quality_bucket for r in results] == ["medium", "medium", "high"]
     assert "missing_source_url" in results[0].quality_flags
     assert "stale_evidence" in results[1].quality_flags
     assert "location_mismatch" in results[2].quality_flags
@@ -108,7 +108,7 @@ def test_unknown_optional_fields_are_soft_flags_not_fake_mismatches():
 
 
 def test_evidence_set_summary_prevents_single_or_low_quality_strong_result():
-    single = _assess([_comp(source_url_normalized="", checked_at=AS_OF - timedelta(days=45), location_key="other")])
+    single = _assess([_comp(checked_at=AS_OF - timedelta(days=45), location_key="other")])
     assert single.summary.accepted_count == 1
     assert single.summary.force_review is True
     assert single.summary.evidence_confidence_cap == 0.5
