@@ -10,7 +10,6 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security, status
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.security import APIKeyHeader
 from sqlalchemy import func, or_, select, text, tuple_
 from sqlalchemy.orm import Session, raiseload
 
@@ -43,12 +42,12 @@ from app.services.alert_delivery_attempts import compute_alert_payload_hash
 from app.services.alert_delivery_attempts import sanitize_alert_delivery_error
 from app.services.retention_dry_run import get_retention_dry_run_report
 from app.services.admin_audit import record_admin_audit_event
+from app.services.admin_auth import admin_api_key_header, require_admin_read_access, require_admin_technical_access
 from app.services.human_reviews import HumanReviewService, HumanReviewValidationError, build_review_context_key
 from app.workers.status import PARSER_STATUS_FIELDS, read_worker_status, summarize_worker_status
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,120}$")
 FRESHNESS_PRESETS = {"12": 12.0, "24": 24.0, "48": 48.0, "72": 72.0}
-_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 UI_TEXT = {
@@ -186,43 +185,15 @@ def display_datetime(value: object) -> str:
     return "—" if not value else html.escape(str(value))
 
 
-def _configured_read_key() -> str:
-    return settings.admin_ui_read_key or settings.admin_ui_write_key or settings.admin_ui_technical_write_key or settings.api_key
-
 def _configured_write_key() -> str:
     return settings.admin_ui_write_key or settings.admin_ui_read_key or settings.api_key
 
-def _configured_technical_key() -> str:
-    return settings.admin_ui_technical_write_key
-
-def _request_key_ok(key_header: str | None, api_key_qs: str | None, expected: str) -> bool:
-    if not expected:
-        return True
-    if key_header == expected:
-        return True
-    return bool(settings.admin_ui_allow_query_api_key and api_key_qs == expected)
 
 def _require_admin_api_key(
-    key_header: str | None = Security(_api_key_header),
+    key_header: str | None = Security(admin_api_key_header),
     api_key_qs: str | None = Query(default=None, alias="api_key"),
 ) -> None:
-    expected = _configured_read_key()
-    if _request_key_ok(key_header, api_key_qs, expected):
-        return
-    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid admin key")
-
-def _require_technical_write(
-    key_header: str | None = Security(_api_key_header),
-    api_key_qs: str | None = Query(default=None, alias="api_key"),
-) -> None:
-    if not settings.admin_ui_technical_ops_enabled:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Technical operations are disabled")
-    expected = _configured_technical_key()
-    if not expected:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Technical write key is not configured")
-    if _request_key_ok(key_header, api_key_qs, expected):
-        return
-    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid technical admin key")
+    require_admin_read_access(key_header, api_key_qs)
 
 def _admin_url(path: str, api_key: str | None) -> str:
     if not api_key or not settings.admin_ui_allow_query_api_key:
@@ -569,23 +540,14 @@ async def _parse_mutable_form(request: Request) -> tuple[dict[str, str], dict[st
 
 
 def _require_technical_write_form(request: Request, form: dict[str, str], raw_form: dict[str, list[str]] | None = None) -> None:
-    if not settings.admin_ui_technical_ops_enabled:
-        form.pop("admin_technical_write_key", None)
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Technical operations are disabled")
-    expected = _configured_technical_key()
-    if not expected:
-        form.pop("admin_technical_write_key", None)
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Technical write key is not configured")
     form_keys = (raw_form or {}).get("admin_technical_write_key")
-    if form_keys is not None and len(form_keys) != 1:
-        form.pop("admin_technical_write_key", None)
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid technical admin key")
-    header_key = request.headers.get("X-API-Key")
     form_key = form.pop("admin_technical_write_key", None)
-    query_key = request.query_params.get("api_key") if settings.admin_ui_allow_query_api_key else None
-    if header_key == expected or form_key == expected or query_key == expected:
-        return
-    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid technical admin key")
+    require_admin_technical_access(
+        read_key_header=request.headers.get("X-API-Key"),
+        read_key_query=request.query_params.get("api_key") if settings.admin_ui_allow_query_api_key else None,
+        technical_write_key=form_key,
+        technical_field_count=len(form_keys) if form_keys is not None else None,
+    )
 
 
 def _require_technical_confirmation(form: dict[str, str], expected_action: str) -> None:

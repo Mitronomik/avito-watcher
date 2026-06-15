@@ -3,19 +3,19 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 from app.core.config import settings
 from app.db.base import Base
-from app.models.search_job import SearchJob
-from app.models.listing import Listing
-from app.models.listing_snapshot import ListingSnapshot
-from app.models.alert_sent import AlertSent
-from app.models.alert_delivery_attempt import AlertDeliveryAttempt
-from app.models.admin_audit_event import AdminAuditEvent
-from app.models.listing_analysis import ListingAnalysis
-from app.models.listing_search_match import ListingSearchMatch
-from app.models.agent_task import AgentTask
-from app.models.knowledge_note import KnowledgeNote
-from app.models.listing_detail_snapshot import ListingDetailSnapshot
-from app.models.listing_enrichment import ListingEnrichment
-from app.models.market_evidence import MarketEvidenceItem, MarketResearchRun
+from app.models.search_job import SearchJob  # noqa: F401
+from app.models.listing import Listing  # noqa: F401
+from app.models.listing_snapshot import ListingSnapshot  # noqa: F401
+from app.models.alert_sent import AlertSent  # noqa: F401
+from app.models.alert_delivery_attempt import AlertDeliveryAttempt  # noqa: F401
+from app.models.admin_audit_event import AdminAuditEvent  # noqa: F401
+from app.models.listing_analysis import ListingAnalysis  # noqa: F401
+from app.models.listing_search_match import ListingSearchMatch  # noqa: F401
+from app.models.agent_task import AgentTask  # noqa: F401
+from app.models.knowledge_note import KnowledgeNote  # noqa: F401
+from app.models.listing_detail_snapshot import ListingDetailSnapshot  # noqa: F401
+from app.models.listing_enrichment import ListingEnrichment  # noqa: F401
+from app.models.market_evidence import MarketEvidenceItem, MarketResearchRun  # noqa: F401
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)

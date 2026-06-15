@@ -30,10 +30,12 @@ class AdminTestClient(TestClient):
 
     def post(self, url, *args, **kwargs):
         data = kwargs.get("data")
-        headers = {**kwargs.get("headers", {}), "X-API-Key": "tech"}
+        headers = {**kwargs.get("headers", {}), "X-API-Key": "read"}
         kwargs["headers"] = headers
         if data is None:
             data = {}
+        if isinstance(data, dict) and "admin_technical_write_key" not in data:
+            data = {**data, "admin_technical_write_key": "tech"}
         if isinstance(data, dict) and "confirm_action" not in data:
             path = str(url).split("?", 1)[0]
             if path == "/admin/searches":
@@ -65,6 +67,7 @@ def test_create_app_with_admin_enabled_includes_admin_routes():
 
 def test_admin_root_disabled_and_enabled_with_header_key(monkeypatch):
     monkeypatch.setattr(settings, "api_key", "secret")
+    monkeypatch.setattr(settings, "admin_ui_read_key", "secret")
     disabled_app = create_app(admin_ui_enabled=False)
     assert TestClient(disabled_app).get("/admin", headers={"X-API-Key": "secret"}).status_code == 404
 
@@ -1369,7 +1372,7 @@ def test_pr19d_raw_client_technical_ops_disabled_and_read_only_pages(monkeypatch
     listing_id = create_listing(Session, external_id="disabled-listing")
 
     read_headers = {"X-API-Key": "read"}
-    tech_headers = {"X-API-Key": "tech"}
+    tech_headers = {"X-API-Key": "read"}
     assert client.get("/admin/searches/new", headers=read_headers).status_code == 403
     assert client.get(f"/admin/searches/{job_id}/edit", headers=read_headers).status_code == 403
     assert client.post("/admin/searches", headers=tech_headers, data=_valid_create_payload()).status_code == 403
@@ -1386,16 +1389,17 @@ def test_pr19d_raw_client_key_separation_form_key_duplicates_and_query_auth(monk
     client, Session = make_raw_client(monkeypatch, technical_ops_enabled=True, allow_query_api_key=False)
     read_headers = {"X-API-Key": "read"}
     write_headers = {"X-API-Key": "write"}
-    tech_headers = {"X-API-Key": "tech"}
+    tech_headers = {"X-API-Key": "read"}
 
     assert client.post("/admin/searches", headers=read_headers, data=_valid_create_payload(name="read_blocked")).status_code == 403
     assert client.post("/admin/searches", headers=write_headers, data=_valid_create_payload(name="write_blocked")).status_code == 403
     assert client.post("/admin/searches?api_key=tech", data=_valid_create_payload(name="query_blocked")).status_code == 403
 
-    ok = client.post("/admin/searches", headers=tech_headers, data=_valid_create_payload(name="header_ok"), follow_redirects=False)
+    ok = client.post("/admin/searches", headers=tech_headers, data=_valid_create_payload(name="header_ok", admin_technical_write_key="tech"), follow_redirects=False)
     assert ok.status_code == 303
     form_ok = client.post(
         "/admin/searches",
+        headers=tech_headers,
         data=_valid_create_payload(name="form_ok", admin_technical_write_key="tech"),
         follow_redirects=False,
     )
@@ -1419,22 +1423,22 @@ def test_pr19d_raw_client_key_separation_form_key_duplicates_and_query_auth(monk
 
     query_client, _ = make_raw_client(monkeypatch, technical_ops_enabled=True, allow_query_api_key=True)
     query_ok = query_client.post("/admin/searches?api_key=tech", data=_valid_create_payload(name="query_ok"), follow_redirects=False)
-    assert query_ok.status_code == 303
+    assert query_ok.status_code == 403
 
 
 def test_pr19d_raw_client_confirmation_required_and_no_key_leak(monkeypatch):
     client, Session = make_raw_client(monkeypatch, technical_ops_enabled=True, allow_query_api_key=False, technical_write_key="raw-form-secret")
     job_id = create_job(Session, name="confirm_job")
-    tech_headers = {"X-API-Key": "raw-form-secret"}
+    tech_headers = {"X-API-Key": "read"}
 
-    missing = client.post(f"/admin/searches/{job_id}/deactivate", headers=tech_headers)
-    wrong = client.post(f"/admin/searches/{job_id}/deactivate", headers=tech_headers, data={"confirm_action": "activate_search"})
+    missing = client.post(f"/admin/searches/{job_id}/deactivate", headers=tech_headers, data={"admin_technical_write_key": "raw-form-secret"})
+    wrong = client.post(f"/admin/searches/{job_id}/deactivate", headers=tech_headers, data={"admin_technical_write_key": "raw-form-secret", "confirm_action": "activate_search"})
     assert missing.status_code == 400
     assert wrong.status_code == 400
     with Session() as s:
         assert s.get(SearchJob, job_id).is_active is True
 
-    ok = client.post(f"/admin/searches/{job_id}/deactivate", headers=tech_headers, data={"confirm_action": "deactivate_search"}, follow_redirects=False)
+    ok = client.post(f"/admin/searches/{job_id}/deactivate", headers=tech_headers, data={"admin_technical_write_key": "raw-form-secret", "confirm_action": "deactivate_search"}, follow_redirects=False)
     assert ok.status_code == 303
     with Session() as s:
         assert s.get(SearchJob, job_id).is_active is False
@@ -1442,6 +1446,7 @@ def test_pr19d_raw_client_confirmation_required_and_no_key_leak(monkeypatch):
     secret = "raw-form-secret"
     error_page = client.post(
         "/admin/searches",
+        headers={"X-API-Key": "read"},
         data=_valid_create_payload(name="leak_test", source_url="https://example.com/not-avito", admin_technical_write_key=secret),
     )
     assert error_page.status_code == 200
@@ -1462,7 +1467,7 @@ def test_pr19d_raw_client_run_once_auth_confirmation_and_redaction(monkeypatch):
 
     monkeypatch.setattr("app.admin._build_parser", fail_build_parser)
     assert client.post(f"/admin/searches/{job_id}/run-once", headers={"X-API-Key": "bad"}, data={"confirm_action": "run_once"}).status_code == 403
-    assert client.post(f"/admin/searches/{job_id}/run-once", headers={"X-API-Key": "tech"}).status_code == 400
+    assert client.post(f"/admin/searches/{job_id}/run-once", headers={"X-API-Key": "read"}, data={"admin_technical_write_key": "tech"}).status_code == 400
 
     class FakeService:
         def __init__(self, parser=None):
@@ -1482,7 +1487,7 @@ def test_pr19d_raw_client_run_once_auth_confirmation_and_redaction(monkeypatch):
 
     monkeypatch.setattr("app.admin._build_parser", lambda: object())
     monkeypatch.setattr("app.admin.MonitorService", FakeService)
-    response = client.post(f"/admin/searches/{job_id}/run-once", headers={"X-API-Key": "tech"}, data={"confirm_action": "run_once"})
+    response = client.post(f"/admin/searches/{job_id}/run-once", headers={"X-API-Key": "read"}, data={"admin_technical_write_key": "tech", "confirm_action": "run_once"})
     assert response.status_code == 200
     assert calls and calls[-1] == ("run_once", job_id)
     text = response.text
