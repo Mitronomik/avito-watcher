@@ -34,6 +34,7 @@ def _item(db, **kw):
         expires_at=(AS_OF + timedelta(days=1)).replace(tzinfo=None),
         content_hash=f"h{db.query(MarketEvidenceItem).count()}",
         rent_per_m2_rub=1000.0,
+        area_m2=50.0,
     )
     base.update(kw)
     obj = MarketEvidenceItem(**base)
@@ -455,11 +456,12 @@ def test_cross_listing_rent_source_is_capped_and_facted(db_session):
     assert result.verdict != "strong"
     assert result.verdict == "medium"
     assert "cross_listing_evidence_requires_human_review" in result.risks_json["flags"]
-    assert "cross_listing_evidence_without_quality_score" in result.risks_json["flags"]
+    assert result.facts_json["investment_metrics"]["market_evidence"]["comp_quality_scoring_used"] is True
     facts = result.facts_json["investment_metrics"]["market_evidence"]
     assert facts["matching_policy"] == "same_location_key"
     assert facts["cross_listing_reuse_enabled"] is True
-    assert facts["comp_quality_scoring_used"] is False
+    assert facts["comp_quality_scoring_used"] is True
+    assert facts["comparable_quality"]["comparable_quality_model_version"] == "v0"
     assert facts["cross_listing_verdict_cap_applied"] is True
     assert facts["selected_external_listing_count"] == 3
     assert any("cross-listing" in q for q in result.questions_json["items"])
