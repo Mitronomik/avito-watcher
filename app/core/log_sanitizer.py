@@ -15,6 +15,7 @@ SANITIZER_ERROR = "<log redaction failed>"
 _SENSITIVE_QUERY_KEYS = {
     "api_key",
     "apikey",
+    "key",
     "token",
     "access_token",
     "refresh_token",

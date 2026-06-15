@@ -44,6 +44,14 @@ def test_sanitizer_redacts_generic_sensitive_query_params():
     assert "fake-api-key" not in sanitized
 
 
+def test_sanitizer_redacts_exact_key_query_param_without_broad_matching():
+    sanitized = sanitize_log_text("https://example.com/path?key=secret&foo=bar")
+
+    assert "key=<redacted>" in sanitized
+    assert "foo=bar" in sanitized
+    assert "secret" not in sanitized
+
+
 def test_sanitizer_redacts_authorization_fragments():
     sanitized = sanitize_log_text(
         "Bearer fake-bearer-token Authorization: Bearer fake-auth-token "
