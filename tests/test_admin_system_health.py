@@ -88,6 +88,33 @@ def test_admin_system_worker_status_states_and_parser_diagnostics(monkeypatch, t
     assert "super-secret" not in failed_page
 
 
+
+def test_admin_system_redacts_apps_script_delivery_errors(monkeypatch, tmp_path):
+    client, Session = _client(monkeypatch, tmp_path)
+    deployment_id = "AKfycbx_unique_system_secret_deployment_id_123456789"
+    apps_script_url = f"https://script.google.com/macros/s/{deployment_id}/exec"
+    with Session() as s:
+        s.add(
+            AlertDeliveryAttempt(
+                listing_external_id="gas",
+                channel="jsonl",
+                dedupe_key="jsonl:new:gas",
+                payload_hash="c" * 64,
+                status="failed",
+                error_type="WebhookError",
+                last_error=f"POST failed for {apps_script_url}: status=500",
+            )
+        )
+        s.commit()
+
+    page = client.get("/admin/system", headers={"X-API-Key": "read"}).text
+    assert "WebhookError" in page
+    assert "failed" in page
+    assert "https://script.google.com/.../exec" in page
+    assert deployment_id not in page
+    assert apps_script_url not in page
+
+
 def test_admin_system_delivery_invariants_agents_analyses_and_alembic(monkeypatch, tmp_path):
     client, Session = _client(monkeypatch, tmp_path)
     with Session() as s:

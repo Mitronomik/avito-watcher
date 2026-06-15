@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.config import settings
 from app.admin import redact_admin_json, redact_admin_value
+from app.services.alert_delivery_attempts import sanitize_alert_delivery_error
 from app.db.base import Base
 from app.main import create_app
 from app.models.listing import Listing
@@ -2023,6 +2024,36 @@ def test_alert_delivery_dashboard_can_propagate_query_key_when_enabled(monkeypat
     delivery_section = page.split("Попытки доставки уведомлений", 1)[1]
     assert "name='api_key' value='read'" in delivery_section
     assert f"/admin/alerts/delivery-attempts/{attempt_id}?api_key=read" in delivery_section
+
+
+def test_apps_script_delivery_error_redacted_on_alert_pages(monkeypatch, tmp_path):
+    client, Session = make_client(monkeypatch)
+    monkeypatch.setattr(settings, "jsonl_outbox_path", str(tmp_path / "missing.jsonl"))
+    deployment_id = "AKfycbx_unique_pr21a_secret_deployment_id_987654321"
+    apps_script_url = f"https://script.google.com/macros/s/{deployment_id}/exec"
+    attempt_id = _add_attempt(
+        Session,
+        listing_external_id="apps-script-ext",
+        channel="jsonl",
+        status="failed",
+        dedupe_key="jsonl:new:apps-script-ext",
+        error_type="WebhookError",
+        last_error=f"POST failed for {apps_script_url}: status=500",
+    )
+
+    sanitized = sanitize_alert_delivery_error(f"POST failed for {apps_script_url}: status=500")
+    assert sanitized == "POST failed for https://script.google.com/.../exec status=500"
+    assert deployment_id not in sanitized
+
+    page = client.get("/admin/alerts").text
+    detail = client.get(f"/admin/alerts/delivery-attempts/{attempt_id}").text
+    for html_page in (page, detail):
+        assert "WebhookError" in html_page
+        assert "failed" in html_page
+        assert "https://script.google.com/.../exec" in html_page
+        assert deployment_id not in html_page
+        assert apps_script_url not in html_page
+
 
 def test_alert_delivery_invariants_detail_secret_safety_and_no_mutation(monkeypatch, tmp_path):
     client, Session = make_client(monkeypatch)

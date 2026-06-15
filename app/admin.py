@@ -1400,7 +1400,7 @@ def alerts(
         attempt_table_rows.append(
             "<tr>"
             f"<td>{row.id}</td><td>{html.escape(str(row.created_at or '—'))}</td><td>{listing_cell}</td>"
-            f"<td>{html.escape(row.channel)}</td><td>{html.escape(row.status)}</td><td>{row.attempt_count}</td>"
+            f"<td>{html.escape(row.channel)}</td><td>{html.escape(row.status)}</td><td>{html.escape(row.error_type or '—')}</td><td>{row.attempt_count}</td>"
             f"<td>{html.escape(str(row.sent_at or '—'))}</td><td>{html.escape(str(row.next_retry_at or '—'))}</td>"
             f"<td>{html.escape(row.search_name or '—')}</td><td>{html.escape((row.payload_hash or '')[:12])}</td>"
             f"<td>{html.escape(_redact_alert_error(row.last_error))}</td><td>{'yes' if has_alert_sent[row.id] else 'no'}</td>"
@@ -1414,7 +1414,7 @@ def alerts(
     status_summary = "".join(f"<li>{status}: {status_counts.get(status, 0)}</li>" for status in ["success", "failed", "skipped", "unknown"])
     invariant_items = "".join(f"<li>{html.escape(key)}: {value}</li>" for key, value in invariant_counts.items())
     attempts_table = (
-        "<table><tr><th>id</th><th>created_at</th><th>listing_external_id</th><th>channel</th><th>status</th><th>attempt_count</th><th>sent_at</th><th>next_retry_at</th><th>search_name</th><th>payload_hash prefix</th><th>last_error preview</th><th>AlertSent match</th><th>details</th></tr>"
+        "<table><tr><th>id</th><th>created_at</th><th>listing_external_id</th><th>channel</th><th>status</th><th>error_type</th><th>attempt_count</th><th>sent_at</th><th>next_retry_at</th><th>search_name</th><th>payload_hash prefix</th><th>last_error preview</th><th>AlertSent match</th><th>details</th></tr>"
         + "".join(attempt_table_rows)
         + "</table>"
         if attempt_table_rows
