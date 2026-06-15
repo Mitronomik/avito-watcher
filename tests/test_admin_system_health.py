@@ -264,6 +264,7 @@ def test_admin_system_retention_dry_run_counts_and_safety(monkeypatch, tmp_path)
     from app.models.listing_detail_snapshot import ListingDetailSnapshot
     from app.models.listing_enrichment import ListingEnrichment
     from app.models.monitor_cycle_run import MonitorCycleRun
+    from app.services.retention_dry_run import get_retention_dry_run_report
 
     client, Session = _client(monkeypatch, tmp_path)
     old_200 = datetime.utcnow() - timedelta(days=200)
@@ -282,6 +283,20 @@ def test_admin_system_retention_dry_run_counts_and_safety(monkeypatch, tmp_path)
         s.add(ListingEnrichment(listing_external_id="en-old", enrichment_type="x", source_type="snapshot", source_id=1, status="success", validation_status="valid", prompt_version="p", schema_version="s", extraction_profile="e", input_hash="h" * 64, source_content_hash="i" * 64, output_hash="j" * 64, created_at=old_200))
         s.add(ListingEnrichment(listing_external_id="en-new", enrichment_type="x", source_type="snapshot", source_id=2, status="success", validation_status="valid", prompt_version="p", schema_version="s", extraction_profile="e", input_hash="k" * 64, source_content_hash="l" * 64, output_hash="m" * 64, created_at=recent))
         s.commit()
+
+    with Session() as s:
+        report = get_retention_dry_run_report(s, datetime.utcnow())
+    by_table = {row.table_name: row for row in report.rows}
+    assert by_table["alert_delivery_attempts"].dry_run_candidate_count == 1
+    assert by_table["alert_delivery_attempts"].total_count == 2
+    assert by_table["monitor_cycle_runs"].dry_run_candidate_count == 1
+    assert by_table["monitor_cycle_runs"].total_count == 2
+    assert by_table["agent_tasks"].dry_run_candidate_count == 1
+    assert by_table["agent_tasks"].total_count == 3
+    assert by_table["listing_detail_snapshots"].dry_run_candidate_count == 1
+    assert by_table["listing_detail_snapshots"].total_count == 2
+    assert by_table["listing_enrichments"].dry_run_candidate_count == 1
+    assert by_table["listing_enrichments"].total_count == 2
 
     page = client.get("/admin/system", headers={"X-API-Key": "read"}).text
     assert "Dry-run отчёт по retention" in page
