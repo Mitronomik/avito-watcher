@@ -27,10 +27,15 @@ from app.notifiers.telegram import TelegramNotifier
 from app.parsers.avito_parser import AvitoParser
 from app.parsers.schemas import ListingCard
 from app.repositories.alert_repository import AlertRepository
+from app.repositories.alert_delivery_attempt_repository import AlertDeliveryAttemptRepository
 from app.repositories.listing_repository import ListingRepository
 from app.repositories.listing_search_match_repository import ListingSearchMatchRepository
 from app.repositories.search_repository import SearchRepository
 from app.utils.formatting import build_listing_message
+from app.services.alert_delivery_attempts import (
+    compute_alert_payload_hash,
+    sanitize_alert_delivery_error,
+)
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 logger = logging.getLogger(__name__)
@@ -646,59 +651,98 @@ class MonitorService:
         if not pending_channels:
             return self._empty_delivery_result()
 
+        attempt_repo = AlertDeliveryAttemptRepository(alert_repo.db)
+        payload_hash = compute_alert_payload_hash(payload)
         channels = getattr(self.notifier, "channels", [self.notifier])
+        successful = []
+        skipped = []
+        failed = []
+        unknown = []
+
+        def record_attempt(
+            channel_name: str,
+            status: str,
+            error: BaseException | str | None = None,
+        ) -> None:
+            dedupe_key = f"{channel_name}:new:{card.external_id}"
+            sent_at = self._now() if status == "success" else None
+            last_error = sanitize_alert_delivery_error(error) if error is not None else None
+            attempt_repo.create_attempt(
+                listing_external_id=card.external_id,
+                channel=channel_name,
+                dedupe_key=dedupe_key,
+                payload_hash=payload_hash,
+                status=status,
+                attempt_count=attempt_repo.next_attempt_count(
+                    dedupe_key=dedupe_key,
+                    channel=channel_name,
+                ),
+                last_error=last_error,
+                next_retry_at=None,
+                sent_at=sent_at,
+                error_type=error.__class__.__name__ if isinstance(error, BaseException) else None,
+            )
+
         if all(hasattr(channel, "send_listing_alert") for channel in channels):
             channel_map = {
                 channel.channel_name: channel
                 for channel in channels
                 if channel.channel_name in pending_channels
             }
-            successful = []
-            skipped = []
-            failed = []
-            unknown = []
             for channel_name in pending_channels:
                 channel = channel_map.get(channel_name)
                 if channel is None:
+                    record_attempt(channel_name, "unknown", "missing alert channel")
                     unknown.append(channel_name)
                     continue
                 try:
                     delivered = await channel.send_listing_alert(message, payload)
-                except Exception:
+                except Exception as exc:
                     logger.exception("Alert channel failed", extra={"channel": channel_name})
+                    record_attempt(channel_name, "failed", exc)
                     failed.append(channel_name)
                     continue
                 if delivered is True:
+                    record_attempt(channel_name, "success")
+                    alert_repo.create(
+                        listing_external_id=card.external_id,
+                        dedupe_key=f"{channel_name}:new:{card.external_id}",
+                        channel=channel_name,
+                    )
                     successful.append(channel_name)
                     continue
                 if delivered is False:
+                    record_attempt(channel_name, "skipped")
                     skipped.append(channel_name)
                     continue
                 logger.debug(
                     "Alert channel returned unexpected delivery result type",
                     extra={"channel": channel_name, "result_type": type(delivered).__name__},
                 )
+                record_attempt(channel_name, "unknown", f"unexpected result type: {type(delivered).__name__}")
                 unknown.append(channel_name)
         else:
-            skipped = []
-            failed = []
-            unknown = []
             try:
-                successful = await self.notifier.send_listing_alert(message, payload)
-            except Exception:
+                delivered_channels = await self.notifier.send_listing_alert(message, payload)
+            except Exception as exc:
                 logger.exception("Alert notifier failed")
-                successful = []
-                failed = list(pending_channels)
-            successful = [name for name in successful if name in pending_channels]
-            if not failed:
-                successful_set = set(successful)
-                unknown = [name for name in pending_channels if name not in successful_set]
-        for channel_name in successful:
-            alert_repo.create(
-                listing_external_id=card.external_id,
-                dedupe_key=f"{channel_name}:new:{card.external_id}",
-                channel=channel_name,
-            )
+                delivered_channels = []
+                for channel_name in pending_channels:
+                    record_attempt(channel_name, "failed", exc)
+                    failed.append(channel_name)
+            delivered_set = {name for name in delivered_channels if name in pending_channels}
+            for channel_name in pending_channels:
+                if channel_name in delivered_set:
+                    record_attempt(channel_name, "success")
+                    alert_repo.create(
+                        listing_external_id=card.external_id,
+                        dedupe_key=f"{channel_name}:new:{card.external_id}",
+                        channel=channel_name,
+                    )
+                    successful.append(channel_name)
+                elif channel_name not in failed:
+                    record_attempt(channel_name, "unknown", "composite notifier did not report channel")
+                    unknown.append(channel_name)
 
         return {
             "attempted": pending_channels,
