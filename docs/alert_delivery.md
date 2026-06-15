@@ -86,16 +86,27 @@ The recent attempts table shows bounded safe fields only: id, created time, list
 
 The detail page shows safe scalar fields for a single `AlertDeliveryAttempt`, matching `AlertSent` presence, and a matching listing link when one exists. It does not show raw payload, secrets, retry controls, POST forms, manual actions, or technical controls.
 
-Delivery invariant counters are visible on `/admin/alerts`; healthy values are `0` for every counter. Each counter counts `AlertDeliveryAttempt` rows, not distinct dedupe keys:
+Delivery integrity counters are visible on `/admin/alerts`; each counter counts `AlertDeliveryAttempt` rows, not distinct dedupe keys. Matching `AlertSent` semantics are exact: same `dedupe_key`, same `listing_external_id`, and same `channel`. The dashboard does not infer fuzzy matches.
+
+PR21b split the old `non_success_with_alert_sent` read-model semantics by timestamp. Failed/skipped/unknown attempts are historical records: a later normal worker cycle or manual retry may succeed and create a matching `AlertSent`. That is not necessarily data corruption and does not change delivery or retry behavior. No migration is required.
+
+True **Delivery integrity issues** have expected healthy value `0`:
 
 - `success_without_alert_sent`: `status = success` and no matching `AlertSent` exists.
-- `non_success_with_alert_sent`: `status in failed/skipped/unknown` and a matching `AlertSent` exists.
 - `success_missing_sent_at`: `status = success` and `sent_at is null`.
 - `non_success_with_sent_at`: `status in failed/skipped/unknown` and `sent_at is not null`.
-- `non_null_next_retry_at`: `next_retry_at is not null`; this should normally be zero in PR20a/PR20b because retry scheduling is not implemented.
 - `bad_payload_hash_count`: `payload_hash` is null/empty or does not match `^[0-9a-f]{64}$`.
+- `non_success_after_alert_sent`: `status in failed/skipped/unknown`, a matching `AlertSent` exists, and `AlertSent.created_at < AlertDeliveryAttempt.created_at`; this remains suspicious because the attempt happened after the success dedupe row already existed.
 
-Matching `AlertSent` semantics are exact: same `dedupe_key`, same `listing_external_id`, and same `channel`. The dashboard does not infer fuzzy matches.
+**Resolved delivery history** is informational and is not a hard integrity violation:
+
+- `resolved_non_success_with_later_alert_sent`: `status in failed/skipped/unknown`, a matching `AlertSent` exists, and `AlertSent.created_at >= AlertDeliveryAttempt.created_at`; this usually means delivery eventually succeeded through a later normal cycle or manual retry.
+
+**Retry scheduling indicators** are separate from hard integrity issues:
+
+- `next_retry_at_non_null`: `next_retry_at is not null`; this is normally expected to be zero while automatic retry scheduling is not implemented, but future retry scheduling may make it normal.
+
+Manual retry eligibility remains unchanged: if a matching `AlertSent` exists, retry is blocked even when the old non-success attempt is displayed as resolved delivery history.
 
 PR20b is intentionally not a health dashboard: it does not add worker heartbeat, parser health, queue lag, delivery-latency trends, SLA metrics, PR21 health-dashboard scope, or PR45 production uptime scope.
 

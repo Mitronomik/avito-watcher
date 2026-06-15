@@ -128,8 +128,14 @@ def test_admin_system_delivery_invariants_agents_analyses_and_alembic(monkeypatc
         s.add(ListingAnalysis(listing_external_id="bad", profile="default", status="failed", input_hash="h", error_type="LLM", error_message="token=actual-secret"))
         s.commit()
     page = client.get("/admin/system", headers={"X-API-Key": "read"}).text
+    assert "Delivery integrity issues (all time)" in page
+    assert "Resolved delivery history (all time)" in page
+    assert "Retry scheduling indicators (all time)" in page
     assert "success_without_alert_sent" in page
-    assert "non_success_with_alert_sent" in page
+    assert "non_success_after_alert_sent" in page
+    assert "resolved_non_success_with_later_alert_sent" in page
+    assert "next_retry_at_non_null" in page
+    assert "non_success_with_alert_sent" not in page
     assert "bad_payload_hash_count" in page
     assert "/admin/alerts/delivery-attempts/" in page
     assert "Agent tasks" in page and "review" in page

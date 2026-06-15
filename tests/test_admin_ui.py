@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 
 import pytest
@@ -1961,7 +1961,12 @@ def test_alert_delivery_dashboard_access_empty_and_post_read_only(monkeypatch, t
     assert client.post("/admin/alerts", headers={"X-API-Key": "tech"}).status_code in {404, 405}
     page = client.get("/admin/alerts", headers={"X-API-Key": "read"}).text
     assert "Попытки доставки ещё не зафиксированы" in page
+    assert "Delivery integrity issues (in selected period)" in page
+    assert "Resolved delivery history (in selected period)" in page
+    assert "Retry scheduling indicators (in selected period)" in page
     assert "success_without_alert_sent: 0" in page
+    assert "resolved_non_success_with_later_alert_sent: 0" in page
+    assert "next_retry_at_non_null: 0" in page
     assert "bad_payload_hash_count: 0" in page
 
 
@@ -2059,25 +2064,36 @@ def test_alert_delivery_invariants_detail_secret_safety_and_no_mutation(monkeypa
     client, Session = make_client(monkeypatch)
     monkeypatch.setattr(settings, "jsonl_outbox_path", str(tmp_path / "missing.jsonl"))
     secret_error = "Authorization: Basic real-prod-basic-123 Authorization: Bearer real-prod-bearer-456 Authorization: Token real-prod-token-789 X-API-Key: real-prod-api-123 api_key=real-prod-query-123 api-key=real-prod-hyphen-123 apikey=real-prod-compact-123 webhook=https://any-host.example/path/real-prod-webhook-123 telegram=https://api.telegram.org/botreal-prod-telegram-123/sendMessage smtp_password=real-prod-smtp-123"
-    detail_id = _add_attempt(Session, listing_external_id="secret-ext", channel="jsonl", status="failed", dedupe_key="jsonl:new:secret", payload_hash="bad", last_error=secret_error, next_retry_at=datetime.utcnow())
-    _add_alert_sent(Session, listing_external_id="secret-ext", channel="jsonl", dedupe_key="jsonl:new:secret")
+    secret_t1 = datetime.utcnow() - timedelta(minutes=2)
+    secret_t2 = datetime.utcnow() - timedelta(minutes=1)
+    detail_id = _add_attempt(Session, listing_external_id="secret-ext", channel="jsonl", status="failed", dedupe_key="jsonl:new:secret", payload_hash="bad", last_error=secret_error, next_retry_at=secret_t2, created_at=secret_t1)
+    _add_alert_sent(Session, listing_external_id="secret-ext", channel="jsonl", dedupe_key="jsonl:new:secret", created_at=secret_t2)
     _add_attempt(Session, listing_external_id="no-sent", channel="jsonl", status="success", dedupe_key="jsonl:new:no-sent", sent_at=datetime.utcnow())
     _add_attempt(Session, listing_external_id="missing-sent-at", channel="email", status="success", dedupe_key="email:new:missing")
-    _add_alert_sent(Session, listing_external_id="sent-on-failed", channel="email", dedupe_key="email:new:failed")
-    _add_attempt(Session, listing_external_id="sent-on-failed", channel="email", status="failed", dedupe_key="email:new:failed", sent_at=datetime.utcnow())
+    failed_t1 = datetime.utcnow() - timedelta(minutes=2)
+    failed_t2 = datetime.utcnow() - timedelta(minutes=1)
+    _add_attempt(Session, listing_external_id="sent-on-failed", channel="email", status="failed", dedupe_key="email:new:failed", sent_at=failed_t1, created_at=failed_t1)
+    _add_alert_sent(Session, listing_external_id="sent-on-failed", channel="email", dedupe_key="email:new:failed", created_at=failed_t2)
     with Session() as s:
         before = {AlertDeliveryAttempt.__tablename__: s.scalar(select(func.count()).select_from(AlertDeliveryAttempt)), AlertSent.__tablename__: s.scalar(select(func.count()).select_from(AlertSent)), Listing.__tablename__: s.scalar(select(func.count()).select_from(Listing)), ListingAnalysis.__tablename__: s.scalar(select(func.count()).select_from(ListingAnalysis)), SearchJob.__tablename__: s.scalar(select(func.count()).select_from(SearchJob))}
     page = client.get("/admin/alerts").text
+    assert "Delivery integrity issues (in selected period)" in page
+    assert "Resolved delivery history (in selected period)" in page
+    assert "Retry scheduling indicators (in selected period)" in page
     assert "success_without_alert_sent: 2" in page
-    assert "non_success_with_alert_sent: 2" in page
+    assert "non_success_after_alert_sent: 0" in page
+    assert "resolved_non_success_with_later_alert_sent: 2" in page
     assert "success_missing_sent_at: 1" in page
     assert "non_success_with_sent_at: 1" in page
-    assert "non_null_next_retry_at: 1" in page
+    assert "next_retry_at_non_null: 1" in page
     assert "bad_payload_hash_count: 1" in page
+    assert "non_success_with_alert_sent" not in page
+    assert "non_null_next_retry_at" not in page
     for leaked in ("real-prod-basic-123", "real-prod-bearer-456", "real-prod-token-789", "real-prod-api-123", "real-prod-query-123", "real-prod-hyphen-123", "real-prod-compact-123", "real-prod-webhook-123", "real-prod-telegram-123", "real-prod-smtp-123"):
         assert leaked not in page
     detail = client.get(f"/admin/alerts/delivery-attempts/{detail_id}").text
     assert "matching AlertSent" in detail and "yes" in detail
+    assert "Resolved by later delivery" in detail
     assert "secret-ext" in detail
     for leaked in ("real-prod-basic-123", "real-prod-bearer-456", "real-prod-token-789", "real-prod-api-123", "real-prod-query-123", "real-prod-hyphen-123", "real-prod-compact-123", "real-prod-webhook-123", "real-prod-telegram-123", "real-prod-smtp-123"):
         assert leaked not in detail
@@ -2089,6 +2105,47 @@ def test_alert_delivery_invariants_detail_secret_safety_and_no_mutation(monkeypa
     with Session() as s:
         after = {AlertDeliveryAttempt.__tablename__: s.scalar(select(func.count()).select_from(AlertDeliveryAttempt)), AlertSent.__tablename__: s.scalar(select(func.count()).select_from(AlertSent)), Listing.__tablename__: s.scalar(select(func.count()).select_from(Listing)), ListingAnalysis.__tablename__: s.scalar(select(func.count()).select_from(ListingAnalysis)), SearchJob.__tablename__: s.scalar(select(func.count()).select_from(SearchJob))}
     assert after == before
+
+
+def test_alert_delivery_integrity_timestamp_split_and_alert_system_consistency(monkeypatch, tmp_path):
+    client, Session = make_client(monkeypatch)
+    monkeypatch.setattr(settings, "jsonl_outbox_path", str(tmp_path / "missing.jsonl"))
+    t1 = datetime.utcnow() - timedelta(hours=2)
+    t2 = datetime.utcnow() - timedelta(hours=1)
+    # Failed first, then later AlertSent: resolved history, not hard issue.
+    resolved_id = _add_attempt(Session, listing_external_id="x1", channel="google_sheets", dedupe_key="google_sheets:new:x1", status="failed", created_at=t1)
+    _add_alert_sent(Session, listing_external_id="x1", channel="google_sheets", dedupe_key="google_sheets:new:x1", created_at=t2)
+    # AlertSent first, then failed attempt: true integrity issue.
+    _add_alert_sent(Session, listing_external_id="x2", channel="google_sheets", dedupe_key="google_sheets:new:x2", created_at=t1)
+    _add_attempt(Session, listing_external_id="x2", channel="google_sheets", dedupe_key="google_sheets:new:x2", status="failed", created_at=t2)
+    _add_attempt(Session, listing_external_id="x3", channel="google_sheets", dedupe_key="google_sheets:new:x3", status="success", sent_at=t2, created_at=t2)
+    _add_attempt(Session, listing_external_id="x4", channel="google_sheets", dedupe_key="google_sheets:new:x4", status="failed", sent_at=t2, created_at=t2)
+    _add_attempt(Session, listing_external_id="x5", channel="google_sheets", dedupe_key="google_sheets:new:x5", status="failed", payload_hash="bad", created_at=t2)
+    _add_attempt(Session, listing_external_id="x6", channel="google_sheets", dedupe_key="google_sheets:new:x6", status="failed", next_retry_at=t2, created_at=t2)
+
+    alerts_page = client.get("/admin/alerts?hours=24").text
+    system_page = client.get("/admin/system").text
+    for page in (alerts_page, system_page):
+        assert "success_without_alert_sent: 1" in page
+        assert "non_success_after_alert_sent: 1" in page
+        assert "resolved_non_success_with_later_alert_sent: 1" in page
+        assert "non_success_with_sent_at: 1" in page
+        assert "bad_payload_hash_count: 1" in page
+        assert "next_retry_at_non_null: 1" in page
+        assert "Delivery integrity issues" in page
+        assert "Resolved delivery history" in page
+        assert "Retry scheduling indicators" in page
+        assert "non_success_with_alert_sent" not in page
+
+    with Session() as s:
+        s.add(Listing(external_id="x1", url="https://www.avito.ru/x1", title="x1"))
+        s.commit()
+
+    detail = client.get(f"/admin/alerts/delivery-attempts/{resolved_id}").text
+    assert "Resolved by later delivery" in detail
+    assert "matching AlertSent already exists" in detail
+    assert "retry_delivery_attempt_" not in detail
+
 
 class _RetryChannel:
     def __init__(self, name="jsonl", result=True, calls=None):

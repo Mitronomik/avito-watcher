@@ -386,16 +386,45 @@ def _render_counts(items: dict[str, int]) -> str:
     return ", ".join(f"{html.escape(str(k))}: {v}" for k, v in sorted(items.items())) or "—"
 
 
-def _alert_delivery_invariant_counts(db: Session) -> dict[str, int]:
+NON_SUCCESS_ALERT_DELIVERY_STATUSES = ["failed", "skipped", "unknown"]
+
+
+def _matching_alert_sent_exists_with_created_at(*created_at_where: object) -> object:
+    return select(AlertSent.id).where(_attempt_matches_alert_sent_clause(), *created_at_where).limit(1).exists()
+
+
+def build_alert_delivery_integrity_summary(db: Session, *, since: datetime | None = None) -> dict[str, dict[str, int]]:
     dialect = db.bind.dialect.name if db.bind else ""
+    scope = [AlertDeliveryAttempt.created_at >= since] if since is not None else []
+    non_success = AlertDeliveryAttempt.status.in_(NON_SUCCESS_ALERT_DELIVERY_STATUSES)
     return {
-        "success_without_alert_sent": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.status == "success", ~_matching_alert_sent_exists())) or 0,
-        "non_success_with_alert_sent": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.status.in_(["failed", "skipped", "unknown"]), _matching_alert_sent_exists())) or 0,
-        "success_missing_sent_at": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.status == "success", AlertDeliveryAttempt.sent_at.is_(None))) or 0,
-        "non_success_with_sent_at": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.status.in_(["failed", "skipped", "unknown"]), AlertDeliveryAttempt.sent_at.is_not(None))) or 0,
-        "non_null_next_retry_at": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.next_retry_at.is_not(None))) or 0,
-        "bad_payload_hash_count": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(_payload_hash_is_bad_clause(dialect))) or 0,
+        "integrity_issues": {
+            "success_without_alert_sent": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(*scope, AlertDeliveryAttempt.status == "success", ~_matching_alert_sent_exists())) or 0,
+            "success_missing_sent_at": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(*scope, AlertDeliveryAttempt.status == "success", AlertDeliveryAttempt.sent_at.is_(None))) or 0,
+            "non_success_with_sent_at": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(*scope, non_success, AlertDeliveryAttempt.sent_at.is_not(None))) or 0,
+            "bad_payload_hash_count": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(*scope, _payload_hash_is_bad_clause(dialect))) or 0,
+            "non_success_after_alert_sent": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(*scope, non_success, _matching_alert_sent_exists_with_created_at(AlertSent.created_at < AlertDeliveryAttempt.created_at))) or 0,
+        },
+        "resolved_history": {
+            "resolved_non_success_with_later_alert_sent": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(*scope, non_success, _matching_alert_sent_exists_with_created_at(AlertSent.created_at >= AlertDeliveryAttempt.created_at))) or 0,
+        },
+        "retry_scheduling": {
+            "next_retry_at_non_null": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(*scope, AlertDeliveryAttempt.next_retry_at.is_not(None))) or 0,
+        },
     }
+
+
+def _render_delivery_integrity_summary(summary: dict[str, dict[str, int]], *, scope_label: str) -> str:
+    sections = [
+        ("Delivery integrity issues", "Expected healthy values: 0. These counters are true integrity issues.", summary["integrity_issues"]),
+        ("Resolved delivery history", "Informational historical records; non-zero values are not hard violations.", summary["resolved_history"]),
+        ("Retry scheduling indicators", "Scheduling indicators only; next_retry_at is not a hard integrity violation.", summary["retry_scheduling"]),
+    ]
+    html_sections = []
+    for title, note, counters in sections:
+        items = "".join(f"<li>{html.escape(key)}: {value}</li>" for key, value in counters.items())
+        html_sections.append(f"<h3>{title} ({html.escape(scope_label)})</h3><p>{note}</p><ul>{items}</ul>")
+    return "".join(html_sections)
 
 
 def _truncate(value: object, limit: int = 120) -> str:
@@ -1228,7 +1257,7 @@ def admin_system(request: Request, db: Session = Depends(get_db)):
     status_7d = _group_counts(db, AlertDeliveryAttempt, AlertDeliveryAttempt.status, AlertDeliveryAttempt.created_at >= since_7d)
     channel_24h = _group_counts(db, AlertDeliveryAttempt, AlertDeliveryAttempt.channel, AlertDeliveryAttempt.created_at >= since_24h)
     channel_7d = _group_counts(db, AlertDeliveryAttempt, AlertDeliveryAttempt.channel, AlertDeliveryAttempt.created_at >= since_7d)
-    invariant_counts = _alert_delivery_invariant_counts(db)
+    delivery_integrity_summary = build_alert_delivery_integrity_summary(db)
     recent_delivery = db.scalars(
         select(AlertDeliveryAttempt)
         .where(AlertDeliveryAttempt.status.in_(["failed", "unknown"]))
@@ -1277,7 +1306,7 @@ def admin_system(request: Request, db: Session = Depends(get_db)):
     except Exception:
         alembic_revision = "Not checked in web request; verify with alembic current during deploy."
 
-    invariant_items = "".join(f"<li>{html.escape(k)}: {v}</li>" for k, v in invariant_counts.items())
+    delivery_integrity_html = _render_delivery_integrity_summary(delivery_integrity_summary, scope_label="all time")
     volume_items = "".join(f"<li>{html.escape(k)}: {v}</li>" for k, v in volumes.items())
     body = (
         "<h1>Состояние / System health</h1><p class='preview'>Read-only dashboard from existing worker status and bounded SQL counters. No forms, no POST actions, no external checks.</p>"
@@ -1285,7 +1314,7 @@ def admin_system(request: Request, db: Session = Depends(get_db)):
         f"<section class='section'><h2>Worker cycle status</h2>{worker_table}<details><summary>Redacted technical details</summary><pre>{redact_admin_json({'status_file_basename': _safe_status_path(summary.get('path')), 'state': summary.get('state')})}</pre></details></section>"
         f"<section class='section'><h2>Parser diagnostics</h2><table>{parser_rows}</table></section>"
         f"<section class='section'><h2>Search jobs</h2><p>total: {search_total}; active: {active}; inactive: {search_total - active}; with last_error: {search_errors}; oldest last_checked_at: {display_datetime(oldest_last)}; latest last_checked_at: {display_datetime(latest_last)}</p></section>"
-        f"<section class='section'><h2>Alert Delivery health</h2><p>delivery attempts total: {_count_model(db, AlertDeliveryAttempt)}; last 24h: {sum(status_24h.values())}; last 7d: {sum(status_7d.values())}; failed 24h/7d: {status_24h.get('failed', 0)}/{status_7d.get('failed', 0)}; unknown 24h/7d: {status_24h.get('unknown', 0)}/{status_7d.get('unknown', 0)}; manual_retry attempts: {manual_retry_count}; alerts_sent total: {_count_model(db, AlertSent)}</p><p>status counts 24h: {_render_counts(status_24h)}<br>status counts 7d: {_render_counts(status_7d)}<br>channel counts 24h: {_render_counts(channel_24h)}<br>channel counts 7d: {_render_counts(channel_7d)}<br>alerts_sent by channel: {_render_counts(_group_counts(db, AlertSent, AlertSent.channel))}</p><h3>PR20 delivery invariant counters</h3><ul>{invariant_items}</ul></section>"
+        f"<section class='section'><h2>Alert Delivery health</h2><p>delivery attempts total: {_count_model(db, AlertDeliveryAttempt)}; last 24h: {sum(status_24h.values())}; last 7d: {sum(status_7d.values())}; failed 24h/7d: {status_24h.get('failed', 0)}/{status_7d.get('failed', 0)}; unknown 24h/7d: {status_24h.get('unknown', 0)}/{status_7d.get('unknown', 0)}; manual_retry attempts: {manual_retry_count}; alerts_sent total: {_count_model(db, AlertSent)}</p><p>status counts 24h: {_render_counts(status_24h)}<br>status counts 7d: {_render_counts(status_7d)}<br>channel counts 24h: {_render_counts(channel_24h)}<br>channel counts 7d: {_render_counts(channel_7d)}<br>alerts_sent by channel: {_render_counts(_group_counts(db, AlertSent, AlertSent.channel))}</p>{delivery_integrity_html}</section>"
         f"<section class='section'><h2>Recent failed delivery attempts</h2><table><tr><th>id</th><th>created_at</th><th>channel</th><th>listing_external_id</th><th>status</th><th>error_type</th><th>last_error</th><th>detail</th></tr>{delivery_rows}</table></section>"
         f"<section class='section'><h2>Agent tasks</h2><p>total: {_count_model(db, AgentTask)}; by status: {_render_counts(_group_counts(db, AgentTask, AgentTask.status))}; by task_type/status: {_render_counts({f'{r[0]}/{r[1]}': r[2] for r in db.execute(select(AgentTask.task_type, AgentTask.status, func.count()).group_by(AgentTask.task_type, AgentTask.status)).all()})}; stuck running older than 2h: {stuck_tasks}</p><table><tr><th>id</th><th>task_type</th><th>status</th><th>error_type</th><th>created_at</th><th>updated_at</th><th>started_at</th><th>finished_at</th></tr>{task_rows}</table></section>"
         f"<section class='section'><h2>Analysis summary</h2><p>total: {_count_model(db, ListingAnalysis)}; by status: {_render_counts(_group_counts(db, ListingAnalysis, ListingAnalysis.status))}; by profile/status: {_render_counts({f'{r[0]}/{r[1]}': r[2] for r in db.execute(select(ListingAnalysis.profile, ListingAnalysis.status, func.count()).group_by(ListingAnalysis.profile, ListingAnalysis.status)).all()})}</p><table><tr><th>id</th><th>listing_external_id</th><th>profile</th><th>status</th><th>error_type</th><th>error</th><th>created_at</th><th>updated_at</th></tr>{analysis_rows}</table></section>"
@@ -1390,7 +1419,7 @@ def alerts(
         row.id: (row.dedupe_key, row.listing_external_id, row.channel) in matched_keys
         for row in attempt_rows
     }
-    invariant_counts = _alert_delivery_invariant_counts(db)
+    delivery_integrity_summary = build_alert_delivery_integrity_summary(db, since=since)
     attempt_table_rows = []
     for row in attempt_rows:
         listing_id = listing_by_external.get(row.listing_external_id)
@@ -1412,7 +1441,7 @@ def alerts(
         attempts_empty = "<p>Попытки доставки ещё не зафиксированы. Это нормально, если после PR20a не было новых доставок уведомлений.</p>"
     channel_summary = ", ".join(f"{html.escape(str(k))}: {v}" for k, v in sorted(channel_counts.items())) or "—"
     status_summary = "".join(f"<li>{status}: {status_counts.get(status, 0)}</li>" for status in ["success", "failed", "skipped", "unknown"])
-    invariant_items = "".join(f"<li>{html.escape(key)}: {value}</li>" for key, value in invariant_counts.items())
+    delivery_integrity_html = _render_delivery_integrity_summary(delivery_integrity_summary, scope_label="in selected period")
     attempts_table = (
         "<table><tr><th>id</th><th>created_at</th><th>listing_external_id</th><th>channel</th><th>status</th><th>error_type</th><th>attempt_count</th><th>sent_at</th><th>next_retry_at</th><th>search_name</th><th>payload_hash prefix</th><th>last_error preview</th><th>AlertSent match</th><th>details</th></tr>"
         + "".join(attempt_table_rows)
@@ -1428,7 +1457,7 @@ def alerts(
         f"{_admin_query_api_key_input(api_key)}"
         f"<div class='row'><label>status<input name='status' value='{_html_attr(normalized_status)}'></label><label>channel<input name='channel' value='{_html_attr(normalized_channel)}'></label><label>listing_external_id<input name='listing_external_id' value='{_html_attr(normalized_listing_external_id)}'></label><label>dedupe_key<input name='dedupe_key' value='{_html_attr(normalized_dedupe_key)}'></label><label>search_job_id<input name='search_job_id' value='{_html_attr(normalized_search_job_id or '')}'></label><label>hours<input name='hours' type='number' min='1' max='720' value='{effective_hours}'></label><label>limit<input name='limit' type='number' min='1' max='200' value='{effective_limit}'></label></div>"
         "<button type='submit'>Apply delivery filters</button></form>"
-        f"<h2>Проверка инвариантов доставки</h2><p>Expected healthy values: 0 for all counters.</p><ul>{invariant_items}</ul>{attempts_table}</section>"
+        f"{delivery_integrity_html}{attempts_table}</section>"
     )
     body = (
         f"<h1>История уведомлений</h1><p><a href='{_html_attr(_admin_url('/admin/searches', api_key))}'>Back to searches</a> · <a href='{_html_attr(_admin_url('/admin/listings', api_key))}'>Listings</a> · <a href='{_html_attr(_admin_url('/admin/listing-analyses', api_key))}'>Listing analyses</a></p>"
@@ -1472,6 +1501,7 @@ def alert_delivery_attempt_detail(request: Request, attempt_id: int, db: Session
         ("error_type", attempt.error_type),
         ("last_error", _redact_alert_error(attempt.last_error, 500)),
         ("matching AlertSent", "yes" if alert_sent else "no"),
+        ("delivery resolution", "Resolved by later delivery" if attempt.status in NON_SUCCESS_ALERT_DELIVERY_STATUSES and alert_sent is not None and alert_sent.created_at >= attempt.created_at else "—"),
         ("matching listing", listing_block),
     ]
     rows = "".join(

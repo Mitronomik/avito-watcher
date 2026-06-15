@@ -238,11 +238,14 @@ Production smoke should be safe: verify the app health and Alembic state, confir
 
 ## Alert delivery dashboard
 
-`GET /admin/alerts` preserves the existing JSONL alert view and adds a read-only alert delivery dashboard for the PR20a `alert_delivery_attempts` ledger. The section shows bounded recent delivery attempts, status/channel summaries, a `hours=168` default period, filters for status/channel/listing external id/dedupe key/search job id, live-delivery observed state, and delivery invariant counters.
+`GET /admin/alerts` preserves the existing JSONL alert view and adds a read-only alert delivery dashboard for the PR20a `alert_delivery_attempts` ledger. The section shows bounded recent delivery attempts, status/channel summaries, a `hours=168` default period, filters for status/channel/listing external id/dedupe key/search job id, live-delivery observed state, and PR21b grouped delivery integrity read-model counters.
 
-`GET /admin/alerts/delivery-attempts/{attempt_id}` shows one safe delivery attempt detail page with matching `AlertSent` and listing context when available. The page renders only safe scalar fields, a payload hash prefix, and redacted/truncated errors. It never renders raw payloads or secrets.
+`GET /admin/alerts/delivery-attempts/{attempt_id}` shows one safe delivery attempt detail page with matching `AlertSent` and listing context when available. The page renders only safe scalar fields, a payload hash prefix, and redacted/truncated errors. It never renders raw payloads or secrets. If a failed/skipped/unknown historical attempt has a matching `AlertSent` created at the same time or later, the detail page can label it as resolved by later delivery; this is informational and does not enable retry.
 
 The dashboard is read-only. It adds no POST mutation routes, retry button, manual retry, automatic retry, scheduler, worker health, parser health, queue lag, SLA metrics, or migration. Admin read authentication is sufficient; write and technical keys are not required.
+
+
+PR21b normalizes alert delivery counter semantics on both `/admin/alerts` and `/admin/system` using the same read-only helper. The old `non_success_with_alert_sent` meaning is split into `resolved_non_success_with_later_alert_sent` for historical failed/skipped/unknown attempts later resolved by success, and `non_success_after_alert_sent` for the suspicious inverse timestamp case that remains a true integrity issue. True integrity issues are grouped separately from resolved delivery history. `next_retry_at_non_null` is shown under retry scheduling indicators, not as a hard violation. This PR changes labels/read-model semantics only: no delivery behavior, retry behavior, `AlertSent` creation, delivery-attempt creation, schema, or migration changes. Manual retry remains blocked whenever an exact matching `AlertSent` exists.
 
 ## PR20c manual retry for alert delivery attempts
 
@@ -263,7 +266,7 @@ The dashboard is a bounded read model only. It uses:
 - the existing worker status file helpers (`read_worker_status` and `summarize_worker_status`);
 - parser diagnostic fields that already exist in the worker status payload;
 - bounded SQL counters for searches, alert deliveries, agent tasks, analyses, and data volumes;
-- the same PR20 alert-delivery invariant definitions used by the alert dashboard;
+- the same PR21b alert-delivery integrity summary definitions used by the alert dashboard, including separate true integrity issues, resolved delivery history, and retry scheduling indicators;
 - the `alembic_version` table when it can be read safely from the DB.
 
 The page explicitly does **not**:
