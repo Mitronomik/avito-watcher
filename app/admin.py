@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import APIKeyHeader
-from sqlalchemy import func, or_, select, tuple_
+from sqlalchemy import func, or_, select, text, tuple_
 from sqlalchemy.orm import Session, raiseload
 
 from app.cli import _build_parser, _parser_stats_snapshot
@@ -21,7 +21,11 @@ from app.models.listing import Listing
 from app.models.alert_delivery_attempt import AlertDeliveryAttempt
 from app.models.alert_sent import AlertSent
 from app.models.listing_analysis import ListingAnalysis
-from app.models.human_review import HUMAN_VERDICTS, NEXT_ACTIONS, OUTCOME_STATUSES, HumanReviewAction
+from app.models.search_job import SearchJob
+from app.models.listing_detail_snapshot import ListingDetailSnapshot
+from app.models.listing_enrichment import ListingEnrichment
+from app.models.knowledge_note import KnowledgeNote
+from app.models.human_review import HUMAN_VERDICTS, NEXT_ACTIONS, OUTCOME_STATUSES, HumanReview, HumanReviewAction, InvestmentDecision
 from app.models.agent_task import AgentTask
 from app.models.market_evidence import MarketEvidenceItem, MarketResearchRun
 from app.schemas.outcome_analytics import OutcomeAnalyticsRequest
@@ -36,7 +40,7 @@ from app.utils.formatting import build_listing_message
 from app.services.alert_delivery_attempts import compute_alert_payload_hash
 from app.services.alert_delivery_attempts import sanitize_alert_delivery_error
 from app.services.human_reviews import HumanReviewService, HumanReviewValidationError, build_review_context_key
-from app.workers.status import read_worker_status, summarize_worker_status
+from app.workers.status import PARSER_STATUS_FIELDS, read_worker_status, summarize_worker_status
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,120}$")
 FRESHNESS_PRESETS = {"12": 12.0, "24": 24.0, "48": 48.0, "72": 72.0}
@@ -85,6 +89,7 @@ def redact_admin_value(value: object, key: str = "") -> str:
             text = urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
     if "script.google.com" in text:
         return "https://script.google.com/.../exec"
+    text = re.sub(r"(?i)\b(secret|token|api_key|apikey|authorization|auth|password|passwd|cookie|webhook|smtp|telegram|provider_key|access_key|refresh_token|bearer|proxy)\s*[:=]\s*[^\s;&<]+", r"\1=[redacted]", text)
     return truncate_admin_text(text, 500)
 
 def _redact_obj(value: object, key: str = "") -> object:
@@ -296,7 +301,7 @@ def _keywords(value: str) -> list[str] | None:
 
 
 def _admin_nav() -> str:
-    links = [("/admin", "nav.dashboard"), ("/admin/listings", "nav.listings"), ("/admin/searches", "nav.searches"), ("/admin/alerts", "nav.alerts"), ("/admin/listing-analyses", "nav.analyses"), ("/admin/evidence", "nav.evidence"), ("/admin/agents", "nav.agents"), ("/admin/outcome-analytics", "nav.outcome_analytics"), ("/admin/technical", "nav.technical")]
+    links = [("/admin", "nav.dashboard"), ("/admin/listings", "nav.listings"), ("/admin/searches", "nav.searches"), ("/admin/alerts", "nav.alerts"), ("/admin/listing-analyses", "nav.analyses"), ("/admin/evidence", "nav.evidence"), ("/admin/agents", "nav.agents"), ("/admin/outcome-analytics", "nav.outcome_analytics"), ("/admin/system", "nav.system"), ("/admin/technical", "nav.technical")]
     return "<nav>" + " · ".join(f"<a href='{href}'>{html.escape(_t(key))}</a>" for href, key in links) + "</nav>"
 
 def _render_page(title: str, body: str) -> HTMLResponse:
@@ -352,6 +357,46 @@ def _render_worker_cycle_status() -> str:
         f"<strong>Parser counters:</strong> {counters}"
         f"{error_note}"
     )
+
+def _safe_status_path(path: object) -> str:
+    name = Path(str(path or "")).name
+    return "[redacted]" if _SECRET_KEY_RE.search(name) else redact_admin_value(name or "—", "path")
+
+
+def _safe_cell(value: object, key: str = "", limit: int = 180) -> str:
+    return html.escape(truncate_admin_text(redact_admin_value(value, key), limit))
+
+
+def _count_model(db: Session, model: object) -> int:
+    try:
+        return int(db.scalar(select(func.count()).select_from(model)) or 0)
+    except Exception:
+        return 0
+
+
+def _group_counts(db: Session, model: object, column: object, *where) -> dict[str, int]:
+    try:
+        rows = db.execute(select(column, func.count()).select_from(model).where(*where).group_by(column)).all()
+        return {str(k or "—"): int(v or 0) for k, v in rows}
+    except Exception:
+        return {}
+
+
+def _render_counts(items: dict[str, int]) -> str:
+    return ", ".join(f"{html.escape(str(k))}: {v}" for k, v in sorted(items.items())) or "—"
+
+
+def _alert_delivery_invariant_counts(db: Session) -> dict[str, int]:
+    dialect = db.bind.dialect.name if db.bind else ""
+    return {
+        "success_without_alert_sent": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.status == "success", ~_matching_alert_sent_exists())) or 0,
+        "non_success_with_alert_sent": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.status.in_(["failed", "skipped", "unknown"]), _matching_alert_sent_exists())) or 0,
+        "success_missing_sent_at": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.status == "success", AlertDeliveryAttempt.sent_at.is_(None))) or 0,
+        "non_success_with_sent_at": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.status.in_(["failed", "skipped", "unknown"]), AlertDeliveryAttempt.sent_at.is_not(None))) or 0,
+        "non_null_next_retry_at": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.next_retry_at.is_not(None))) or 0,
+        "bad_payload_hash_count": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(_payload_hash_is_bad_clause(dialect))) or 0,
+    }
+
 
 def _truncate(value: object, limit: int = 120) -> str:
     text = str(value or "")
@@ -1141,6 +1186,115 @@ def _payload_hash_is_bad_clause(dialect_name: str = "") -> object:
     )
 
 
+@router.get('/system', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
+def admin_system(request: Request, db: Session = Depends(get_db)):
+    api_key = request.query_params.get("api_key")
+    raw_status = read_worker_status(settings.monitor_worker_status_path)
+    summary = summarize_worker_status(raw_status, stale_after_seconds=settings.monitor_worker_stale_after_seconds)
+    payload = summary.get("payload") or {}
+    badge = summary.get("badge") or {"label": "Unknown", "color": "gray"}
+    cycle_ok = summary.get("cycle_ok")
+    cycle_badge = _badge("Cycle OK", "green") if cycle_ok is True else (_badge("Last cycle failed", "red") if cycle_ok is False else _badge("Cycle unknown", "gray"))
+    worker_rows = [
+        ("status", _badge(str(badge.get("label", "Unknown")), str(badge.get("color", "gray")))),
+        ("status file state", html.escape(str(summary.get("state") or "missing"))),
+        ("status file basename", f"<code>{_safe_cell(_safe_status_path(summary.get('path')), 'path')}</code>"),
+        ("updated_at", _safe_cell(summary.get("updated_at") or "—")),
+        ("age_seconds", _safe_cell(summary.get("age_seconds") if summary.get("age_seconds") is not None else "—")),
+        ("stale_after_seconds", _safe_cell(summary.get("stale_after_seconds"))),
+        ("cycle_ok", cycle_badge),
+        ("cycle_error_type", _safe_cell(payload.get("cycle_error_type") or "—", "cycle_error_type")),
+        ("cycle_error", _safe_cell(payload.get("cycle_error") or summary.get("error") or "—", "cycle_error", 220)),
+        ("searches_processed", _safe_cell(payload.get("searches_processed", "—"))),
+        ("result_count", _safe_cell(payload.get("result_count", "—"))),
+    ]
+    worker_table = "<table>" + "".join(f"<tr><th>{html.escape(k)}</th><td>{v}</td></tr>" for k, v in worker_rows) + "</table>"
+    parser_rows = "".join(
+        f"<tr><th>{html.escape(field)}</th><td>{_safe_cell(payload.get(field), field)}</td></tr>"
+        for field in PARSER_STATUS_FIELDS
+        if field in payload
+    ) or "<tr><td colspan='2'>unknown</td></tr>"
+
+    search_total = _count_model(db, SearchJob)
+    active = db.scalar(select(func.count()).select_from(SearchJob).where(SearchJob.is_active.is_(True))) or 0
+    search_errors = db.scalar(select(func.count()).select_from(SearchJob).where(SearchJob.last_error.is_not(None), SearchJob.last_error != "")) or 0
+    oldest_last = db.scalar(select(func.min(SearchJob.last_checked_at)))
+    latest_last = db.scalar(select(func.max(SearchJob.last_checked_at)))
+
+    now = datetime.utcnow()
+    since_24h = now - timedelta(hours=24)
+    since_7d = now - timedelta(days=7)
+    status_24h = _group_counts(db, AlertDeliveryAttempt, AlertDeliveryAttempt.status, AlertDeliveryAttempt.created_at >= since_24h)
+    status_7d = _group_counts(db, AlertDeliveryAttempt, AlertDeliveryAttempt.status, AlertDeliveryAttempt.created_at >= since_7d)
+    channel_24h = _group_counts(db, AlertDeliveryAttempt, AlertDeliveryAttempt.channel, AlertDeliveryAttempt.created_at >= since_24h)
+    channel_7d = _group_counts(db, AlertDeliveryAttempt, AlertDeliveryAttempt.channel, AlertDeliveryAttempt.created_at >= since_7d)
+    invariant_counts = _alert_delivery_invariant_counts(db)
+    recent_delivery = db.scalars(
+        select(AlertDeliveryAttempt)
+        .where(AlertDeliveryAttempt.status.in_(["failed", "unknown"]))
+        .order_by(AlertDeliveryAttempt.created_at.desc(), AlertDeliveryAttempt.id.desc())
+        .limit(20)
+    ).all()
+    delivery_rows = "".join(
+        f"<tr><td>{a.id}</td><td>{display_datetime(a.created_at)}</td><td>{_safe_cell(a.channel, 'channel')}</td><td>{_safe_cell(a.listing_external_id, 'listing_external_id')}</td><td>{_safe_cell(a.status, 'status')}</td><td>{_safe_cell(a.error_type or '—', 'error_type')}</td><td>{html.escape(_redact_alert_error(a.last_error, 220))}</td><td><a href='{_html_attr(_admin_url(f'/admin/alerts/delivery-attempts/{a.id}', api_key))}'>details</a></td></tr>"
+        for a in recent_delivery
+    ) or "<tr><td colspan='8'>No recent failed or unknown attempts.</td></tr>"
+    manual_retry_count = db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.search_name.like("manual_retry%"))) or 0
+
+    failed_tasks = db.scalars(select(AgentTask).where(AgentTask.status == "failed").order_by(AgentTask.updated_at.desc(), AgentTask.id.desc()).limit(20)).all()
+    task_rows = "".join(
+        f"<tr><td>{t.id}</td><td>{_safe_cell(t.task_type, 'task_type')}</td><td>{_safe_cell(t.status, 'status')}</td><td>{_safe_cell(t.error_type or '—', 'error_type')}</td><td>{display_datetime(t.created_at)}</td><td>{display_datetime(t.updated_at)}</td><td>{display_datetime(t.started_at)}</td><td>{display_datetime(t.finished_at)}</td></tr>"
+        for t in failed_tasks
+    ) or "<tr><td colspan='8'>No recent failed agent tasks.</td></tr>"
+    stuck_cutoff = now - timedelta(hours=2)
+    stuck_tasks = db.scalar(select(func.count()).select_from(AgentTask).where(AgentTask.status == "running", or_(AgentTask.updated_at < stuck_cutoff, AgentTask.started_at < stuck_cutoff))) or 0
+
+    failed_analyses = db.scalars(select(ListingAnalysis).where(ListingAnalysis.status == "failed").order_by(ListingAnalysis.updated_at.desc(), ListingAnalysis.id.desc()).limit(20)).all()
+    analysis_rows = "".join(
+        f"<tr><td>{a.id}</td><td>{_safe_cell(a.listing_external_id, 'listing_external_id')}</td><td>{_safe_cell(a.profile, 'profile')}</td><td>{_safe_cell(a.status, 'status')}</td><td>{_safe_cell(a.error_type or '—', 'error_type')}</td><td>{_safe_cell(a.error_message or '—', 'error_message', 220)}</td><td>{display_datetime(a.created_at)}</td><td>{display_datetime(a.updated_at)}</td></tr>"
+        for a in failed_analyses
+    ) or "<tr><td colspan='8'>No recent failed analyses.</td></tr>"
+
+    volumes = {
+        "listings": _count_model(db, Listing),
+        "listing_analyses": _count_model(db, ListingAnalysis),
+        "alert_delivery_attempts": _count_model(db, AlertDeliveryAttempt),
+        "alerts_sent": _count_model(db, AlertSent),
+        "agent_tasks": _count_model(db, AgentTask),
+        "human_reviews": _count_model(db, HumanReview),
+        "human_review_actions": _count_model(db, HumanReviewAction),
+        "investment_decisions": _count_model(db, InvestmentDecision),
+        "market_research_runs": _count_model(db, MarketResearchRun),
+        "market_evidence_items": _count_model(db, MarketEvidenceItem),
+        "listing_detail_snapshots": _count_model(db, ListingDetailSnapshot),
+        "listing_enrichments": _count_model(db, ListingEnrichment),
+        "knowledge_notes": _count_model(db, KnowledgeNote),
+        "search_jobs": _count_model(db, SearchJob),
+    }
+    try:
+        alembic_rows = db.execute(select(text("version_num")).select_from(text("alembic_version"))).all()
+        alembic_revision = ", ".join(str(r[0]) for r in alembic_rows) or "Not checked in web request; verify with alembic current during deploy."
+    except Exception:
+        alembic_revision = "Not checked in web request; verify with alembic current during deploy."
+
+    invariant_items = "".join(f"<li>{html.escape(k)}: {v}</li>" for k, v in invariant_counts.items())
+    volume_items = "".join(f"<li>{html.escape(k)}: {v}</li>" for k, v in volumes.items())
+    body = (
+        "<h1>Состояние / System health</h1><p class='preview'>Read-only dashboard from existing worker status and bounded SQL counters. No forms, no POST actions, no external checks.</p>"
+        f"<section class='section'><h2>Overall status</h2>{worker_table}</section>"
+        f"<section class='section'><h2>Worker cycle status</h2>{worker_table}<details><summary>Redacted technical details</summary><pre>{redact_admin_json({'status_file_basename': _safe_status_path(summary.get('path')), 'state': summary.get('state')})}</pre></details></section>"
+        f"<section class='section'><h2>Parser diagnostics</h2><table>{parser_rows}</table></section>"
+        f"<section class='section'><h2>Search jobs</h2><p>total: {search_total}; active: {active}; inactive: {search_total - active}; with last_error: {search_errors}; oldest last_checked_at: {display_datetime(oldest_last)}; latest last_checked_at: {display_datetime(latest_last)}</p></section>"
+        f"<section class='section'><h2>Alert Delivery health</h2><p>delivery attempts total: {_count_model(db, AlertDeliveryAttempt)}; last 24h: {sum(status_24h.values())}; last 7d: {sum(status_7d.values())}; failed 24h/7d: {status_24h.get('failed', 0)}/{status_7d.get('failed', 0)}; unknown 24h/7d: {status_24h.get('unknown', 0)}/{status_7d.get('unknown', 0)}; manual_retry attempts: {manual_retry_count}; alerts_sent total: {_count_model(db, AlertSent)}</p><p>status counts 24h: {_render_counts(status_24h)}<br>status counts 7d: {_render_counts(status_7d)}<br>channel counts 24h: {_render_counts(channel_24h)}<br>channel counts 7d: {_render_counts(channel_7d)}<br>alerts_sent by channel: {_render_counts(_group_counts(db, AlertSent, AlertSent.channel))}</p><h3>PR20 delivery invariant counters</h3><ul>{invariant_items}</ul></section>"
+        f"<section class='section'><h2>Recent failed delivery attempts</h2><table><tr><th>id</th><th>created_at</th><th>channel</th><th>listing_external_id</th><th>status</th><th>error_type</th><th>last_error</th><th>detail</th></tr>{delivery_rows}</table></section>"
+        f"<section class='section'><h2>Agent tasks</h2><p>total: {_count_model(db, AgentTask)}; by status: {_render_counts(_group_counts(db, AgentTask, AgentTask.status))}; by task_type/status: {_render_counts({f'{r[0]}/{r[1]}': r[2] for r in db.execute(select(AgentTask.task_type, AgentTask.status, func.count()).group_by(AgentTask.task_type, AgentTask.status)).all()})}; stuck running older than 2h: {stuck_tasks}</p><table><tr><th>id</th><th>task_type</th><th>status</th><th>error_type</th><th>created_at</th><th>updated_at</th><th>started_at</th><th>finished_at</th></tr>{task_rows}</table></section>"
+        f"<section class='section'><h2>Analysis summary</h2><p>total: {_count_model(db, ListingAnalysis)}; by status: {_render_counts(_group_counts(db, ListingAnalysis, ListingAnalysis.status))}; by profile/status: {_render_counts({f'{r[0]}/{r[1]}': r[2] for r in db.execute(select(ListingAnalysis.profile, ListingAnalysis.status, func.count()).group_by(ListingAnalysis.profile, ListingAnalysis.status)).all()})}</p><table><tr><th>id</th><th>listing_external_id</th><th>profile</th><th>status</th><th>error_type</th><th>error</th><th>created_at</th><th>updated_at</th></tr>{analysis_rows}</table></section>"
+        f"<section class='section'><h2>Data volume summary</h2><ul>{volume_items}</ul></section>"
+        f"<section class='section'><h2>Alembic</h2><p>current DB revision: <code>{html.escape(alembic_revision)}</code></p></section>"
+    )
+    return _render_page("System health", body)
+
+
 @router.get('/alerts', response_class=HTMLResponse, dependencies=[Depends(_require_admin_api_key)])
 def alerts(
     request: Request,
@@ -1236,14 +1390,7 @@ def alerts(
         row.id: (row.dedupe_key, row.listing_external_id, row.channel) in matched_keys
         for row in attempt_rows
     }
-    invariant_counts = {
-        "success_without_alert_sent": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.status == "success", ~_matching_alert_sent_exists())) or 0,
-        "non_success_with_alert_sent": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.status.in_(["failed", "skipped", "unknown"]), _matching_alert_sent_exists())) or 0,
-        "success_missing_sent_at": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.status == "success", AlertDeliveryAttempt.sent_at.is_(None))) or 0,
-        "non_success_with_sent_at": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.status.in_(["failed", "skipped", "unknown"]), AlertDeliveryAttempt.sent_at.is_not(None))) or 0,
-        "non_null_next_retry_at": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(AlertDeliveryAttempt.next_retry_at.is_not(None))) or 0,
-        "bad_payload_hash_count": db.scalar(select(func.count()).select_from(AlertDeliveryAttempt).where(_payload_hash_is_bad_clause(db.bind.dialect.name if db.bind else ""))) or 0,
-    }
+    invariant_counts = _alert_delivery_invariant_counts(db)
     attempt_table_rows = []
     for row in attempt_rows:
         listing_id = listing_by_external.get(row.listing_external_id)
