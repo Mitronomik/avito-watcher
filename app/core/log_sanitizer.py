@@ -134,10 +134,19 @@ def sanitize_log_text(value: object) -> str:
 
 
 class RedactingFormatter(logging.Formatter):
-    """Formatter that sanitizes the final formatted log line including tracebacks."""
+    """Formatter wrapper that sanitizes fully rendered log output.
+
+    The wrapped formatter remains responsible for message formatting, time
+    formatting, exception rendering, formatting style, and any custom formatter
+    behavior.  This wrapper only redacts the final string returned by it.
+    """
+
+    def __init__(self, wrapped: logging.Formatter | None = None):
+        super().__init__()
+        self.wrapped = wrapped or logging.Formatter()
 
     def format(self, record: logging.LogRecord) -> str:  # noqa: A003 - logging API name
-        return sanitize_log_text(super().format(record))
+        return sanitize_log_text(self.wrapped.format(record))
 
 
 def _sanitize_arg(value: object) -> object:
@@ -171,9 +180,4 @@ def install_log_redaction() -> None:
             handler.addFilter(RedactingFilter())
         formatter = handler.formatter
         if not isinstance(formatter, RedactingFormatter):
-            if formatter is None:
-                handler.setFormatter(RedactingFormatter())
-            else:
-                handler.setFormatter(
-                    RedactingFormatter(formatter._fmt, formatter.datefmt)  # noqa: SLF001
-                )
+            handler.setFormatter(RedactingFormatter(formatter))

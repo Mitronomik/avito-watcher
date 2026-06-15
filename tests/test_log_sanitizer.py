@@ -109,7 +109,7 @@ def test_sanitizer_never_raises_and_is_idempotent_and_does_not_mutate_inputs():
 def test_redacting_formatter_sanitizes_final_output_and_exception_traceback():
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)
-    handler.setFormatter(RedactingFormatter("%(levelname)s:%(name)s:%(message)s"))
+    handler.setFormatter(RedactingFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s")))
     logger = logging.getLogger("tests.redacting.exception")
     logger.handlers = [handler]
     logger.propagate = False
@@ -145,7 +145,53 @@ def test_redacting_filter_sanitizes_record_message_and_args_without_mutating_ori
     assert secret_args["token"] == "fake-dict-token"
 
 
-def test_installed_redaction_covers_root_httpx_and_worker_style_loggers():
+def test_installed_redaction_wraps_brace_style_formatter():
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("{levelname}:{name}:{message}", style="{"))
+    root = logging.getLogger()
+    old_handlers = root.handlers[:]
+    old_level = root.level
+    try:
+        root.handlers = [handler]
+        root.setLevel(logging.INFO)
+        install_log_redaction()
+        logging.getLogger("tests.redacting.brace").info("url=%s", APP_SCRIPT_EXEC)
+    finally:
+        root.handlers = old_handlers
+        root.setLevel(old_level)
+
+    output = stream.getvalue()
+    assert "INFO:tests.redacting.brace:url=https://script.google.com/.../exec" in output
+    assert "fake-secret-deployment-id" not in output
+
+
+def test_installed_redaction_wraps_custom_formatter_behavior():
+    class PrefixFormatter(logging.Formatter):
+        def format(self, record):  # noqa: A003 - logging API name
+            return f"CUSTOM::{record.levelname}::{record.getMessage()}"
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(PrefixFormatter())
+    root = logging.getLogger()
+    old_handlers = root.handlers[:]
+    old_level = root.level
+    try:
+        root.handlers = [handler]
+        root.setLevel(logging.INFO)
+        install_log_redaction()
+        logging.getLogger("tests.redacting.custom").info("echo=%s", ECHO_URL)
+    finally:
+        root.handlers = old_handlers
+        root.setLevel(old_level)
+
+    output = stream.getvalue()
+    assert output.startswith("CUSTOM::INFO::echo=https://script.googleusercontent.com/macros/echo?")
+    assert_not_leaked(output, "fake-user-content-key", "fake-lib-id")
+
+
+def test_installed_redaction_covers_root_httpx_httpcore_and_worker_style_loggers():
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)
     handler.setFormatter(logging.Formatter("%(name)s:%(message)s"))
@@ -157,6 +203,7 @@ def test_installed_redaction_covers_root_httpx_and_worker_style_loggers():
         root.setLevel(logging.INFO)
         install_log_redaction()
         logging.getLogger("httpx").info("GET %s", ECHO_URL)
+        logging.getLogger("httpcore").info("connect %s", APP_SCRIPT_DEV)
         logging.getLogger("app.workers.monitor").info("worker url=%s", APP_SCRIPT_EXEC)
     finally:
         root.handlers = old_handlers
@@ -164,8 +211,15 @@ def test_installed_redaction_covers_root_httpx_and_worker_style_loggers():
 
     output = stream.getvalue()
     assert "httpx:" in output
+    assert "httpcore:" in output
     assert "app.workers.monitor:" in output
-    assert_not_leaked(output, "fake-user-content-key", "fake-lib-id", "fake-secret-deployment-id")
+    assert_not_leaked(
+        output,
+        "fake-user-content-key",
+        "fake-lib-id",
+        "fake-secret-deployment-id",
+        "fake-token",
+    )
 
 
 def test_actual_configured_url_is_not_mutated_by_sanitizer_or_logging():
@@ -174,7 +228,7 @@ def test_actual_configured_url_is_not_mutated_by_sanitizer_or_logging():
 
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)
-    handler.setFormatter(RedactingFormatter("%(message)s"))
+    handler.setFormatter(RedactingFormatter(logging.Formatter("%(message)s")))
     logger = logging.getLogger("tests.redacting.request")
     logger.handlers = [handler]
     logger.propagate = False
