@@ -228,7 +228,6 @@ def select_comparable_candidates(
 def _selection_decision(target: ComparableTargetContext, item: MarketCompInput, as_of: datetime, *, max_age_days: int) -> ComparableSelectionDecision:
     base = {"evidence_id": item.id, "source_listing_external_id": item.listing_external_id, "selection_status": "rejected", "selection_stage": "hard_gate"}
     same_listing = bool(target.target_listing_external_id and item.listing_external_id == target.target_listing_external_id)
-    same_listing_policy_without_explicit_target = target.target_listing_external_id is None and target.location_key is None
     if not item.content_hash and not item.source_url_normalized and not item.listing_external_id and item.id is None:
         return ComparableSelectionDecision(**base, rejection_reason="missing_source_trace")
     if item.asset_type != target.asset_type:
@@ -240,7 +239,7 @@ def _selection_decision(target: ComparableTargetContext, item: MarketCompInput, 
     if (as_of - item.checked_at.astimezone(UTC)).days > max_age_days:
         return ComparableSelectionDecision(**base, rejection_reason="stale_evidence")
     matched = ["asset_type", "deal_type"]
-    if same_listing or same_listing_policy_without_explicit_target:
+    if same_listing:
         matched.append("same_listing")
         return ComparableSelectionDecision(item.id, item.listing_external_id, "selected", "hard_gate", selection_reason="same_listing_direct_evidence", selection_flags=["source_trace_present"], matched_on=matched)
     if not target.location_key or not item.location_key:
@@ -400,7 +399,7 @@ def select_market_evidence(
         selected.append(_to_comp(item))
     target = ComparableTargetContext(
         target_listing_id=None,
-        target_listing_external_id=target_listing_external_id,
+        target_listing_external_id=target_listing_external_id or _single_listing_external_id(selected),
         profile=profile,
         estimate_purpose="rent_estimate",
         asset_type=expected_asset_type,
@@ -808,3 +807,8 @@ def market_evidence_fingerprint_hash(context: SelectedMarketEvidenceContext) -> 
 
 def _aware(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _single_listing_external_id(items: list[MarketCompInput]) -> str | None:
+    ids = {i.listing_external_id for i in items if i.listing_external_id}
+    return next(iter(ids)) if len(ids) == 1 else None

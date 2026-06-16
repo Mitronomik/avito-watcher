@@ -127,3 +127,13 @@ def test_facts_are_compact_per_analysis_and_have_no_adjusted_values():
     assert "adjusted_price" not in rendered
     assert "adjusted_median" not in rendered
     assert "comp_adjustment_flags" not in rendered
+
+
+def test_missing_listing_and_location_context_rejects_instead_of_fail_open():
+    result = select_comparable_candidates(
+        _target(target_listing_external_id=None, location_key=None),
+        [_comp(id=30, listing_external_id="other")],
+        as_of=AS_OF,
+    )
+    assert result.decisions[0].selection_status == "rejected"
+    assert result.decisions[0].rejection_reason == "insufficient_match_data"
