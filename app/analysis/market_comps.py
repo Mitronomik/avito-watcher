@@ -45,6 +45,27 @@ ALLOWED_MARKET_EVIDENCE_POLICIES = {
     MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY,
 }
 
+ADJUSTED_COMPARABLE_MODEL_VERSION = "v0"
+ADJUSTED_COMPARABLE_CONFIG_VERSION = "v0"
+MAX_ADJUSTMENT_ABS_PCT = 0.25
+MAX_SINGLE_ADJUSTMENT_ABS_PCT = 0.10
+AREA_ADJUSTMENT_MAX_ABS_PCT = 0.08
+CONDITION_CAPEX_ADJUSTMENT_PCT = 0.05
+FIRST_LINE_ADJUSTMENT_PCT = 0.05
+FLOOR_ACCESS_ADJUSTMENT_PCT = 0.03
+ASKING_TO_EFFECTIVE_DISCOUNT_PCT = 0.05
+FRESHNESS_CONFIDENCE_PENALTY = "low"
+ADJUSTED_COMPARABLE_STALE_DAYS = 30
+MIN_ADJUSTED_COMP_COUNT_FOR_BASE_CONFIDENCE = 3
+MIN_HIGH_OR_MEDIUM_QUALITY_SHARE = 0.5
+MAX_ADJUSTED_COMP_FACT_ITEMS = 10
+
+REASON_AREA_ADJUSTMENT = "area_adjustment"
+REASON_CONDITION_ADJUSTMENT = "condition_adjustment"
+REASON_FIRST_LINE_ADJUSTMENT = "first_line_adjustment"
+REASON_FLOOR_ACCESS_ADJUSTMENT = "floor_access_adjustment"
+REASON_ASKING_TO_EFFECTIVE_DISCOUNT = "asking_to_effective_discount"
+
 
 @dataclass(frozen=True)
 class ResolvedMarketEvidenceConfig:
@@ -73,6 +94,12 @@ class MarketCompInput:
     rent_per_m2_rub: float | None
     rent_rub_per_month: float | None
     area_m2: float | None = None
+    rent_period: str | None = "month"
+    source_type: str | None = None
+    condition: str | None = None
+    capex_required: bool | None = None
+    first_line: bool | None = None
+    floor_access: str | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +112,10 @@ class ComparableTargetContext:
     deal_type: str
     location_key: str | None
     area_m2: float | None
+    first_line: bool | None = None
+    floor_access: str | None = None
+    condition: str | None = None
+    capex_required: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -168,6 +199,67 @@ class ComparableQualityAssessment:
 
 
 @dataclass(frozen=True)
+class AdjustedComparableConfig:
+    max_adjustment_abs_pct: float = MAX_ADJUSTMENT_ABS_PCT
+    max_single_adjustment_abs_pct: float = MAX_SINGLE_ADJUSTMENT_ABS_PCT
+    area_adjustment_max_abs_pct: float = AREA_ADJUSTMENT_MAX_ABS_PCT
+    condition_capex_adjustment_pct: float = CONDITION_CAPEX_ADJUSTMENT_PCT
+    first_line_adjustment_pct: float = FIRST_LINE_ADJUSTMENT_PCT
+    floor_access_adjustment_pct: float = FLOOR_ACCESS_ADJUSTMENT_PCT
+    asking_to_effective_discount_pct: float = ASKING_TO_EFFECTIVE_DISCOUNT_PCT
+    stale_days: int = ADJUSTED_COMPARABLE_STALE_DAYS
+    min_adjusted_comp_count_for_base_confidence: int = (
+        MIN_ADJUSTED_COMP_COUNT_FOR_BASE_CONFIDENCE
+    )
+    min_high_or_medium_quality_share: float = MIN_HIGH_OR_MEDIUM_QUALITY_SHARE
+    max_fact_items: int = MAX_ADJUSTED_COMP_FACT_ITEMS
+
+
+@dataclass(frozen=True)
+class AdjustedComparableItem:
+    evidence_id: int
+    source_listing_external_id: str | None
+    raw_rent: float | None
+    raw_rent_period: str | None
+    raw_rent_per_m2: float
+    adjusted_rent: float | None
+    adjusted_rent_per_m2: float
+    adjustment_delta_pct: float
+    adjustment_reasons: list[str]
+    adjustment_flags: list[str]
+    adjustment_cap_applied: bool
+    quality_bucket: str | None
+    selection_reason: str | None
+    source_trace_ref: str | None
+
+
+@dataclass(frozen=True)
+class AdjustedComparableResult:
+    version: str
+    config_version: str
+    as_of: datetime
+    target_context: ComparableTargetContext
+    selected_count: int
+    adjusted_count: int
+    excluded_from_adjusted_count: int
+    items: list[AdjustedComparableItem]
+    raw_median_rent_per_m2: float | None
+    adjusted_median_rent_per_m2: float | None
+    raw_median_rent: float | None
+    adjusted_median_rent: float | None
+    confidence: str
+    confidence_cap: str | None
+    review_reasons: list[str]
+    adjustment_summary: dict[str, int]
+    adjusted_median_used: bool
+    adjusted_median_not_used_reason: str | None
+    market_estimate_source: str
+
+    def facts(self, *, max_items: int = MAX_ADJUSTED_COMP_FACT_ITEMS) -> dict[str, Any]:
+        return adjusted_comparable_facts(self, max_items=max_items)
+
+
+@dataclass(frozen=True)
 class MarketRentEstimate:
     monthly_rent: float | None
     rent_per_m2: float | None
@@ -178,7 +270,6 @@ class MarketRentEstimate:
     content_hashes: list[str]
     source_urls: list[str]
     risk_flags: list[str]
-
 
 
 def select_comparable_candidates(
@@ -194,18 +285,39 @@ def select_comparable_candidates(
     if as_of.tzinfo is None:
         raise ValueError("as_of must be timezone-aware")
     as_of_utc = as_of.astimezone(UTC)
-    safe_candidate_limit = max(0, min(int(candidate_limit), COMPARABLE_SELECTION_MAX_CANDIDATES))
-    safe_selected_limit = max(0, min(int(selected_limit), COMPARABLE_SELECTION_MAX_CANDIDATES))
-    considered = sorted(evidence_candidates, key=lambda c: (-c.confidence, -c.checked_at.timestamp(), c.id))[:safe_candidate_limit]
+    safe_candidate_limit = max(
+        0, min(int(candidate_limit), COMPARABLE_SELECTION_MAX_CANDIDATES)
+    )
+    safe_selected_limit = max(
+        0, min(int(selected_limit), COMPARABLE_SELECTION_MAX_CANDIDATES)
+    )
+    considered = sorted(
+        evidence_candidates,
+        key=lambda c: (-c.confidence, -c.checked_at.timestamp(), c.id),
+    )[:safe_candidate_limit]
     decisions: list[ComparableSelectionDecision] = []
     selected: list[MarketCompInput] = []
     for item in considered:
-        decision = _selection_decision(target_context, item, as_of_utc, max_age_days=max_age_days)
-        if decision.selection_status == "selected" and len(selected) < safe_selected_limit:
+        decision = _selection_decision(
+            target_context, item, as_of_utc, max_age_days=max_age_days
+        )
+        if (
+            decision.selection_status == "selected"
+            and len(selected) < safe_selected_limit
+        ):
             selected.append(item)
             decisions.append(decision)
         elif decision.selection_status == "selected":
-            decisions.append(ComparableSelectionDecision(item.id, item.listing_external_id, "rejected", "hard_gate", rejection_reason="candidate_limit_exceeded", selection_flags=["selected_limit_reached"]))
+            decisions.append(
+                ComparableSelectionDecision(
+                    item.id,
+                    item.listing_external_id,
+                    "rejected",
+                    "hard_gate",
+                    rejection_reason="candidate_limit_exceeded",
+                    selection_flags=["selected_limit_reached"],
+                )
+            )
         else:
             decisions.append(decision)
     review: list[str] = []
@@ -225,41 +337,111 @@ def select_comparable_candidates(
     )
 
 
-def _selection_decision(target: ComparableTargetContext, item: MarketCompInput, as_of: datetime, *, max_age_days: int) -> ComparableSelectionDecision:
-    base = {"evidence_id": item.id, "source_listing_external_id": item.listing_external_id, "selection_status": "rejected", "selection_stage": "hard_gate"}
-    same_listing = bool(target.target_listing_external_id and item.listing_external_id == target.target_listing_external_id)
-    if not item.content_hash and not item.source_url_normalized and not item.listing_external_id and item.id is None:
-        return ComparableSelectionDecision(**base, rejection_reason="missing_source_trace")
+def _selection_decision(
+    target: ComparableTargetContext,
+    item: MarketCompInput,
+    as_of: datetime,
+    *,
+    max_age_days: int,
+) -> ComparableSelectionDecision:
+    base = {
+        "evidence_id": item.id,
+        "source_listing_external_id": item.listing_external_id,
+        "selection_status": "rejected",
+        "selection_stage": "hard_gate",
+    }
+    same_listing = bool(
+        target.target_listing_external_id
+        and item.listing_external_id == target.target_listing_external_id
+    )
+    if (
+        not item.content_hash
+        and not item.source_url_normalized
+        and not item.listing_external_id
+        and item.id is None
+    ):
+        return ComparableSelectionDecision(
+            **base, rejection_reason="missing_source_trace"
+        )
     if item.asset_type != target.asset_type:
-        return ComparableSelectionDecision(**base, rejection_reason="asset_type_mismatch")
+        return ComparableSelectionDecision(
+            **base, rejection_reason="asset_type_mismatch"
+        )
     if item.deal_type != target.deal_type:
-        return ComparableSelectionDecision(**base, rejection_reason="deal_type_mismatch")
-    if target.deal_type == "rent" and item.rent_per_m2_rub is None and item.rent_rub_per_month is None:
-        return ComparableSelectionDecision(**base, rejection_reason="missing_rent_metric")
+        return ComparableSelectionDecision(
+            **base, rejection_reason="deal_type_mismatch"
+        )
+    if (
+        target.deal_type == "rent"
+        and item.rent_per_m2_rub is None
+        and item.rent_rub_per_month is None
+    ):
+        return ComparableSelectionDecision(
+            **base, rejection_reason="missing_rent_metric"
+        )
     if (as_of - item.checked_at.astimezone(UTC)).days > max_age_days:
         return ComparableSelectionDecision(**base, rejection_reason="stale_evidence")
     matched = ["asset_type", "deal_type"]
     if same_listing:
         matched.append("same_listing")
-        return ComparableSelectionDecision(item.id, item.listing_external_id, "selected", "hard_gate", selection_reason="same_listing_direct_evidence", selection_flags=["source_trace_present"], matched_on=matched)
+        return ComparableSelectionDecision(
+            item.id,
+            item.listing_external_id,
+            "selected",
+            "hard_gate",
+            selection_reason="same_listing_direct_evidence",
+            selection_flags=["source_trace_present"],
+            matched_on=matched,
+        )
     if not target.location_key or not item.location_key:
-        return ComparableSelectionDecision(**base, rejection_reason="insufficient_match_data")
+        return ComparableSelectionDecision(
+            **base, rejection_reason="insufficient_match_data"
+        )
     if item.location_key != target.location_key:
-        return ComparableSelectionDecision(**base, rejection_reason="location_key_mismatch")
+        return ComparableSelectionDecision(
+            **base, rejection_reason="location_key_mismatch"
+        )
     matched.append("location_key")
     if target.area_m2 is None:
-        return ComparableSelectionDecision(item.id, item.listing_external_id, "selected", "hard_gate", selection_reason="same_location_key_reuse", selection_flags=["source_trace_present", "target_area_unavailable"], matched_on=matched)
+        return ComparableSelectionDecision(
+            item.id,
+            item.listing_external_id,
+            "selected",
+            "hard_gate",
+            selection_reason="same_location_key_reuse",
+            selection_flags=["source_trace_present", "target_area_unavailable"],
+            matched_on=matched,
+        )
     if item.area_m2 is None:
-        return ComparableSelectionDecision(**base, rejection_reason="insufficient_match_data")
+        return ComparableSelectionDecision(
+            **base, rejection_reason="insufficient_match_data"
+        )
     rel = abs(item.area_m2 - target.area_m2) / max(item.area_m2, target.area_m2)
     if rel > COMPARABLE_SELECTION_AREA_TOLERANCE_PCT:
-        return ComparableSelectionDecision(**base, rejection_reason="area_band_mismatch")
+        return ComparableSelectionDecision(
+            **base, rejection_reason="area_band_mismatch"
+        )
     matched.append("area_band")
-    return ComparableSelectionDecision(item.id, item.listing_external_id, "selected", "hard_gate", selection_reason="same_location_key_reuse", selection_flags=["source_trace_present"], matched_on=matched)
+    return ComparableSelectionDecision(
+        item.id,
+        item.listing_external_id,
+        "selected",
+        "hard_gate",
+        selection_reason="same_location_key_reuse",
+        selection_flags=["source_trace_present"],
+        matched_on=matched,
+    )
 
 
-def comparable_selection_facts(result: ComparableSelectionResult, quality_assessment: ComparableQualityAssessment | None = None) -> dict[str, Any]:
-    quality_by_id = {r.evidence_id: r for r in quality_assessment.results} if quality_assessment is not None else {}
+def comparable_selection_facts(
+    result: ComparableSelectionResult,
+    quality_assessment: ComparableQualityAssessment | None = None,
+) -> dict[str, Any]:
+    quality_by_id = (
+        {r.evidence_id: r for r in quality_assessment.results}
+        if quality_assessment is not None
+        else {}
+    )
     selected = []
     rejected = []
     for d in result.decisions:
@@ -269,7 +451,9 @@ def comparable_selection_facts(result: ComparableSelectionResult, quality_assess
             "selection_stage": d.selection_stage,
         }
         if d.selection_status == "selected":
-            row.update({"selection_reason": d.selection_reason, "matched_on": d.matched_on})
+            row.update(
+                {"selection_reason": d.selection_reason, "matched_on": d.matched_on}
+            )
             if d.evidence_id in quality_by_id:
                 row["quality_bucket"] = quality_by_id[d.evidence_id].quality_bucket
             selected.append(row)
@@ -292,13 +476,19 @@ def comparable_selection_facts(result: ComparableSelectionResult, quality_assess
         "max_rejected_facts": result.max_rejected_facts,
         "candidate_count_considered": len(result.decisions),
         "selected_count": len(selected),
-        "rejected_count": sum(1 for d in result.decisions if d.selection_status == "rejected"),
+        "rejected_count": sum(
+            1 for d in result.decisions if d.selection_status == "rejected"
+        ),
         "truncated_candidates": result.truncated_candidates,
-        "truncated_rejected_facts": sum(1 for d in result.decisions if d.selection_status == "rejected") > result.max_rejected_facts,
+        "truncated_rejected_facts": sum(
+            1 for d in result.decisions if d.selection_status == "rejected"
+        )
+        > result.max_rejected_facts,
         "selected": selected,
         "rejected": rejected,
         "review_reasons": result.review_reasons,
     }
+
 
 def resolve_market_evidence_config(
     config: AnalysisConfig,
@@ -399,12 +589,15 @@ def select_market_evidence(
         selected.append(_to_comp(item))
     target = ComparableTargetContext(
         target_listing_id=None,
-        target_listing_external_id=target_listing_external_id or _single_listing_external_id(selected),
+        target_listing_external_id=target_listing_external_id
+        or _single_listing_external_id(selected),
         profile=profile,
         estimate_purpose="rent_estimate",
         asset_type=expected_asset_type,
         deal_type="rent",
-        location_key=resolved.location_key if resolved.matching_policy == MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY else None,
+        location_key=resolved.location_key
+        if resolved.matching_policy == MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY
+        else None,
         area_m2=target_area_m2,
     )
     selection = select_comparable_candidates(
@@ -494,7 +687,366 @@ def _to_comp(item: MarketEvidenceItem) -> MarketCompInput:
         if item.rent_rub_per_month is not None
         else None,
         area_m2=float(item.area_m2) if item.area_m2 is not None else None,
+        rent_period=(item.evidence_json or {}).get("rent_period", "month"),
+        source_type=(item.evidence_json or {}).get("source_type") or "asking",
+        condition=(item.evidence_json or {}).get("condition"),
+        capex_required=(item.evidence_json or {}).get("capex_required"),
+        first_line=(item.evidence_json or {}).get("first_line"),
+        floor_access=(item.evidence_json or {}).get("floor_access"),
     )
+
+
+def adjust_comparable_rents(
+    *,
+    target_context: ComparableTargetContext,
+    selected_comps: list[MarketCompInput],
+    quality_result: ComparableQualityAssessment | None,
+    selection_result: ComparableSelectionResult | None,
+    as_of: datetime,
+    config: AdjustedComparableConfig | None = None,
+    manual_rent: float | None = None,
+) -> AdjustedComparableResult:
+    if as_of.tzinfo is None:
+        raise ValueError("as_of must be timezone-aware")
+    cfg = config or AdjustedComparableConfig()
+    as_of_utc = as_of.astimezone(UTC)
+    selected_ids = (
+        {
+            d.evidence_id
+            for d in selection_result.decisions
+            if d.selection_status == "selected"
+        }
+        if selection_result
+        else {i.id for i in selected_comps}
+    )
+    selection_reason = (
+        {
+            d.evidence_id: d.selection_reason
+            for d in selection_result.decisions
+            if d.selection_status == "selected"
+        }
+        if selection_result
+        else {}
+    )
+    quality_by_id = (
+        {r.evidence_id: r for r in quality_result.results} if quality_result else {}
+    )
+    allowed_quality_ids = (
+        {r.evidence_id for r in quality_result.results if r.accepted}
+        if quality_result
+        else {i.id for i in selected_comps}
+    )
+    items: list[AdjustedComparableItem] = []
+    excluded = 0
+    review: list[str] = []
+    summary: dict[str, int] = {}
+    for comp in sorted(
+        selected_comps, key=lambda i: (i.id, i.listing_external_id or "")
+    ):
+        if comp.id not in selected_ids or comp.id not in allowed_quality_ids:
+            excluded += 1
+            continue
+        raw_m2 = comp.rent_per_m2_rub
+        if (
+            raw_m2 is None
+            and comp.rent_rub_per_month is not None
+            and comp.area_m2
+            and comp.area_m2 > 0
+        ):
+            raw_m2 = comp.rent_rub_per_month / comp.area_m2
+        if comp.rent_period not in (None, "month", "monthly"):
+            excluded += 1
+            review.append("insufficient_rent_metric")
+            continue
+        if raw_m2 is None or raw_m2 <= 0:
+            excluded += 1
+            review.append("missing_rent_metric")
+            continue
+        flags: list[str] = []
+        reasons: list[str] = []
+        deltas: list[float] = []
+        cap_applied = False
+
+        def add_delta(reason: str, delta: float):
+            nonlocal cap_applied
+            capped = _cap_pct(delta, cfg.max_single_adjustment_abs_pct)
+            capped = (
+                _cap_pct(capped, cfg.area_adjustment_max_abs_pct)
+                if reason == REASON_AREA_ADJUSTMENT
+                else capped
+            )
+            if capped != delta:
+                cap_applied = True
+                flags.append(f"{reason}_cap_applied")
+            deltas.append(capped)
+            reasons.append(reason)
+            summary[reason] = summary.get(reason, 0) + 1
+
+        if target_context.area_m2 is None:
+            flags.append("area_adjustment_skipped_target_area_unknown")
+        elif not comp.area_m2:
+            flags.append("area_adjustment_skipped_comp_area_unknown")
+        else:
+            rel = (target_context.area_m2 - comp.area_m2) / max(
+                target_context.area_m2, comp.area_m2
+            )
+            if rel:
+                add_delta(REASON_AREA_ADJUSTMENT, rel * 0.20)
+                flags.append("area_adjustment_applied")
+        _boolean_advantage_adjust(
+            target_context.first_line,
+            comp.first_line,
+            cfg.first_line_adjustment_pct,
+            REASON_FIRST_LINE_ADJUSTMENT,
+            "first_line",
+            add_delta,
+            flags,
+        )
+        _ordered_adjust(
+            target_context.condition,
+            comp.condition,
+            cfg.condition_capex_adjustment_pct,
+            REASON_CONDITION_ADJUSTMENT,
+            "condition",
+            add_delta,
+            flags,
+        )
+        if target_context.capex_required is not None or comp.capex_required is not None:
+            flags.append("capex_signal_present")
+            _boolean_advantage_adjust(
+                False
+                if target_context.capex_required
+                else True
+                if target_context.capex_required is not None
+                else None,
+                False
+                if comp.capex_required
+                else True
+                if comp.capex_required is not None
+                else None,
+                cfg.condition_capex_adjustment_pct,
+                REASON_CONDITION_ADJUSTMENT,
+                "capex",
+                add_delta,
+                flags,
+            )
+        _ordered_adjust(
+            target_context.floor_access,
+            comp.floor_access,
+            cfg.floor_access_adjustment_pct,
+            REASON_FLOOR_ACCESS_ADJUSTMENT,
+            "floor_access",
+            add_delta,
+            flags,
+        )
+        if comp.source_type == "asking":
+            add_delta(
+                REASON_ASKING_TO_EFFECTIVE_DISCOUNT,
+                -cfg.asking_to_effective_discount_pct,
+            )
+            flags.append("asking_to_effective_discount_applied")
+        elif comp.source_type in ("confirmed", "effective"):
+            flags.append("source_type_confirmed_no_discount")
+        else:
+            flags.append("source_type_unknown")
+            review.append("source_type_unknown")
+        age_days = (
+            (as_of_utc - comp.checked_at.astimezone(UTC)).days
+            if comp.checked_at
+            else None
+        )
+        if age_days is None:
+            flags.append("freshness_unknown")
+            review.append("freshness_unknown")
+        elif age_days > cfg.stale_days:
+            flags.extend(["stale_comp", "freshness_confidence_penalty_applied"])
+            review.append("stale_comp")
+        total = sum(deltas)
+        capped_total = _cap_pct(total, cfg.max_adjustment_abs_pct)
+        if capped_total != total:
+            cap_applied = True
+            flags.append("total_adjustment_cap_applied")
+        adj_m2 = round(raw_m2 * (1 + capped_total), 2)
+        adj_rent = (
+            round(adj_m2 * target_context.area_m2, 2)
+            if target_context.area_m2
+            else None
+        )
+        q = quality_by_id.get(comp.id)
+        if q and q.quality_bucket == "low":
+            review.append("low_quality_comps_in_adjusted_set")
+        items.append(
+            AdjustedComparableItem(
+                comp.id,
+                comp.listing_external_id,
+                comp.rent_rub_per_month,
+                comp.rent_period,
+                round(raw_m2, 2),
+                adj_rent,
+                adj_m2,
+                round(capped_total, 4),
+                list(dict.fromkeys(reasons)),
+                list(dict.fromkeys(flags)),
+                cap_applied,
+                q.quality_bucket if q else None,
+                selection_reason.get(comp.id),
+                comp.source_url_normalized or comp.content_hash,
+            )
+        )
+    raw_vals = [i.raw_rent_per_m2 for i in items]
+    adj_vals = [i.adjusted_rent_per_m2 for i in items]
+    raw_med_m2 = round(float(median(raw_vals)), 2) if raw_vals else None
+    adj_med_m2 = round(float(median(adj_vals)), 2) if adj_vals else None
+    raw_med = (
+        round(raw_med_m2 * target_context.area_m2, 2)
+        if raw_med_m2 is not None and target_context.area_m2
+        else None
+    )
+    adj_med = (
+        round(adj_med_m2 * target_context.area_m2, 2)
+        if adj_med_m2 is not None and target_context.area_m2
+        else None
+    )
+    high_medium = sum(1 for i in items if i.quality_bucket in ("high", "medium"))
+    share = high_medium / len(items) if items else 0
+    confidence = (
+        "medium"
+        if len(items) >= cfg.min_adjusted_comp_count_for_base_confidence
+        and share >= cfg.min_high_or_medium_quality_share
+        else "low"
+    )
+    cap = None if confidence == "medium" else FRESHNESS_CONFIDENCE_PENALTY
+    if len(items) < cfg.min_adjusted_comp_count_for_base_confidence:
+        review.append("insufficient_adjusted_comps")
+    if share < cfg.min_high_or_medium_quality_share:
+        review.append("insufficient_high_or_medium_quality_share")
+    if target_context.area_m2 is None:
+        review.append("target_area_unknown")
+    can_use = manual_rent is None and confidence != "low" and adj_med is not None
+    not_used = (
+        None
+        if can_use
+        else (
+            "manual_rent_primary"
+            if manual_rent is not None
+            else "insufficient_adjusted_market_evidence"
+        )
+    )
+    source = (
+        "adjusted_market_comps"
+        if can_use
+        else ("manual_rent" if manual_rent is not None else "raw_market_comps")
+    )
+    return AdjustedComparableResult(
+        ADJUSTED_COMPARABLE_MODEL_VERSION,
+        ADJUSTED_COMPARABLE_CONFIG_VERSION,
+        as_of_utc,
+        target_context,
+        len(selected_comps),
+        len(items),
+        excluded,
+        items,
+        raw_med_m2,
+        adj_med_m2,
+        raw_med,
+        adj_med,
+        confidence,
+        cap,
+        list(dict.fromkeys(review)),
+        summary,
+        can_use,
+        not_used,
+        source,
+    )
+
+
+def _cap_pct(value: float, max_abs: float) -> float:
+    return max(-max_abs, min(max_abs, value))
+
+
+def _boolean_advantage_adjust(
+    target: bool | None,
+    comp: bool | None,
+    pct: float,
+    reason: str,
+    flag_prefix: str,
+    add_delta,
+    flags: list[str],
+) -> None:
+    if target is None or comp is None:
+        flags.append(f"{flag_prefix}_unknown")
+        return
+    if target == comp:
+        return
+    add_delta(reason, pct if target and not comp else -pct)
+    flags.append(f"{flag_prefix}_adjustment_applied")
+
+
+def _ordered_adjust(
+    target: str | None,
+    comp: str | None,
+    pct: float,
+    reason: str,
+    flag_prefix: str,
+    add_delta,
+    flags: list[str],
+) -> None:
+    order = {
+        "poor": 0,
+        "needs_capex": 0,
+        "average": 1,
+        "good": 2,
+        "excellent": 3,
+        "basement": 0,
+        "bad": 0,
+        "standard": 1,
+        "ground": 2,
+        "street": 2,
+    }
+    if target is None or comp is None:
+        flags.append(f"{flag_prefix}_unknown")
+        return
+    if target not in order or comp not in order:
+        flags.append(f"{flag_prefix}_direction_unknown")
+        return
+    if order[target] == order[comp]:
+        return
+    add_delta(reason, pct if order[target] > order[comp] else -pct)
+    flags.append(f"{flag_prefix}_adjustment_applied")
+
+
+def adjusted_comparable_facts(
+    result: AdjustedComparableResult, *, max_items: int = MAX_ADJUSTED_COMP_FACT_ITEMS
+) -> dict[str, Any]:
+    return {
+        "version": result.version,
+        "config_version": result.config_version,
+        "as_of": result.as_of.isoformat(),
+        "target_context": {
+            "asset_type": result.target_context.asset_type,
+            "deal_type": result.target_context.deal_type,
+            "location_key": result.target_context.location_key,
+            "area_m2": result.target_context.area_m2,
+        },
+        "summary": {
+            "selected_count": result.selected_count,
+            "adjusted_count": result.adjusted_count,
+            "excluded_from_adjusted_count": result.excluded_from_adjusted_count,
+            "raw_median_rent_per_m2": result.raw_median_rent_per_m2,
+            "adjusted_median_rent_per_m2": result.adjusted_median_rent_per_m2,
+            "raw_median_rent": result.raw_median_rent,
+            "adjusted_median_rent": result.adjusted_median_rent,
+            "confidence": result.confidence,
+            "confidence_cap": result.confidence_cap,
+            "adjusted_median_used": result.adjusted_median_used,
+            "adjusted_median_not_used_reason": result.adjusted_median_not_used_reason,
+            "market_estimate_source": result.market_estimate_source,
+        },
+        "adjustment_summary": result.adjustment_summary,
+        "items": [i.__dict__ for i in result.items[: max(0, max_items)]],
+        "truncated_items": len(result.items) > max_items,
+        "review_reasons": result.review_reasons,
+    }
 
 
 def estimate_market_rent(
@@ -544,7 +1096,11 @@ def estimate_market_rent(
     elif rent_m2_items:
         flags.append("missing_area_for_market_rent")
     conf = _confidence(used, context.config.min_comps) if used else None
-    if conf is not None and quality_assessment is not None and quality_assessment.summary.evidence_confidence_cap is not None:
+    if (
+        conf is not None
+        and quality_assessment is not None
+        and quality_assessment.summary.evidence_confidence_cap is not None
+    ):
         conf = min(conf, quality_assessment.summary.evidence_confidence_cap)
     return MarketRentEstimate(
         monthly,
@@ -595,17 +1151,39 @@ def market_evidence_fingerprint(
                 "rent_per_m2_rub": i.rent_per_m2_rub,
                 "rent_rub_per_month": i.rent_rub_per_month,
                 "area_m2": i.area_m2,
+                "rent_period": i.rent_period,
+                "source_type": i.source_type,
+                "condition": i.condition,
+                "capex_required": i.capex_required,
+                "first_line": i.first_line,
+                "floor_access": i.floor_access,
             }
             for i in sorted(context.items, key=lambda x: x.id)
         ],
         "comparable_selection_policy_version": COMPARABLE_SELECTION_POLICY_VERSION,
-        "selection": comparable_selection_fingerprint(context.selection_result) if context.selection_result is not None else None,
+        "selection": comparable_selection_fingerprint(context.selection_result)
+        if context.selection_result is not None
+        else None,
         "comparable_quality_model_version": COMPARABLE_QUALITY_MODEL_VERSION,
         "quality_as_of_datetime": context.retrieval_as_of_datetime.isoformat(),
+        "adjusted_comparable_model_version": ADJUSTED_COMPARABLE_MODEL_VERSION,
+        "adjusted_comparable_config_version": ADJUSTED_COMPARABLE_CONFIG_VERSION,
+        "adjusted_comparable_constants": {
+            "max_adjustment_abs_pct": MAX_ADJUSTMENT_ABS_PCT,
+            "max_single_adjustment_abs_pct": MAX_SINGLE_ADJUSTMENT_ABS_PCT,
+            "area_adjustment_max_abs_pct": AREA_ADJUSTMENT_MAX_ABS_PCT,
+            "condition_capex_adjustment_pct": CONDITION_CAPEX_ADJUSTMENT_PCT,
+            "first_line_adjustment_pct": FIRST_LINE_ADJUSTMENT_PCT,
+            "floor_access_adjustment_pct": FLOOR_ACCESS_ADJUSTMENT_PCT,
+            "asking_to_effective_discount_pct": ASKING_TO_EFFECTIVE_DISCOUNT_PCT,
+            "stale_days": ADJUSTED_COMPARABLE_STALE_DAYS,
+        },
     }
 
 
-def comparable_selection_fingerprint(result: ComparableSelectionResult | None) -> dict[str, Any] | None:
+def comparable_selection_fingerprint(
+    result: ComparableSelectionResult | None,
+) -> dict[str, Any] | None:
     if result is None:
         return None
     return {
@@ -650,10 +1228,19 @@ def assess_comparable_quality(
         for i in context.items
     ]
     summary = _summarize_quality(results)
-    return ComparableQualityAssessment(COMPARABLE_QUALITY_MODEL_VERSION, as_of.astimezone(UTC), results, summary)
+    return ComparableQualityAssessment(
+        COMPARABLE_QUALITY_MODEL_VERSION, as_of.astimezone(UTC), results, summary
+    )
 
 
-def _score_comp(*, item: MarketCompInput, expected_asset_type: str, target_area_m2: float | None, target_location_key: str | None, as_of: datetime) -> ComparableQualityResult:
+def _score_comp(
+    *,
+    item: MarketCompInput,
+    expected_asset_type: str,
+    target_area_m2: float | None,
+    target_location_key: str | None,
+    as_of: datetime,
+) -> ComparableQualityResult:
     if item.asset_type and item.asset_type != expected_asset_type:
         return _rejected(item.id, "asset_type_mismatch")
     if not item.asset_type:
@@ -708,7 +1295,9 @@ def _score_comp(*, item: MarketCompInput, expected_asset_type: str, target_area_
     return _penalized_result(item.id, score, similarity, flags)
 
 
-def _penalized_result(evidence_id: int, score: int, similarity: int, flags: list[str]) -> ComparableQualityResult:
+def _penalized_result(
+    evidence_id: int, score: int, similarity: int, flags: list[str]
+) -> ComparableQualityResult:
     score = max(0, min(100, int(score)))
     similarity = max(0, min(100, int(similarity)))
     if score >= QUALITY_HIGH_THRESHOLD:
@@ -719,14 +1308,18 @@ def _penalized_result(evidence_id: int, score: int, similarity: int, flags: list
         bucket = "low"
     else:
         return _rejected(evidence_id, "insufficient_data")
-    return ComparableQualityResult(evidence_id, score, similarity, bucket, True, list(dict.fromkeys(flags)))
+    return ComparableQualityResult(
+        evidence_id, score, similarity, bucket, True, list(dict.fromkeys(flags))
+    )
 
 
 def _rejected(evidence_id: int, reason: str) -> ComparableQualityResult:
     return ComparableQualityResult(evidence_id, 0, 0, "rejected", False, [], reason)
 
 
-def _summarize_quality(results: list[ComparableQualityResult]) -> EvidenceSetQualitySummary:
+def _summarize_quality(
+    results: list[ComparableQualityResult],
+) -> EvidenceSetQualitySummary:
     accepted = [r for r in results if r.accepted]
     scores = [r.quality_score for r in accepted]
     high = sum(1 for r in accepted if r.quality_bucket == "high")
@@ -787,7 +1380,11 @@ def comparable_quality_facts(assessment: ComparableQualityAssessment) -> dict[st
                 "similarity_score": r.similarity_score,
                 "quality_bucket": r.quality_bucket,
                 "accepted": r.accepted,
-                **({"quality_flags": r.quality_flags} if r.accepted else {"rejection_reason": r.rejection_reason}),
+                **(
+                    {"quality_flags": r.quality_flags}
+                    if r.accepted
+                    else {"rejection_reason": r.rejection_reason}
+                ),
             }
             for r in assessment.results
         ],

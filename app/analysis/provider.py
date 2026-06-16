@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 import re
 from typing import Any, Protocol
@@ -11,6 +11,7 @@ from app.analysis.investment import calculate_investment_metrics
 from app.analysis.market_comps import (
     MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY,
     SelectedMarketEvidenceContext,
+    adjust_comparable_rents,
     assess_comparable_quality,
     comparable_quality_facts,
     comparable_selection_facts,
@@ -1411,6 +1412,25 @@ class InvestmentAnalysisProvider:
             and market_evidence_context is not None
             else None
         )
+        adjusted_comparables = (
+            adjust_comparable_rents(
+                target_context=replace(
+                    market_evidence_context.selection_result.target_context,
+                    area_m2=listing.area_m2,
+                )
+                if market_evidence_context.selection_result is not None
+                else None,
+                selected_comps=market_evidence_context.items,
+                quality_result=quality_assessment,
+                selection_result=market_evidence_context.selection_result,
+                as_of=market_evidence_context.retrieval_as_of_datetime,
+                manual_rent=config.estimated_monthly_rent,
+            )
+            if config.use_market_evidence is True
+            and market_evidence_context is not None
+            and market_evidence_context.selection_result is not None
+            else None
+        )
         market_estimate = (
             estimate_market_rent(
                 context=market_evidence_context,
@@ -1436,6 +1456,13 @@ class InvestmentAnalysisProvider:
                     market_flags.append("market_evidence_missing")
             elif config.estimated_monthly_rent is None:
                 if (
+                    adjusted_comparables is not None
+                    and adjusted_comparables.adjusted_median_used
+                    and adjusted_comparables.adjusted_median_rent is not None
+                ):
+                    estimated_rent = adjusted_comparables.adjusted_median_rent
+                    rent_source = "market_evidence"
+                elif (
                     market_estimate.monthly_rent is not None
                     and market_estimate.usable_comp_count
                     >= market_evidence_context.config.min_comps
@@ -1515,6 +1542,8 @@ class InvestmentAnalysisProvider:
                     verdict_cap = _strongest_verdict_cap(verdict_cap, "medium")
             if quality_assessment is not None:
                 market_flags.extend(quality_assessment.summary.review_reasons)
+            if adjusted_comparables is not None:
+                market_flags.extend(adjusted_comparables.review_reasons)
             if (
                 market_evidence_context.config.matching_policy
                 == MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY
@@ -1663,6 +1692,7 @@ class InvestmentAnalysisProvider:
                             rent_source == "market_evidence",
                             "cross_listing_low_diversity" in flags,
                             quality_assessment,
+                            adjusted_comparables,
                         )
                     }
                     if config.use_market_evidence is True
@@ -1857,6 +1887,7 @@ def _market_evidence_facts(
     used_as_rent_source: bool = False,
     low_diversity: bool = False,
     quality_assessment=None,
+    adjusted_comparables=None,
 ) -> dict:
     facts = {
         "enabled": True,
@@ -1890,8 +1921,25 @@ def _market_evidence_facts(
         "cross_listing_reuse_enabled": context.config.matching_policy
         == MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY,
         "comp_quality_scoring_used": quality_assessment is not None,
-        **({"comparable_selection_policy": comparable_selection_facts(context.selection_result, quality_assessment)} if context.selection_result is not None else {}),
-        **({"comparable_quality": comparable_quality_facts(quality_assessment)} if quality_assessment is not None else {}),
+        **(
+            {
+                "comparable_selection_policy": comparable_selection_facts(
+                    context.selection_result, quality_assessment
+                )
+            }
+            if context.selection_result is not None
+            else {}
+        ),
+        **(
+            {"comparable_quality": comparable_quality_facts(quality_assessment)}
+            if quality_assessment is not None
+            else {}
+        ),
+        **(
+            {"adjusted_comparables": adjusted_comparables.facts()}
+            if adjusted_comparables is not None
+            else {}
+        ),
         "selected_listing_external_ids": [i.listing_external_id for i in context.items],
         "selected_same_listing_count": sum(
             1

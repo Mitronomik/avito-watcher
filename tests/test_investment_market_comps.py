@@ -80,7 +80,12 @@ def test_market_evidence_only_uses_median_rent_per_m2(db_session):
     assert res.facts_json["llm_used"] is False
     assert res.facts_json["agent_used"] is False
     assert res.facts_json["live_external_research_used"] is False
-    assert res.facts_json["investment_metrics"]["gross_yield_on_price"] == 0.72
+    assert res.facts_json["investment_metrics"]["gross_yield_on_price"] == 0.684
+    adjusted = res.facts_json["investment_metrics"]["market_evidence"][
+        "adjusted_comparables"
+    ]
+    assert adjusted["summary"]["adjusted_median_used"] is True
+    assert adjusted["summary"]["market_estimate_source"] == "adjusted_market_comps"
 
 
 def test_manual_rent_primary_and_mismatch_not_capped_by_weak_comps(db_session):
@@ -456,7 +461,12 @@ def test_cross_listing_rent_source_is_capped_and_facted(db_session):
     assert result.verdict != "strong"
     assert result.verdict == "medium"
     assert "cross_listing_evidence_requires_human_review" in result.risks_json["flags"]
-    assert result.facts_json["investment_metrics"]["market_evidence"]["comp_quality_scoring_used"] is True
+    assert (
+        result.facts_json["investment_metrics"]["market_evidence"][
+            "comp_quality_scoring_used"
+        ]
+        is True
+    )
     facts = result.facts_json["investment_metrics"]["market_evidence"]
     assert facts["matching_policy"] == "same_location_key"
     assert facts["cross_listing_reuse_enabled"] is True

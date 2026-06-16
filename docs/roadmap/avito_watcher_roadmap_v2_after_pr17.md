@@ -467,7 +467,7 @@ condition/capex flag
 first-line flag
 floor/access flag
 asking-to-effective discount
-source freshness discount
+source freshness confidence penalty
 ```
 
 Rules:
@@ -475,8 +475,13 @@ Rules:
 ```text
 adjustments deterministic
 all adjustments visible in facts_json
+rent_per_m2-first additive deltas with single/total caps
+manual rent remains primary
+freshness changes confidence/review only, not rent value
+asking discount applies only to explicit asking evidence
 no hidden ML
-no auto-valuation claim
+no source verification PR27, sale/cap-rate PR28, scenario/DCF/financing
+no professional appraisal/valuation claim
 ```
 
 Acceptance:
