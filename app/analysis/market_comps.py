@@ -913,7 +913,7 @@ def _source_trace_strength(comp: MarketCompInput) -> str:
 def _source_freshness(comp: MarketCompInput, as_of: datetime, cfg: SourceQualityConfig) -> tuple[str, int | None, list[str]]:
     if comp.expires_at is not None and comp.expires_at.astimezone(UTC) < as_of:
         return "stale", None, ["expired_source"]
-    ts = comp.checked_at or comp.published_at
+    ts = comp.published_at or comp.checked_at
     if ts is None:
         return "unknown", None, ["freshness_unknown"]
     age = (as_of - ts.astimezone(UTC)).days

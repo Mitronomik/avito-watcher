@@ -144,6 +144,54 @@ def test_source_type_and_verification_status_explicit_only():
     assert "source_type_unknown" in result.review_reasons
 
 
+
+def test_published_at_is_primary_for_source_freshness_and_does_not_change_adjusted_rent():
+    comp = _comp(
+        1,
+        checked_at=AS_OF - timedelta(days=1),
+        published_at=AS_OF - timedelta(days=60),
+        source_type="confirmed",
+        source_url_normalized="https://e/1",
+        content_hash="h1",
+    )
+    result = _assess([comp])
+    item = result.items[0]
+    assert item.freshness_bucket == "stale"
+    assert "stale_source" in item.source_quality_reasons
+    assert "stale_source" in result.review_reasons
+    assert result.evidence_confidence_cap == 0.5
+
+    target = _target()
+    adjusted_before = adjust_comparable_rents(
+        target_context=target,
+        selected_comps=[comp],
+        quality_result=_quality([1]),
+        selection_result=_selection(target, [comp]),
+        as_of=AS_OF,
+    )
+    _assess([comp])
+    adjusted_after = adjust_comparable_rents(
+        target_context=target,
+        selected_comps=[comp],
+        quality_result=_quality([1]),
+        selection_result=_selection(target, [comp]),
+        as_of=AS_OF,
+    )
+    assert adjusted_after.items[0].adjusted_rent_per_m2 == adjusted_before.items[0].adjusted_rent_per_m2
+    assert adjusted_after.adjusted_median_rent_per_m2 == adjusted_before.adjusted_median_rent_per_m2
+
+
+def test_checked_at_fallback_is_fresh_when_published_at_missing():
+    comp = _comp(
+        1,
+        checked_at=AS_OF - timedelta(days=1),
+        published_at=None,
+        source_type="confirmed",
+    )
+    result = _assess([comp])
+    assert result.items[0].freshness_bucket == "fresh"
+    assert "stale_source" not in result.review_reasons
+
 def test_freshness_uses_as_of_and_caps_without_changing_adjusted_rent():
     stale = _comp(1, checked_at=AS_OF - timedelta(days=45), source_type="confirmed")
     expired = _comp(2, expires_at=AS_OF - timedelta(days=1), source_type="effective")
