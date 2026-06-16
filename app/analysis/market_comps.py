@@ -688,7 +688,7 @@ def _to_comp(item: MarketEvidenceItem) -> MarketCompInput:
         else None,
         area_m2=float(item.area_m2) if item.area_m2 is not None else None,
         rent_period=(item.evidence_json or {}).get("rent_period", "month"),
-        source_type=(item.evidence_json or {}).get("source_type") or "asking",
+        source_type=(item.evidence_json or {}).get("source_type"),
         condition=(item.evidence_json or {}).get("condition"),
         capex_required=(item.evidence_json or {}).get("capex_required"),
         first_line=(item.evidence_json or {}).get("first_line"),

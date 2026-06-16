@@ -80,12 +80,17 @@ def test_market_evidence_only_uses_median_rent_per_m2(db_session):
     assert res.facts_json["llm_used"] is False
     assert res.facts_json["agent_used"] is False
     assert res.facts_json["live_external_research_used"] is False
-    assert res.facts_json["investment_metrics"]["gross_yield_on_price"] == 0.684
+    assert res.facts_json["investment_metrics"]["gross_yield_on_price"] == 0.72
     adjusted = res.facts_json["investment_metrics"]["market_evidence"][
         "adjusted_comparables"
     ]
     assert adjusted["summary"]["adjusted_median_used"] is True
     assert adjusted["summary"]["market_estimate_source"] == "adjusted_market_comps"
+    assert "source_type_unknown" in adjusted["review_reasons"]
+    assert all(
+        "asking_to_effective_discount_applied" not in item["adjustment_flags"]
+        for item in adjusted["items"]
+    )
 
 
 def test_manual_rent_primary_and_mismatch_not_capped_by_weak_comps(db_session):

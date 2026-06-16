@@ -153,6 +153,32 @@ def test_direction_unknown_confirmed_freshness_and_missing_target_area_do_not_ch
     assert "first_line_unknown" in item.adjustment_flags
 
 
+def test_unknown_source_type_does_not_apply_asking_discount_or_change_value():
+    target = _target(area_m2=100.0, first_line=None, condition=None, floor_access=None)
+    comp = _comp(
+        source_type=None,
+        area_m2=100.0,
+        rent_per_m2_rub=1000.0,
+        rent_rub_per_month=100_000.0,
+        first_line=None,
+        condition=None,
+        floor_access=None,
+    )
+    result = adjust_comparable_rents(
+        target_context=target,
+        selected_comps=[comp],
+        quality_result=_quality([1]),
+        selection_result=_selection(target, [comp]),
+        as_of=AS_OF,
+    )
+    item = result.items[0]
+    assert REASON_ASKING_TO_EFFECTIVE_DISCOUNT not in item.adjustment_reasons
+    assert "asking_to_effective_discount_applied" not in item.adjustment_flags
+    assert "source_type_unknown" in item.adjustment_flags
+    assert "source_type_unknown" in result.review_reasons
+    assert item.adjusted_rent_per_m2 == item.raw_rent_per_m2
+
+
 def test_total_rent_derives_rent_per_m2_missing_metric_and_unsupported_period_excluded():
     target = _target()
     good = _comp(
