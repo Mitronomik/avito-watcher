@@ -338,6 +338,8 @@ class ListingAnalysisService:
             candidates = (
                 MarketEvidenceRepository(self.db).retrieve_items(
                     location_key=config.market_evidence_location_key,
+                    asset_type=("commercial" if self.provider.profile == "commercial_sale_investment" else "flat"),
+                    deal_type="rent",
                     evidence_types=["comparable_candidate"],
                     include_expired=True,
                     include_non_reusable=True,
@@ -349,6 +351,8 @@ class ListingAnalysisService:
         else:
             candidates = MarketEvidenceRepository(self.db).retrieve_items(
                 listing_external_id=listing.external_id,
+                asset_type=("commercial" if self.provider.profile == "commercial_sale_investment" else "flat"),
+                deal_type="rent",
                 evidence_types=["comparable_candidate"],
                 include_expired=True,
                 include_non_reusable=True,
@@ -366,6 +370,8 @@ class ListingAnalysisService:
             evidence_retrieval_as_of_datetime=as_of,
             evidence_retrieval_as_of_date=as_of.date(),
             target_listing_external_id=listing.external_id,
+            target_area_m2=listing.area_m2,
+            profile=self.provider.profile,
         )
 
     def _config_for_search(self, search_job_id: int) -> AnalysisConfig:

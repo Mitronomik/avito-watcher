@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 import hashlib
 import json
@@ -16,6 +16,12 @@ DEFAULT_MAX_COMPS = 10
 DEFAULT_MAX_AGE_DAYS = 30
 DEFAULT_STRATEGY = "median"
 DEFAULT_MISMATCH_THRESHOLD = 0.25
+COMPARABLE_SELECTION_POLICY_VERSION = "v2"
+COMPARABLE_SELECTION_MAX_CANDIDATES = 200
+COMPARABLE_SELECTION_DEFAULT_CANDIDATE_LIMIT = 50
+COMPARABLE_SELECTION_MAX_REJECTED_FACTS = 10
+COMPARABLE_SELECTION_AREA_TOLERANCE_PCT = 0.25
+COMPARABLE_SELECTION_MAX_EVIDENCE_AGE_DAYS = 30
 COMPARABLE_QUALITY_MODEL_VERSION = "v0"
 QUALITY_HIGH_THRESHOLD = 80
 QUALITY_MEDIUM_THRESHOLD = 60
@@ -70,6 +76,45 @@ class MarketCompInput:
 
 
 @dataclass(frozen=True)
+class ComparableTargetContext:
+    target_listing_id: int | None
+    target_listing_external_id: str | None
+    profile: str
+    estimate_purpose: str
+    asset_type: str
+    deal_type: str
+    location_key: str | None
+    area_m2: float | None
+
+
+@dataclass(frozen=True)
+class ComparableSelectionDecision:
+    evidence_id: int
+    source_listing_external_id: str | None
+    selection_status: str
+    selection_stage: str
+    selection_reason: str | None = None
+    rejection_reason: str | None = None
+    selection_flags: list[str] = field(default_factory=list)
+    matched_on: list[str] = field(default_factory=list)
+    selection_policy_version: str = COMPARABLE_SELECTION_POLICY_VERSION
+
+
+@dataclass(frozen=True)
+class ComparableSelectionResult:
+    policy_version: str
+    as_of: datetime
+    target_context: ComparableTargetContext
+    candidate_limit: int
+    selected_limit: int
+    max_rejected_facts: int
+    decisions: list[ComparableSelectionDecision]
+    selected_items: list[MarketCompInput]
+    review_reasons: list[str]
+    truncated_candidates: bool
+
+
+@dataclass(frozen=True)
 class SelectedMarketEvidenceContext:
     items: list[MarketCompInput]
     excluded_counts_by_reason: dict[str, int]
@@ -78,6 +123,7 @@ class SelectedMarketEvidenceContext:
     retrieval_as_of_date: date
     config: ResolvedMarketEvidenceConfig
     target_listing_external_id: str | None = None
+    selection_result: ComparableSelectionResult | None = None
 
 
 @dataclass(frozen=True)
@@ -134,6 +180,127 @@ class MarketRentEstimate:
     risk_flags: list[str]
 
 
+
+def select_comparable_candidates(
+    target_context: ComparableTargetContext,
+    evidence_candidates: list[MarketCompInput],
+    *,
+    as_of: datetime,
+    candidate_limit: int = COMPARABLE_SELECTION_DEFAULT_CANDIDATE_LIMIT,
+    selected_limit: int = DEFAULT_MAX_COMPS,
+    max_rejected_facts: int = COMPARABLE_SELECTION_MAX_REJECTED_FACTS,
+    max_age_days: int = COMPARABLE_SELECTION_MAX_EVIDENCE_AGE_DAYS,
+) -> ComparableSelectionResult:
+    if as_of.tzinfo is None:
+        raise ValueError("as_of must be timezone-aware")
+    as_of_utc = as_of.astimezone(UTC)
+    safe_candidate_limit = max(0, min(int(candidate_limit), COMPARABLE_SELECTION_MAX_CANDIDATES))
+    safe_selected_limit = max(0, min(int(selected_limit), COMPARABLE_SELECTION_MAX_CANDIDATES))
+    considered = sorted(evidence_candidates, key=lambda c: (-c.confidence, -c.checked_at.timestamp(), c.id))[:safe_candidate_limit]
+    decisions: list[ComparableSelectionDecision] = []
+    selected: list[MarketCompInput] = []
+    for item in considered:
+        decision = _selection_decision(target_context, item, as_of_utc, max_age_days=max_age_days)
+        if decision.selection_status == "selected" and len(selected) < safe_selected_limit:
+            selected.append(item)
+            decisions.append(decision)
+        elif decision.selection_status == "selected":
+            decisions.append(ComparableSelectionDecision(item.id, item.listing_external_id, "rejected", "hard_gate", rejection_reason="candidate_limit_exceeded", selection_flags=["selected_limit_reached"]))
+        else:
+            decisions.append(decision)
+    review: list[str] = []
+    if len(selected) < safe_selected_limit:
+        review.append("insufficient_selected_comparable_evidence")
+    return ComparableSelectionResult(
+        COMPARABLE_SELECTION_POLICY_VERSION,
+        as_of_utc,
+        target_context,
+        safe_candidate_limit,
+        safe_selected_limit,
+        max(0, int(max_rejected_facts)),
+        decisions,
+        selected,
+        review,
+        len(evidence_candidates) > safe_candidate_limit,
+    )
+
+
+def _selection_decision(target: ComparableTargetContext, item: MarketCompInput, as_of: datetime, *, max_age_days: int) -> ComparableSelectionDecision:
+    base = {"evidence_id": item.id, "source_listing_external_id": item.listing_external_id, "selection_status": "rejected", "selection_stage": "hard_gate"}
+    same_listing = bool(target.target_listing_external_id and item.listing_external_id == target.target_listing_external_id)
+    same_listing_policy_without_explicit_target = target.target_listing_external_id is None and target.location_key is None
+    if not item.content_hash and not item.source_url_normalized and not item.listing_external_id and item.id is None:
+        return ComparableSelectionDecision(**base, rejection_reason="missing_source_trace")
+    if item.asset_type != target.asset_type:
+        return ComparableSelectionDecision(**base, rejection_reason="asset_type_mismatch")
+    if item.deal_type != target.deal_type:
+        return ComparableSelectionDecision(**base, rejection_reason="deal_type_mismatch")
+    if target.deal_type == "rent" and item.rent_per_m2_rub is None and item.rent_rub_per_month is None:
+        return ComparableSelectionDecision(**base, rejection_reason="missing_rent_metric")
+    if (as_of - item.checked_at.astimezone(UTC)).days > max_age_days:
+        return ComparableSelectionDecision(**base, rejection_reason="stale_evidence")
+    matched = ["asset_type", "deal_type"]
+    if same_listing or same_listing_policy_without_explicit_target:
+        matched.append("same_listing")
+        return ComparableSelectionDecision(item.id, item.listing_external_id, "selected", "hard_gate", selection_reason="same_listing_direct_evidence", selection_flags=["source_trace_present"], matched_on=matched)
+    if not target.location_key or not item.location_key:
+        return ComparableSelectionDecision(**base, rejection_reason="insufficient_match_data")
+    if item.location_key != target.location_key:
+        return ComparableSelectionDecision(**base, rejection_reason="location_key_mismatch")
+    matched.append("location_key")
+    if target.area_m2 is None:
+        return ComparableSelectionDecision(item.id, item.listing_external_id, "selected", "hard_gate", selection_reason="same_location_key_reuse", selection_flags=["source_trace_present", "target_area_unavailable"], matched_on=matched)
+    if item.area_m2 is None:
+        return ComparableSelectionDecision(**base, rejection_reason="insufficient_match_data")
+    rel = abs(item.area_m2 - target.area_m2) / max(item.area_m2, target.area_m2)
+    if rel > COMPARABLE_SELECTION_AREA_TOLERANCE_PCT:
+        return ComparableSelectionDecision(**base, rejection_reason="area_band_mismatch")
+    matched.append("area_band")
+    return ComparableSelectionDecision(item.id, item.listing_external_id, "selected", "hard_gate", selection_reason="same_location_key_reuse", selection_flags=["source_trace_present"], matched_on=matched)
+
+
+def comparable_selection_facts(result: ComparableSelectionResult, quality_assessment: ComparableQualityAssessment | None = None) -> dict[str, Any]:
+    quality_by_id = {r.evidence_id: r for r in quality_assessment.results} if quality_assessment is not None else {}
+    selected = []
+    rejected = []
+    for d in result.decisions:
+        row = {
+            "evidence_id": d.evidence_id,
+            "source_listing_external_id": d.source_listing_external_id,
+            "selection_stage": d.selection_stage,
+        }
+        if d.selection_status == "selected":
+            row.update({"selection_reason": d.selection_reason, "matched_on": d.matched_on})
+            if d.evidence_id in quality_by_id:
+                row["quality_bucket"] = quality_by_id[d.evidence_id].quality_bucket
+            selected.append(row)
+        elif len(rejected) < result.max_rejected_facts:
+            row["rejection_reason"] = d.rejection_reason
+            rejected.append(row)
+    return {
+        "version": result.policy_version,
+        "as_of": result.as_of.isoformat(),
+        "target_context": {
+            "profile": result.target_context.profile,
+            "estimate_purpose": result.target_context.estimate_purpose,
+            "asset_type": result.target_context.asset_type,
+            "deal_type": result.target_context.deal_type,
+            "location_key": result.target_context.location_key,
+            "area_m2": result.target_context.area_m2,
+        },
+        "candidate_limit": result.candidate_limit,
+        "selected_limit": result.selected_limit,
+        "max_rejected_facts": result.max_rejected_facts,
+        "candidate_count_considered": len(result.decisions),
+        "selected_count": len(selected),
+        "rejected_count": sum(1 for d in result.decisions if d.selection_status == "rejected"),
+        "truncated_candidates": result.truncated_candidates,
+        "truncated_rejected_facts": sum(1 for d in result.decisions if d.selection_status == "rejected") > result.max_rejected_facts,
+        "selected": selected,
+        "rejected": rejected,
+        "review_reasons": result.review_reasons,
+    }
+
 def resolve_market_evidence_config(
     config: AnalysisConfig,
 ) -> ResolvedMarketEvidenceConfig:
@@ -180,6 +347,8 @@ def select_market_evidence(
     evidence_retrieval_as_of_datetime: datetime,
     evidence_retrieval_as_of_date: date,
     target_listing_external_id: str | None = None,
+    target_area_m2: float | None = None,
+    profile: str = "investment",
 ) -> SelectedMarketEvidenceContext:
     if evidence_retrieval_as_of_datetime.tzinfo is None:
         raise ValueError("evidence_retrieval_as_of_datetime must be timezone-aware")
@@ -229,15 +398,33 @@ def select_market_evidence(
             excluded[reason] = excluded.get(reason, 0) + 1
             continue
         selected.append(_to_comp(item))
-    selected.sort(key=lambda c: (-c.confidence, -c.checked_at.timestamp(), c.id))
+    target = ComparableTargetContext(
+        target_listing_id=None,
+        target_listing_external_id=target_listing_external_id,
+        profile=profile,
+        estimate_purpose="rent_estimate",
+        asset_type=expected_asset_type,
+        deal_type="rent",
+        location_key=resolved.location_key if resolved.matching_policy == MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY else None,
+        area_m2=target_area_m2,
+    )
+    selection = select_comparable_candidates(
+        target,
+        selected,
+        as_of=evidence_retrieval_as_of_datetime,
+        candidate_limit=COMPARABLE_SELECTION_DEFAULT_CANDIDATE_LIMIT,
+        selected_limit=resolved.max_comps,
+        max_age_days=resolved.max_age_days,
+    )
     return SelectedMarketEvidenceContext(
-        items=selected[: max(0, resolved.max_comps)],
+        items=selection.selected_items,
         excluded_counts_by_reason=excluded,
         limitations=[],
         retrieval_as_of_datetime=evidence_retrieval_as_of_datetime,
         retrieval_as_of_date=evidence_retrieval_as_of_date,
         config=resolved,
         target_listing_external_id=target_listing_external_id,
+        selection_result=selection,
     )
 
 
@@ -282,8 +469,6 @@ def _exclusion_reason(
         return "wrong_location_key"
     if not (item.source_url_normalized or item.source_url):
         return "missing_source"
-    if not item.content_hash:
-        return "missing_content_hash"
     if item.rent_per_m2_rub is None and item.rent_rub_per_month is None:
         return "missing_rent_metric"
     return None
@@ -414,8 +599,34 @@ def market_evidence_fingerprint(
             }
             for i in sorted(context.items, key=lambda x: x.id)
         ],
+        "comparable_selection_policy_version": COMPARABLE_SELECTION_POLICY_VERSION,
+        "selection": comparable_selection_fingerprint(context.selection_result) if context.selection_result is not None else None,
         "comparable_quality_model_version": COMPARABLE_QUALITY_MODEL_VERSION,
         "quality_as_of_datetime": context.retrieval_as_of_datetime.isoformat(),
+    }
+
+
+def comparable_selection_fingerprint(result: ComparableSelectionResult | None) -> dict[str, Any] | None:
+    if result is None:
+        return None
+    return {
+        "version": result.policy_version,
+        "as_of": result.as_of.isoformat(),
+        "target_context": result.target_context.__dict__,
+        "candidate_limit": result.candidate_limit,
+        "selected_limit": result.selected_limit,
+        "decisions": [
+            {
+                "evidence_id": d.evidence_id,
+                "source_listing_external_id": d.source_listing_external_id,
+                "selection_status": d.selection_status,
+                "selection_stage": d.selection_stage,
+                "selection_reason": d.selection_reason,
+                "rejection_reason": d.rejection_reason,
+                "matched_on": d.matched_on,
+            }
+            for d in sorted(result.decisions, key=lambda x: x.evidence_id)
+        ],
     }
 
 
