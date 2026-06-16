@@ -13,6 +13,7 @@ from app.analysis.market_comps import (
     SelectedMarketEvidenceContext,
     adjust_comparable_rents,
     assess_comparable_quality,
+    assess_source_quality,
     comparable_quality_facts,
     comparable_selection_facts,
     estimate_market_rent,
@@ -1431,11 +1432,30 @@ class InvestmentAnalysisProvider:
             and market_evidence_context.selection_result is not None
             else None
         )
+        source_quality_assessment = (
+            assess_source_quality(
+                target_context=replace(
+                    market_evidence_context.selection_result.target_context,
+                    area_m2=listing.area_m2,
+                )
+                if market_evidence_context.selection_result is not None
+                else None,
+                selected_comps=market_evidence_context.items,
+                quality_result=quality_assessment,
+                selection_result=market_evidence_context.selection_result,
+                as_of=market_evidence_context.retrieval_as_of_datetime,
+            )
+            if config.use_market_evidence is True
+            and market_evidence_context is not None
+            and market_evidence_context.selection_result is not None
+            else None
+        )
         market_estimate = (
             estimate_market_rent(
                 context=market_evidence_context,
                 area_m2=listing.area_m2,
                 quality_assessment=quality_assessment,
+                source_quality_assessment=source_quality_assessment,
             )
             if config.use_market_evidence is True
             and market_evidence_context is not None
@@ -1544,6 +1564,8 @@ class InvestmentAnalysisProvider:
                 market_flags.extend(quality_assessment.summary.review_reasons)
             if adjusted_comparables is not None:
                 market_flags.extend(adjusted_comparables.review_reasons)
+            if source_quality_assessment is not None:
+                market_flags.extend(source_quality_assessment.review_reasons)
             if (
                 market_evidence_context.config.matching_policy
                 == MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY
@@ -1693,6 +1715,7 @@ class InvestmentAnalysisProvider:
                             "cross_listing_low_diversity" in flags,
                             quality_assessment,
                             adjusted_comparables,
+                            source_quality_assessment,
                         )
                     }
                     if config.use_market_evidence is True
@@ -1888,6 +1911,7 @@ def _market_evidence_facts(
     low_diversity: bool = False,
     quality_assessment=None,
     adjusted_comparables=None,
+    source_quality_assessment=None,
 ) -> dict:
     facts = {
         "enabled": True,
@@ -1938,6 +1962,11 @@ def _market_evidence_facts(
         **(
             {"adjusted_comparables": adjusted_comparables.facts()}
             if adjusted_comparables is not None
+            else {}
+        ),
+        **(
+            {"source_quality": source_quality_assessment.facts()}
+            if source_quality_assessment is not None
             else {}
         ),
         "selected_listing_external_ids": [i.listing_external_id for i in context.items],
