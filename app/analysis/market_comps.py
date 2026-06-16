@@ -63,6 +63,18 @@ MAX_ADJUSTED_COMP_FACT_ITEMS = 10
 
 SOURCE_QUALITY_MODEL_VERSION = "v0"
 SOURCE_QUALITY_CONFIG_VERSION = "v0"
+
+SALE_EVIDENCE_MODEL_VERSION = "v0"
+SALE_EVIDENCE_CONFIG_VERSION = "v0"
+CAP_RATE_EVIDENCE_MODEL_VERSION = "v0"
+CAP_RATE_EVIDENCE_CONFIG_VERSION = "v0"
+MAX_SALE_EVIDENCE_FACT_ITEMS = 10
+MIN_SALE_COMP_COUNT_FOR_BASE_CONFIDENCE = 3
+SALE_EVIDENCE_MIN_HIGH_OR_MEDIUM_QUALITY_SHARE = 0.5
+SALE_EVIDENCE_STALE_DAYS = 30
+MIN_CAP_RATE_PCT = 1.0
+MAX_CAP_RATE_PCT = 30.0
+GROSS_YIELD_ENABLED = False
 SOURCE_QUALITY_STALE_DAYS = 30
 SOURCE_QUALITY_AGING_DAYS = 14
 MAX_SOURCE_QUALITY_FACT_ITEMS = 10
@@ -118,6 +130,14 @@ class MarketCompInput:
     source_verified: bool | None = None
     source_origin: str | None = None
     published_at: datetime | None = None
+    sale_price_rub: float | None = None
+    asking_price_rub: float | None = None
+    sale_price_per_m2_rub: float | None = None
+    asking_price_per_m2_rub: float | None = None
+    currency: str | None = None
+    price_type: str | None = None
+    cap_rate_pct: float | None = None
+    cap_rate_unit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -260,6 +280,66 @@ class SourceQualityAssessment:
 
     def facts(self, *, max_items: int = MAX_SOURCE_QUALITY_FACT_ITEMS) -> dict[str, Any]:
         return source_quality_facts(self, max_items=max_items)
+
+
+@dataclass(frozen=True)
+class SaleEvidenceConfig:
+    max_fact_items: int = MAX_SALE_EVIDENCE_FACT_ITEMS
+    min_sale_comp_count_for_base_confidence: int = MIN_SALE_COMP_COUNT_FOR_BASE_CONFIDENCE
+    min_high_or_medium_quality_share: float = SALE_EVIDENCE_MIN_HIGH_OR_MEDIUM_QUALITY_SHARE
+    stale_days: int = SALE_EVIDENCE_STALE_DAYS
+    min_cap_rate_pct: float = MIN_CAP_RATE_PCT
+    max_cap_rate_pct: float = MAX_CAP_RATE_PCT
+    gross_yield_enabled: bool = GROSS_YIELD_ENABLED
+
+
+@dataclass(frozen=True)
+class SaleEvidenceItem:
+    evidence_id: int
+    source_listing_external_id: str | None
+    price_rub: float | None
+    price_per_m2_rub: float | None
+    price_basis: str
+    price_type: str
+    verification_status: str | None
+    explicit_cap_rate_pct: float | None
+    cap_rate_basis: str | None
+    derived_gross_yield_pct: float | None
+    gross_yield_basis: str | None
+    source_quality_bucket: str | None
+    quality_bucket: str | None
+    trace_strength: str | None
+    sale_evidence_flags: list[str]
+    sale_evidence_reasons: list[str]
+
+
+@dataclass(frozen=True)
+class SaleAndCapRateEvidenceAssessment:
+    sale_evidence_model_version: str
+    sale_evidence_config_version: str
+    cap_rate_evidence_model_version: str
+    cap_rate_evidence_config_version: str
+    as_of: datetime
+    target_context: ComparableTargetContext
+    assessed_count: int
+    sale_evidence_count: int
+    cap_rate_evidence_count: int
+    gross_yield_evidence_count: int
+    selected_count: int
+    excluded_count: int
+    median_observed_price_per_m2_rub: float | None
+    median_observed_total_price_rub: float | None
+    median_explicit_cap_rate_pct: float | None
+    median_derived_gross_yield_pct: float | None
+    sale_evidence_confidence: str
+    cap_rate_evidence_confidence: str
+    sale_evidence_confidence_cap: float | str | None
+    cap_rate_evidence_confidence_cap: float | str | None
+    review_reasons: list[str]
+    items: list[SaleEvidenceItem]
+
+    def facts(self, *, max_items: int = MAX_SALE_EVIDENCE_FACT_ITEMS) -> dict[str, Any]:
+        return sale_and_cap_rate_evidence_facts(self, max_items=max_items)
 
 
 @dataclass(frozen=True)
@@ -765,8 +845,25 @@ def _to_comp(item: MarketEvidenceItem) -> MarketCompInput:
         source_origin=(item.evidence_json or {}).get("source_origin"),
         published_at=_parse_source_datetime(item.source_published_at)
         or _parse_source_datetime((item.evidence_json or {}).get("published_at")),
+        sale_price_rub=_float_or_none((item.evidence_json or {}).get("sale_price_rub")),
+        asking_price_rub=_float_or_none((item.evidence_json or {}).get("asking_price_rub")),
+        sale_price_per_m2_rub=_float_or_none((item.evidence_json or {}).get("sale_price_per_m2_rub")),
+        asking_price_per_m2_rub=_float_or_none((item.evidence_json or {}).get("asking_price_per_m2_rub")),
+        currency=(item.evidence_json or {}).get("currency"),
+        price_type=(item.evidence_json or {}).get("price_type"),
+        cap_rate_pct=_float_or_none((item.evidence_json or {}).get("cap_rate_pct")),
+        cap_rate_unit=(item.evidence_json or {}).get("cap_rate_unit"),
     )
 
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def assess_source_quality(
@@ -943,6 +1040,231 @@ def _source_confidence_bucket(cap: float | None) -> str:
     if cap <= SOURCE_QUALITY_CAP_INDICATIVE:
         return "indicative"
     return "weak"
+
+def _quality_bucket_by_id(quality_result: ComparableQualityAssessment | None) -> dict[int, ComparableQualityResult]:
+    return {r.evidence_id: r for r in quality_result.results} if quality_result is not None else {}
+
+
+def _source_quality_by_id(source_quality_assessment: SourceQualityAssessment | None) -> dict[int, SourceQualityItem]:
+    return {i.evidence_id: i for i in source_quality_assessment.items} if source_quality_assessment is not None else {}
+
+
+def assess_sale_and_cap_rate_evidence(
+    *,
+    target_context: ComparableTargetContext,
+    selected_comps: list[MarketCompInput],
+    quality_result: ComparableQualityAssessment | None,
+    selection_result: ComparableSelectionResult | None,
+    source_quality_assessment: SourceQualityAssessment | None,
+    as_of: datetime,
+    config: SaleEvidenceConfig | None = None,
+) -> SaleAndCapRateEvidenceAssessment:
+    if as_of.tzinfo is None:
+        raise ValueError("as_of must be timezone-aware")
+    cfg = config or SaleEvidenceConfig()
+    as_of_utc = as_of.astimezone(UTC)
+    selected_ids = {d.evidence_id for d in selection_result.decisions if d.selection_status == "selected"} if selection_result is not None else {i.id for i in selected_comps}
+    quality_by_id = _quality_bucket_by_id(quality_result)
+    source_by_id = _source_quality_by_id(source_quality_assessment)
+    usable_ids = {r.evidence_id for r in quality_result.results if r.accepted} if quality_result is not None else {i.id for i in selected_comps}
+    items: list[SaleEvidenceItem] = []
+    review: list[str] = []
+    assessed = 0
+    for comp in sorted(selected_comps, key=lambda i: (i.id, i.listing_external_id or "")):
+        if comp.id not in selected_ids or comp.id not in usable_ids:
+            continue
+        assessed += 1
+        item, item_reasons = _sale_evidence_item(comp, cfg, quality_by_id.get(comp.id), source_by_id.get(comp.id))
+        if item is None:
+            review.extend(item_reasons)
+            continue
+        items.append(item)
+        review.extend(item.sale_evidence_reasons)
+    sale_count = sum(1 for i in items if i.price_rub is not None or i.price_per_m2_rub is not None)
+    cap_count = sum(1 for i in items if i.explicit_cap_rate_pct is not None)
+    gross_count = sum(1 for i in items if i.derived_gross_yield_pct is not None)
+    if sale_count == 0:
+        review.append("no_structured_sale_evidence")
+    if cap_count == 0:
+        review.append("no_structured_explicit_cap_rate")
+    sq_cap = source_quality_assessment.evidence_confidence_cap if source_quality_assessment is not None else None
+    sale_cap = combine_confidence_caps(sq_cap)
+    cap_rate_cap = combine_confidence_caps(sq_cap)
+    sale_conf = _sale_confidence(sale_count, items, cfg, sale_cap)
+    cap_conf = _sale_confidence(cap_count, items, cfg, cap_rate_cap)
+    return SaleAndCapRateEvidenceAssessment(
+        SALE_EVIDENCE_MODEL_VERSION, SALE_EVIDENCE_CONFIG_VERSION,
+        CAP_RATE_EVIDENCE_MODEL_VERSION, CAP_RATE_EVIDENCE_CONFIG_VERSION,
+        as_of_utc, target_context, assessed, sale_count, cap_count, gross_count,
+        len(selected_ids), max(0, len(selected_ids) - assessed),
+        _median([i.price_per_m2_rub for i in items if i.price_per_m2_rub is not None]),
+        _median([i.price_rub for i in items if i.price_rub is not None]),
+        _median([i.explicit_cap_rate_pct for i in items if i.explicit_cap_rate_pct is not None]),
+        _median([i.derived_gross_yield_pct for i in items if i.derived_gross_yield_pct is not None]),
+        sale_conf, cap_conf, sale_cap, cap_rate_cap, list(dict.fromkeys(review)), items,
+    )
+
+
+def _sale_evidence_item(comp: MarketCompInput, cfg: SaleEvidenceConfig, quality: ComparableQualityResult | None, source: SourceQualityItem | None) -> tuple[SaleEvidenceItem | None, list[str]]:
+    reasons: list[str] = []
+    flags: list[str] = []
+    price_type = _normalize_price_type(comp.price_type, comp.source_type, comp.verification_status, comp.human_verified, reasons)
+    price, price_m2, price_basis = _normalize_sale_price(comp, price_type, reasons, flags)
+    cap_rate, cap_basis = _normalize_cap_rate(comp, cfg, reasons)
+    if cfg.gross_yield_enabled:
+        reasons.append("derived_gross_yield_not_supported_v0")
+    if price is None and price_m2 is None and cap_rate is None:
+        return None, list(dict.fromkeys(reasons))
+    if price_type == "asking_sale":
+        flags.append("asking_sale_price")
+    elif price_type in {"confirmed_sale", "manual_sale"}:
+        flags.append(price_type)
+    if cap_rate is not None:
+        flags.append("explicit_cap_rate")
+    item = SaleEvidenceItem(comp.id, comp.listing_external_id, price, price_m2, price_basis, price_type,
+        _normalize_verification(comp.verification_status, comp.human_verified), cap_rate, cap_basis,
+        None, None, source.confidence_bucket if source is not None else None,
+        quality.quality_bucket if quality is not None else None,
+        source.trace_strength if source is not None else None,
+        list(dict.fromkeys(flags)), list(dict.fromkeys(reasons)))
+    return item, item.sale_evidence_reasons
+
+
+def _normalize_price_type(price_type: str | None, source_type: str | None, verification: str | None, human_verified: bool | None, reasons: list[str]) -> str:
+    pt = (price_type or "").strip().lower()
+    st = (source_type or "").strip().lower()
+    ver = _normalize_verification(verification, human_verified)
+    if pt in {"asking_sale", "manual_sale"}:
+        return pt
+    if pt == "confirmed_sale" and st in {"confirmed", "effective", "manual"} and ver in {"verified", "human_verified"}:
+        return "confirmed_sale"
+    if pt == "human_verified_sale":
+        reasons.append("unsupported_price_type")
+        return "unknown"
+    if pt:
+        reasons.append("unsupported_price_type")
+    else:
+        reasons.append("unknown_price_type")
+    return "unknown"
+
+
+def _normalize_verification(verification: str | None, human_verified: bool | None) -> str:
+    v = (verification or "").strip().lower()
+    if human_verified is True:
+        return "human_verified"
+    return v if v in ALLOWED_VERIFICATION_STATUSES else "unknown"
+
+
+def _normalize_sale_price(comp: MarketCompInput, price_type: str, reasons: list[str], flags: list[str]) -> tuple[float | None, float | None, str]:
+    currency = (comp.currency or "").strip().upper()
+    if not currency:
+        reasons.append("missing_currency")
+        return None, None, "missing_currency"
+    if currency != "RUB":
+        reasons.append("unsupported_currency")
+        return None, None, "unsupported_currency"
+    if price_type == "unknown":
+        return None, None, "unknown_price_type"
+    total = comp.sale_price_rub if comp.sale_price_rub is not None else comp.asking_price_rub
+    if total is None:
+        total = None
+    ppm = comp.sale_price_per_m2_rub if comp.sale_price_per_m2_rub is not None else comp.asking_price_per_m2_rub
+    if ppm is None:
+        ppm = None
+    if ppm is not None:
+        if ppm <= 0:
+            reasons.append("invalid_price")
+            return None, None, "invalid_price"
+        if total is not None and total <= 0:
+            reasons.append("invalid_price")
+            return None, None, "invalid_price"
+        return (float(total) if total is not None else None), float(ppm), "explicit_price_per_m2"
+    if total is not None:
+        if total <= 0:
+            reasons.append("invalid_price")
+            return None, None, "invalid_price"
+        if comp.area_m2 is not None:
+            if comp.area_m2 <= 0:
+                reasons.append("invalid_area")
+                return float(total), None, "invalid_area"
+            return float(total), round(float(total) / float(comp.area_m2), 2), "explicit_total_and_area"
+        reasons.append("missing_area")
+        return float(total), None, "explicit_total_only"
+    return None, None, "missing"
+
+
+def _normalize_cap_rate(comp: MarketCompInput, cfg: SaleEvidenceConfig, reasons: list[str]) -> tuple[float | None, str | None]:
+    if comp.cap_rate_pct is None:
+        return None, None
+    unit = (comp.cap_rate_unit or "pct").strip().lower()
+    if unit not in {"pct", "percent", "%"}:
+        reasons.append("unsupported_unit")
+        return None, "unsupported_unit"
+    try:
+        value = float(comp.cap_rate_pct)
+    except (TypeError, ValueError):
+        reasons.append("invalid_cap_rate")
+        return None, "invalid_cap_rate"
+    if value < cfg.min_cap_rate_pct or value > cfg.max_cap_rate_pct:
+        reasons.append("out_of_range")
+        return None, "out_of_range"
+    return value, "explicit_structured_cap_rate"
+
+
+def _median(values: list[float]) -> float | None:
+    return round(float(median(values)), 2) if values else None
+
+
+def _sale_confidence(count: int, items: list[SaleEvidenceItem], cfg: SaleEvidenceConfig, cap: float | None) -> str:
+    if count == 0:
+        return "unknown"
+    share = sum(1 for i in items if i.quality_bucket in {"high", "medium"}) / max(1, len(items))
+    bucket = "medium" if count >= cfg.min_sale_comp_count_for_base_confidence and share >= cfg.min_high_or_medium_quality_share else "low"
+    if cap is not None and cap <= SOURCE_QUALITY_CAP_INDICATIVE:
+        return "low"
+    return bucket
+
+
+def sale_and_cap_rate_evidence_facts(result: SaleAndCapRateEvidenceAssessment, *, max_items: int = MAX_SALE_EVIDENCE_FACT_ITEMS) -> dict[str, Any]:
+    capped = result.items[: max(0, max_items)]
+    return {
+        "sale_evidence_model_version": result.sale_evidence_model_version,
+        "sale_evidence_config_version": result.sale_evidence_config_version,
+        "cap_rate_evidence_model_version": result.cap_rate_evidence_model_version,
+        "cap_rate_evidence_config_version": result.cap_rate_evidence_config_version,
+        "as_of": result.as_of.isoformat(),
+        "summary": {
+            "assessed_count": result.assessed_count,
+            "sale_evidence_count": result.sale_evidence_count,
+            "cap_rate_evidence_count": result.cap_rate_evidence_count,
+            "gross_yield_evidence_count": result.gross_yield_evidence_count,
+            "median_observed_price_per_m2_rub": result.median_observed_price_per_m2_rub,
+            "median_observed_total_price_rub": result.median_observed_total_price_rub,
+            "median_explicit_cap_rate_pct": result.median_explicit_cap_rate_pct,
+            "median_derived_gross_yield_pct": result.median_derived_gross_yield_pct,
+            "sale_evidence_confidence": result.sale_evidence_confidence,
+            "cap_rate_evidence_confidence": result.cap_rate_evidence_confidence,
+            "sale_evidence_confidence_cap": result.sale_evidence_confidence_cap,
+            "cap_rate_evidence_confidence_cap": result.cap_rate_evidence_confidence_cap,
+        },
+        "items": [i.__dict__ for i in capped],
+        "truncated_items": len(result.items) > max_items,
+        "review_reasons": result.review_reasons,
+    }
+
+
+def sale_and_cap_rate_evidence_fingerprint(assessment: SaleAndCapRateEvidenceAssessment | None) -> dict[str, Any] | None:
+    if assessment is None:
+        return None
+    return {
+        "sale_evidence_model_version": assessment.sale_evidence_model_version,
+        "sale_evidence_config_version": assessment.sale_evidence_config_version,
+        "cap_rate_evidence_model_version": assessment.cap_rate_evidence_model_version,
+        "cap_rate_evidence_config_version": assessment.cap_rate_evidence_config_version,
+        "as_of": assessment.as_of.isoformat(),
+        "constants": {"max_fact_items": MAX_SALE_EVIDENCE_FACT_ITEMS, "min_cap_rate_pct": MIN_CAP_RATE_PCT, "max_cap_rate_pct": MAX_CAP_RATE_PCT, "gross_yield_enabled": GROSS_YIELD_ENABLED},
+        "items": [i.__dict__ for i in sorted(assessment.items, key=lambda x: (x.evidence_id, x.source_listing_external_id or ""))],
+    }
 
 
 def source_quality_facts(result: SourceQualityAssessment, *, max_items: int = MAX_SOURCE_QUALITY_FACT_ITEMS) -> dict[str, Any]:
@@ -1493,6 +1815,14 @@ def market_evidence_fingerprint(
                 "source_verified": i.source_verified,
                 "source_origin": i.source_origin,
                 "published_at": i.published_at.isoformat() if i.published_at else None,
+                "sale_price_rub": i.sale_price_rub,
+                "asking_price_rub": i.asking_price_rub,
+                "sale_price_per_m2_rub": i.sale_price_per_m2_rub,
+                "asking_price_per_m2_rub": i.asking_price_per_m2_rub,
+                "currency": i.currency,
+                "price_type": i.price_type,
+                "cap_rate_pct": i.cap_rate_pct,
+                "cap_rate_unit": i.cap_rate_unit,
             }
             for i in sorted(context.items, key=lambda x: x.id)
         ],
@@ -1514,6 +1844,19 @@ def market_evidence_fingerprint(
             "max_fact_items": MAX_SOURCE_QUALITY_FACT_ITEMS,
         },
         "source_quality_as_of_datetime": context.retrieval_as_of_datetime.isoformat(),
+        "sale_evidence_model_version": SALE_EVIDENCE_MODEL_VERSION,
+        "sale_evidence_config_version": SALE_EVIDENCE_CONFIG_VERSION,
+        "cap_rate_evidence_model_version": CAP_RATE_EVIDENCE_MODEL_VERSION,
+        "cap_rate_evidence_config_version": CAP_RATE_EVIDENCE_CONFIG_VERSION,
+        "sale_cap_rate_constants": {
+            "max_fact_items": MAX_SALE_EVIDENCE_FACT_ITEMS,
+            "min_sale_comp_count_for_base_confidence": MIN_SALE_COMP_COUNT_FOR_BASE_CONFIDENCE,
+            "min_high_or_medium_quality_share": SALE_EVIDENCE_MIN_HIGH_OR_MEDIUM_QUALITY_SHARE,
+            "stale_days": SALE_EVIDENCE_STALE_DAYS,
+            "min_cap_rate_pct": MIN_CAP_RATE_PCT,
+            "max_cap_rate_pct": MAX_CAP_RATE_PCT,
+            "gross_yield_enabled": GROSS_YIELD_ENABLED,
+        },
         "adjusted_comparable_constants": {
             "max_adjustment_abs_pct": MAX_ADJUSTMENT_ABS_PCT,
             "max_single_adjustment_abs_pct": MAX_SINGLE_ADJUSTMENT_ABS_PCT,

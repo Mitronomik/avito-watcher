@@ -14,6 +14,7 @@ from app.analysis.market_comps import (
     adjust_comparable_rents,
     assess_comparable_quality,
     assess_source_quality,
+    assess_sale_and_cap_rate_evidence,
     comparable_quality_facts,
     comparable_selection_facts,
     estimate_market_rent,
@@ -1461,6 +1462,25 @@ class InvestmentAnalysisProvider:
             and market_evidence_context is not None
             else None
         )
+        sale_cap_rate_assessment = (
+            assess_sale_and_cap_rate_evidence(
+                target_context=replace(
+                    market_evidence_context.selection_result.target_context,
+                    area_m2=listing.area_m2,
+                )
+                if market_evidence_context.selection_result is not None
+                else None,
+                selected_comps=market_evidence_context.items,
+                quality_result=quality_assessment,
+                selection_result=market_evidence_context.selection_result,
+                source_quality_assessment=source_quality_assessment,
+                as_of=market_evidence_context.retrieval_as_of_datetime,
+            )
+            if config.use_market_evidence is True
+            and market_evidence_context is not None
+            and market_evidence_context.selection_result is not None
+            else None
+        )
         rent_source = (
             "manual" if config.estimated_monthly_rent is not None else "missing"
         )
@@ -1716,6 +1736,7 @@ class InvestmentAnalysisProvider:
                             quality_assessment,
                             adjusted_comparables,
                             source_quality_assessment,
+                            sale_cap_rate_assessment,
                         )
                     }
                     if config.use_market_evidence is True
@@ -1912,6 +1933,7 @@ def _market_evidence_facts(
     quality_assessment=None,
     adjusted_comparables=None,
     source_quality_assessment=None,
+    sale_cap_rate_assessment=None,
 ) -> dict:
     facts = {
         "enabled": True,
@@ -1967,6 +1989,11 @@ def _market_evidence_facts(
         **(
             {"source_quality": source_quality_assessment.facts()}
             if source_quality_assessment is not None
+            else {}
+        ),
+        **(
+            {"sale_and_cap_rate_evidence": sale_cap_rate_assessment.facts()}
+            if sale_cap_rate_assessment is not None
             else {}
         ),
         "selected_listing_external_ids": [i.listing_external_id for i in context.items],
