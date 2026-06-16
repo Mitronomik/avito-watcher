@@ -24,6 +24,14 @@ from app.repositories.search_repository import SearchRepository
 from app.repositories.market_evidence import MarketEvidenceRepository
 
 
+
+def asset_type_for_analysis_profile(profile: str) -> str | None:
+    if profile in {"commercial_rent", "commercial_sale_investment"}:
+        return "commercial"
+    if profile in {"flat_rent", "flat_sale", "flat_sale_investment"}:
+        return "flat"
+    return None
+
 def _dt(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
@@ -328,16 +336,16 @@ class ListingAnalysisService:
     def _select_market_evidence_context(
         self, *, listing: Listing, config: AnalysisConfig
     ):
-        if config.use_market_evidence is not True or self.provider.profile not in {
-            "commercial_sale_investment",
-            "flat_sale_investment",
-        }:
+        expected_asset = asset_type_for_analysis_profile(self.provider.profile)
+        if config.use_market_evidence is not True or expected_asset is None:
             return None
         as_of = datetime.now(UTC)
         if config.market_evidence_matching_policy == "same_location_key":
             candidates = (
                 MarketEvidenceRepository(self.db).retrieve_items(
                     location_key=config.market_evidence_location_key,
+                    asset_type=expected_asset,
+                    deal_type="rent",
                     evidence_types=["comparable_candidate"],
                     include_expired=True,
                     include_non_reusable=True,
@@ -349,16 +357,13 @@ class ListingAnalysisService:
         else:
             candidates = MarketEvidenceRepository(self.db).retrieve_items(
                 listing_external_id=listing.external_id,
+                asset_type=expected_asset,
+                deal_type="rent",
                 evidence_types=["comparable_candidate"],
                 include_expired=True,
                 include_non_reusable=True,
                 limit=100,
             )
-        expected_asset = (
-            "commercial"
-            if self.provider.profile == "commercial_sale_investment"
-            else "flat"
-        )
         return select_market_evidence(
             candidates=candidates,
             config=config,
@@ -366,6 +371,8 @@ class ListingAnalysisService:
             evidence_retrieval_as_of_datetime=as_of,
             evidence_retrieval_as_of_date=as_of.date(),
             target_listing_external_id=listing.external_id,
+            target_area_m2=listing.area_m2,
+            profile=self.provider.profile,
         )
 
     def _config_for_search(self, search_job_id: int) -> AnalysisConfig:

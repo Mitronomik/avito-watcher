@@ -13,6 +13,7 @@ from app.analysis.market_comps import (
     SelectedMarketEvidenceContext,
     assess_comparable_quality,
     comparable_quality_facts,
+    comparable_selection_facts,
     estimate_market_rent,
 )
 from app.models.listing import Listing
@@ -1830,7 +1831,7 @@ def _investment_questions(
                 "Проверить применимость cross-listing market comps к объекту.",
                 "Проверить, что location_key корректно отражает микролокацию объекта.",
                 "Проверить, что selected comps относятся к тому же asset/deal type.",
-                "Проверить cross-listing comps вручную, так как comp quality scoring ещё не реализован.",
+                "Проверить cross-listing comps вручную; PR25 policy gates and PR24 quality facts are deterministic aids, not an appraisal.",
             ]
         )
         if {
@@ -1889,6 +1890,7 @@ def _market_evidence_facts(
         "cross_listing_reuse_enabled": context.config.matching_policy
         == MARKET_EVIDENCE_POLICY_SAME_LOCATION_KEY,
         "comp_quality_scoring_used": quality_assessment is not None,
+        **({"comparable_selection_policy": comparable_selection_facts(context.selection_result, quality_assessment)} if context.selection_result is not None else {}),
         **({"comparable_quality": comparable_quality_facts(quality_assessment)} if quality_assessment is not None else {}),
         "selected_listing_external_ids": [i.listing_external_id for i in context.items],
         "selected_same_listing_count": sum(

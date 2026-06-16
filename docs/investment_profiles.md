@@ -130,3 +130,28 @@ Compact facts are stored under `investment_metrics.market_evidence.comparable_qu
 ```
 
 The market evidence fingerprint includes the selected evidence fields already used by the deterministic quality helper, the retrieval `as_of` datetime, and the comparable quality model version so reproducible analysis input changes when quality-relevant evidence inputs change. This is an evidence-discipline aid only, not a professional appraisal or valuation claim.
+
+## PR25: comparable selection policy v2
+
+PR25 adds deterministic comparable selection policy v2 before the existing PR24 comparable quality scoring. It answers which already persisted evidence may be selected or reused for an analysis run; PR24 still answers how good each selected comparable is. PR26 adjusted comparable modeling is not implemented: there is no adjusted rent, adjusted price, adjusted median, area normalization factor, rent correction factor, or adjustment flags.
+
+The policy version is `comparable_selection_policy_version = "v2"`. Selection is per analysis run and is written only to the target analysis facts. Market evidence rows are not mutated with selected/rejected state, no migration was added, and no backfill is performed.
+
+The explicit target context uses deterministic fields: target listing external id when available, analysis profile, estimate purpose, asset type, deal type, configured location key for cross-listing reuse, and target area when the caller has it. The helper accepts a timezone-aware deterministic `as_of`; freshness cutoffs derive from that value and the helper does not call current-time functions.
+
+Selection runs in stages:
+
+1. bounded SQL candidate retrieval from existing `market_evidence_items` using listing id or explicit location key plus asset type, deal type, evidence type, and a hard limit;
+2. PR25 hard gates for supported comparable evidence, asset/deal compatibility, rent metric, source trace, freshness, location key, and area compatibility;
+3. PR24 comparable quality scoring on selected candidates only;
+4. comp-derived rent estimation uses only selected candidates accepted by PR24 quality.
+
+Cross-listing reuse is allowed only for the existing `same_location_key` policy and requires the configured location key to match. There is no city-wide median, no profile/all-listing fallback, no progressive scope widening when too few comps survive, no semantic/fuzzy/embedding matching, and no geocoding or new location-equivalence taxonomy.
+
+Stable rejection reasons include `asset_type_mismatch`, `deal_type_mismatch`, `location_key_mismatch`, `area_band_mismatch`, `stale_evidence`, `missing_source_trace`, `missing_rent_metric`, `unsupported_evidence_type`, `cross_listing_reuse_not_allowed`, and `insufficient_match_data`. Stable selection reasons include `same_listing_direct_evidence`, `same_location_key_reuse`, and `policy_selected_after_hard_gates`. Area compatibility is a hard gate only; it does not calculate adjusted values.
+
+A source trace means a stable persisted origin reference such as an evidence id, source URL, content hash, or listing external id. Legacy SQL selection still keeps the existing source-URL discipline for stored reusable evidence, while the policy helper treats stable persisted references as source trace.
+
+Compact facts are stored under `investment_metrics.market_evidence.comparable_selection_policy` with version, `as_of`, target context summary, limits, candidate/selected/rejected counts, truncation flags, selected refs, capped rejected refs, and review reasons. Rejected facts are capped and deterministically ordered by the policy's candidate ordering. The market evidence fingerprint includes the selection policy version, deterministic `as_of`, target context, candidate limits, selected items, selected/rejected decision facts, source-trace fields, and the PR24 quality model version. Manual rent/manual assumptions remain primary and are not overwritten or degraded by selected or rejected comps.
+
+This feature is deterministic evidence discipline only. It is not a professional appraisal or valuation claim and it performs no LLM, agent, RAG, external API, parser, alert delivery, or admin write action.

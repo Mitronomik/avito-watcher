@@ -1947,3 +1947,37 @@ def test_cli_analyze_all_active_searches_does_not_use_monitor_parser_or_notifier
 
     assert output["ok"] is True
     assert _search_result(output, search.id)["status"] == "processed"
+
+
+def test_market_evidence_retrieval_asset_type_for_commercial_rent(monkeypatch, db_session):
+    from app.analysis.config import AnalysisConfig
+    from app.analysis.service import ListingAnalysisService, asset_type_for_analysis_profile
+    from app.repositories.market_evidence import MarketEvidenceRepository
+
+    captured = {}
+
+    def fake_retrieve_items(self, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(MarketEvidenceRepository, "retrieve_items", fake_retrieve_items)
+    service = ListingAnalysisService(db_session, provider=get_analysis_provider("commercial_rent"))
+    listing = _listing(db_session, external_id="commercial-rent-asset")
+
+    assert asset_type_for_analysis_profile("commercial_rent") == "commercial"
+    assert asset_type_for_analysis_profile("commercial_sale_investment") == "commercial"
+    assert asset_type_for_analysis_profile("flat_rent") == "flat"
+    assert asset_type_for_analysis_profile("flat_sale") == "flat"
+
+    ctx = service._select_market_evidence_context(
+        listing=listing,
+        config=AnalysisConfig.from_search_filters(
+            "commercial_rent",
+            {"use_market_evidence": True, "market_evidence_matching_policy": "same_location_key", "market_evidence_location_key": "loc"},
+        ),
+    )
+
+    assert ctx is not None
+    assert captured["asset_type"] == "commercial"
+    assert captured["deal_type"] == "rent"
+    assert captured["location_key"] == "loc"
