@@ -139,3 +139,24 @@ Explicit v0 dimensions and constants are area mismatch, condition/capex, first-l
 Facts include compact `adjusted_comparables` with raw comp rent, raw rent-per-m2, adjusted rent-per-m2, adjusted total rent when target area exists, adjustment reasons/flags, raw and adjusted medians, confidence/confidence cap, whether the adjusted median was used, and review reasons. Item facts are capped and contain no raw payloads, secrets, notifier URLs, or delivery URLs. Old analyses without `adjusted_comparables` remain compatible.
 
 Manual rent/manual assumptions remain primary. Adjusted median can be used as the comp-derived rent estimate only when manual rent is absent, evidence is sufficient, target area exists, and quality/confidence gates are satisfied. The adjusted median is internal investment screening and decision-support only: it is not a certified appraisal, valuation opinion, automated investment advice, source verification (PR27), sale/cap-rate evidence (PR28), scenario engine, DCF, financing/tax model, hidden ML, or professional appraisal claim.
+
+## PR27 source quality / verification discipline v0
+
+PR27 adds deterministic source quality / verification discipline v0 for selected market evidence. It answers how traceable and explicitly verified the source behind a comparable is; it does **not** answer the correct market rent, investment verdict, appraisal value, confirmed transaction price, or buy/sell recommendation.
+
+The model lives in `app.analysis.market_comps.assess_source_quality`. The source quality model and config versions are `SOURCE_QUALITY_MODEL_VERSION = "v0"` and `SOURCE_QUALITY_CONFIG_VERSION = "v0"`. The helper is pure and per-analysis-run: callers provide a timezone-aware `as_of`, and the helper performs no DB, external API, browser/parser, geocoding, embedding, LLM, agent, RAG, admin write, or current-time calls. Source quality facts are written only into the analysis facts output; evidence rows are not mutated, no source quality is persisted back to evidence, and no backfill or migration is introduced.
+
+PR27 keeps source concepts separate:
+
+- `source_type` records the explicit source type claim only: `asking`, `confirmed`, `effective`, `manual`, or `unknown`.
+- Missing source type remains `unknown`; unsupported values become `unknown` with `source_type_untrusted_value`.
+- `verification_status` is explicit-only: `verified`, `human_verified`, `unverified`, or `unknown`.
+- `human_verified` and related structured human-review flags are verification status signals, not normal source types.
+- `trace_strength` records operator traceability, not truth: URL plus content hash is `strong`, URL or content hash alone is `medium`, listing/evidence id only is `weak`, and no trace is `missing`.
+- A strong trace never means the source is verified and never raises confidence.
+- `freshness_bucket` uses structured timestamps against caller-provided `as_of`; stale or expired sources add review/cap reasons but do not change rent.
+- `source_origin` is recorded only when already present as structured data; it is not inferred from URL, title, provider, or text.
+
+Source reliability can only cap/lower market-evidence confidence and add review reasons/facts. Multiple confidence caps combine conservatively by taking the most restrictive cap. PR27 does not change `adjusted_rent_per_m2`, adjusted median rent, manual rent, investment score, or verdict directly. Manual rent remains primary when provided. PR24 remains responsible for comparable quality, PR25 for comparable selection, and PR26 for adjusted comparable rent-per-m2; PR27 reuses selected and PR24-usable comps but does not replace those layers or feed rewritten source fields into PR26.
+
+Facts are compact under `market_evidence.source_quality`: version/config version, `as_of`, summary counts/cap/bucket, capped deterministic items, truncation flag, and review reasons. Facts contain no raw payloads, raw `evidence_json`, auth headers, secrets, webhook/notifier/Apps Script delivery URLs, or full source page content. The market-evidence fingerprint includes source-quality versions/constants and source-quality-relevant structured fields with sanitized URL hashing, so source-quality-relevant input changes churn `input_hash` while raw secret-bearing URL query strings are excluded.

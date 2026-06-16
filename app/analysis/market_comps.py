@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from urllib.parse import urlsplit, urlunsplit
 import hashlib
 import json
 from statistics import median
@@ -60,6 +61,16 @@ MIN_ADJUSTED_COMP_COUNT_FOR_BASE_CONFIDENCE = 3
 MIN_HIGH_OR_MEDIUM_QUALITY_SHARE = 0.5
 MAX_ADJUSTED_COMP_FACT_ITEMS = 10
 
+SOURCE_QUALITY_MODEL_VERSION = "v0"
+SOURCE_QUALITY_CONFIG_VERSION = "v0"
+SOURCE_QUALITY_STALE_DAYS = 30
+SOURCE_QUALITY_AGING_DAYS = 14
+MAX_SOURCE_QUALITY_FACT_ITEMS = 10
+SOURCE_QUALITY_CAP_WEAK = 0.50
+SOURCE_QUALITY_CAP_INDICATIVE = 0.35
+ALLOWED_SOURCE_TYPES = {"asking", "confirmed", "effective", "manual", "unknown"}
+ALLOWED_VERIFICATION_STATUSES = {"verified", "human_verified", "unverified", "unknown"}
+
 REASON_AREA_ADJUSTMENT = "area_adjustment"
 REASON_CONDITION_ADJUSTMENT = "condition_adjustment"
 REASON_FIRST_LINE_ADJUSTMENT = "first_line_adjustment"
@@ -100,6 +111,13 @@ class MarketCompInput:
     capex_required: bool | None = None
     first_line: bool | None = None
     floor_access: str | None = None
+    verification_status: str | None = None
+    human_verified: bool | None = None
+    verified_by_human: bool | None = None
+    reviewed_by_human: bool | None = None
+    source_verified: bool | None = None
+    source_origin: str | None = None
+    published_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -196,6 +214,52 @@ class ComparableQualityAssessment:
     @property
     def accepted_item_ids(self) -> set[int]:
         return {r.evidence_id for r in self.results if r.accepted}
+
+
+
+
+@dataclass(frozen=True)
+class SourceQualityConfig:
+    stale_days: int = SOURCE_QUALITY_STALE_DAYS
+    aging_days: int = SOURCE_QUALITY_AGING_DAYS
+    max_fact_items: int = MAX_SOURCE_QUALITY_FACT_ITEMS
+    min_strong_or_medium_trace_share: float = 0.5
+    min_verified_or_known_source_type_share: float = 0.5
+
+
+@dataclass(frozen=True)
+class SourceQualityItem:
+    evidence_id: int
+    source_listing_external_id: str | None
+    source_type: str
+    verification_status: str
+    trace_strength: str
+    freshness_bucket: str
+    source_origin: str | None
+    confidence_bucket: str
+    confidence_cap: float | None
+    source_quality_flags: list[str]
+    source_quality_reasons: list[str]
+
+
+@dataclass(frozen=True)
+class SourceQualityAssessment:
+    source_quality_model_version: str
+    source_quality_config_version: str
+    as_of: datetime
+    target_context: ComparableTargetContext
+    assessed_count: int
+    weak_or_missing_trace_count: int
+    unknown_source_type_count: int
+    verified_count: int
+    stale_or_expired_count: int
+    evidence_confidence_cap: float | None
+    source_quality_bucket: str
+    review_reasons: list[str]
+    items: list[SourceQualityItem]
+
+    def facts(self, *, max_items: int = MAX_SOURCE_QUALITY_FACT_ITEMS) -> dict[str, Any]:
+        return source_quality_facts(self, max_items=max_items)
 
 
 @dataclass(frozen=True)
@@ -693,8 +757,266 @@ def _to_comp(item: MarketEvidenceItem) -> MarketCompInput:
         capex_required=(item.evidence_json or {}).get("capex_required"),
         first_line=(item.evidence_json or {}).get("first_line"),
         floor_access=(item.evidence_json or {}).get("floor_access"),
+        verification_status=(item.evidence_json or {}).get("verification_status"),
+        human_verified=(item.evidence_json or {}).get("human_verified"),
+        verified_by_human=(item.evidence_json or {}).get("verified_by_human"),
+        reviewed_by_human=(item.evidence_json or {}).get("reviewed_by_human"),
+        source_verified=(item.evidence_json or {}).get("source_verified"),
+        source_origin=(item.evidence_json or {}).get("source_origin"),
+        published_at=_parse_source_datetime(item.source_published_at)
+        or _parse_source_datetime((item.evidence_json or {}).get("published_at")),
     )
 
+
+
+def assess_source_quality(
+    *,
+    target_context: ComparableTargetContext,
+    selected_comps: list[MarketCompInput],
+    selection_result: ComparableSelectionResult | None,
+    quality_result: ComparableQualityAssessment | None,
+    as_of: datetime,
+    config: SourceQualityConfig | None = None,
+) -> SourceQualityAssessment:
+    if as_of.tzinfo is None:
+        raise ValueError("as_of must be timezone-aware")
+    cfg = config or SourceQualityConfig()
+    as_of_utc = as_of.astimezone(UTC)
+    selected_ids = (
+        {d.evidence_id for d in selection_result.decisions if d.selection_status == "selected"}
+        if selection_result is not None
+        else {i.id for i in selected_comps}
+    )
+    allowed_quality_ids = (
+        {r.evidence_id for r in quality_result.results if r.accepted}
+        if quality_result is not None
+        else {i.id for i in selected_comps}
+    )
+    items: list[SourceQualityItem] = []
+    review: list[str] = []
+    for comp in sorted(selected_comps, key=lambda i: (-1 if i.id is None else i.id, i.listing_external_id or "")):
+        if comp.id not in selected_ids or comp.id not in allowed_quality_ids:
+            continue
+        flags: list[str] = []
+        reasons: list[str] = []
+        source_type = _source_quality_type(comp.source_type, flags, reasons)
+        verification_status = _source_quality_verification(comp, flags)
+        trace_strength = _source_trace_strength(comp)
+        freshness_bucket, age_days, freshness_reasons = _source_freshness(comp, as_of_utc, cfg)
+        reasons.extend(freshness_reasons)
+        if trace_strength in {"weak", "missing"}:
+            reasons.append(f"{trace_strength}_source_trace")
+        if source_type == "unknown":
+            review.append("source_type_unknown")
+        if freshness_reasons:
+            review.extend(freshness_reasons)
+        if trace_strength == "missing":
+            review.append("missing_source_trace")
+        cap = _source_item_cap(trace_strength, source_type, freshness_bucket, comp.expires_at, as_of_utc)
+        bucket = _source_confidence_bucket(cap)
+        items.append(SourceQualityItem(
+            comp.id,
+            comp.listing_external_id,
+            source_type,
+            verification_status,
+            trace_strength,
+            freshness_bucket,
+            comp.source_origin,
+            bucket,
+            cap,
+            list(dict.fromkeys(flags)),
+            list(dict.fromkeys(reasons)),
+        ))
+    assessed = len(items)
+    weak_missing = sum(1 for i in items if i.trace_strength in {"weak", "missing"})
+    unknown_type = sum(1 for i in items if i.source_type == "unknown")
+    verified = sum(1 for i in items if i.verification_status in {"verified", "human_verified"})
+    stale_expired = sum(1 for i in items if i.freshness_bucket == "stale" or "expired_source" in i.source_quality_reasons)
+    if assessed:
+        strong_medium_share = (assessed - weak_missing) / assessed
+        verified_or_known_share = sum(1 for i in items if i.verification_status in {"verified", "human_verified"} or i.source_type != "unknown") / assessed
+        if strong_medium_share < cfg.min_strong_or_medium_trace_share:
+            review.append("weak_or_missing_source_trace_share")
+        if verified_or_known_share < cfg.min_verified_or_known_source_type_share:
+            review.append("low_verified_or_known_source_type_share")
+    cap_values = [i.confidence_cap for i in items if i.confidence_cap is not None]
+    evidence_cap = min(cap_values) if cap_values else None
+    if evidence_cap is not None:
+        review.append("source_quality_confidence_cap_applied")
+    bucket = "high" if evidence_cap is None and unknown_type == 0 and weak_missing == 0 and stale_expired == 0 else "medium"
+    if evidence_cap == SOURCE_QUALITY_CAP_WEAK:
+        bucket = "weak"
+    if evidence_cap == SOURCE_QUALITY_CAP_INDICATIVE:
+        bucket = "indicative"
+    return SourceQualityAssessment(
+        SOURCE_QUALITY_MODEL_VERSION,
+        SOURCE_QUALITY_CONFIG_VERSION,
+        as_of_utc,
+        target_context,
+        assessed,
+        weak_missing,
+        unknown_type,
+        verified,
+        stale_expired,
+        evidence_cap,
+        bucket,
+        list(dict.fromkeys(review)),
+        items,
+    )
+
+
+def _source_quality_type(value: str | None, flags: list[str], reasons: list[str]) -> str:
+    if value is None or str(value).strip() == "":
+        flags.append("source_type_unknown")
+        return "unknown"
+    normalized = str(value).strip().lower()
+    if normalized in ALLOWED_SOURCE_TYPES and normalized != "unknown":
+        flags.append("source_type_explicit")
+        return normalized
+    if normalized == "unknown":
+        flags.append("source_type_unknown")
+        return "unknown"
+    flags.append("source_type_unknown")
+    reasons.append("source_type_untrusted_value")
+    return "unknown"
+
+
+def _source_quality_verification(comp: MarketCompInput, flags: list[str]) -> str:
+    raw = comp.verification_status
+    if raw is not None and str(raw).strip().lower() in ALLOWED_VERIFICATION_STATUSES:
+        status = str(raw).strip().lower()
+    elif comp.human_verified is True or comp.verified_by_human is True or comp.reviewed_by_human is True:
+        status = "human_verified"
+    elif comp.source_verified is True:
+        status = "verified"
+    elif comp.source_verified is False or comp.human_verified is False:
+        status = "unverified"
+    else:
+        status = "unknown"
+    if status in {"verified", "human_verified"}:
+        flags.append(status)
+    return status
+
+
+def _source_trace_strength(comp: MarketCompInput) -> str:
+    has_url = bool(comp.source_url_normalized)
+    has_hash = bool(comp.content_hash)
+    if has_url and has_hash:
+        return "strong"
+    if has_url or has_hash:
+        return "medium"
+    if comp.listing_external_id or comp.id is not None:
+        return "weak"
+    return "missing"
+
+
+def _source_freshness(comp: MarketCompInput, as_of: datetime, cfg: SourceQualityConfig) -> tuple[str, int | None, list[str]]:
+    if comp.expires_at is not None and comp.expires_at.astimezone(UTC) < as_of:
+        return "stale", None, ["expired_source"]
+    ts = comp.published_at or comp.checked_at
+    if ts is None:
+        return "unknown", None, ["freshness_unknown"]
+    age = (as_of - ts.astimezone(UTC)).days
+    if age > cfg.stale_days:
+        return "stale", age, ["stale_source"]
+    if age > cfg.aging_days:
+        return "aging", age, []
+    return "fresh", age, []
+
+
+def _source_item_cap(trace_strength: str, source_type: str, freshness_bucket: str, expires_at: datetime | None, as_of: datetime) -> float | None:
+    caps: list[float] = []
+    if trace_strength == "missing":
+        caps.append(SOURCE_QUALITY_CAP_INDICATIVE)
+    elif trace_strength == "weak":
+        caps.append(SOURCE_QUALITY_CAP_WEAK)
+    if source_type == "unknown":
+        caps.append(SOURCE_QUALITY_CAP_WEAK)
+    if freshness_bucket == "stale" or (expires_at is not None and expires_at.astimezone(UTC) < as_of):
+        caps.append(SOURCE_QUALITY_CAP_WEAK)
+    return min(caps) if caps else None
+
+
+def _source_confidence_bucket(cap: float | None) -> str:
+    if cap is None:
+        return "high"
+    if cap <= SOURCE_QUALITY_CAP_INDICATIVE:
+        return "indicative"
+    return "weak"
+
+
+def source_quality_facts(result: SourceQualityAssessment, *, max_items: int = MAX_SOURCE_QUALITY_FACT_ITEMS) -> dict[str, Any]:
+    capped = result.items[: max(0, max_items)]
+    return {
+        "version": result.source_quality_model_version,
+        "config_version": result.source_quality_config_version,
+        "as_of": result.as_of.isoformat(),
+        "summary": {
+            "assessed_count": result.assessed_count,
+            "source_quality_bucket": result.source_quality_bucket,
+            "evidence_confidence_cap": result.evidence_confidence_cap,
+            "unknown_source_type_count": result.unknown_source_type_count,
+            "weak_or_missing_trace_count": result.weak_or_missing_trace_count,
+            "verified_count": result.verified_count,
+            "stale_or_expired_count": result.stale_or_expired_count,
+        },
+        "items": [i.__dict__ for i in capped],
+        "truncated_items": len(result.items) > max_items,
+        "review_reasons": result.review_reasons,
+    }
+
+
+def combine_confidence_caps(*caps: float | None) -> float | None:
+    values = [c for c in caps if c is not None]
+    return min(values) if values else None
+
+
+def source_quality_fingerprint(assessment: SourceQualityAssessment | None) -> dict[str, Any] | None:
+    if assessment is None:
+        return None
+    return {
+        "source_quality_model_version": assessment.source_quality_model_version,
+        "source_quality_config_version": assessment.source_quality_config_version,
+        "as_of": assessment.as_of.isoformat(),
+        "constants": {
+            "stale_days": SOURCE_QUALITY_STALE_DAYS,
+            "aging_days": SOURCE_QUALITY_AGING_DAYS,
+            "cap_weak": SOURCE_QUALITY_CAP_WEAK,
+            "cap_indicative": SOURCE_QUALITY_CAP_INDICATIVE,
+        },
+        "items": [
+            {
+                "evidence_id": i.evidence_id,
+                "source_listing_external_id": i.source_listing_external_id,
+                "source_type": i.source_type,
+                "verification_status": i.verification_status,
+                "trace_strength": i.trace_strength,
+                "freshness_bucket": i.freshness_bucket,
+                "source_origin": i.source_origin,
+                "confidence_cap": i.confidence_cap,
+                "reasons": i.source_quality_reasons,
+            }
+            for i in sorted(assessment.items, key=lambda x: (-1 if x.evidence_id is None else x.evidence_id, x.source_listing_external_id or ""))
+        ],
+    }
+
+
+def _safe_url_fingerprint(value: str) -> str | None:
+    if not value:
+        return None
+    parts = urlsplit(value)
+    safe = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    return hashlib.sha256(safe.encode("utf-8")).hexdigest()
+
+
+def _parse_source_datetime(value: Any) -> datetime | None:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 def adjust_comparable_rents(
     *,
@@ -1054,6 +1376,7 @@ def estimate_market_rent(
     context: SelectedMarketEvidenceContext,
     area_m2: float | None,
     quality_assessment: ComparableQualityAssessment | None = None,
+    source_quality_assessment: SourceQualityAssessment | None = None,
 ) -> MarketRentEstimate:
     flags: list[str] = []
     if context.config.rent_strategy != "median":
@@ -1102,6 +1425,12 @@ def estimate_market_rent(
         and quality_assessment.summary.evidence_confidence_cap is not None
     ):
         conf = min(conf, quality_assessment.summary.evidence_confidence_cap)
+    if (
+        conf is not None
+        and source_quality_assessment is not None
+        and source_quality_assessment.evidence_confidence_cap is not None
+    ):
+        conf = min(conf, source_quality_assessment.evidence_confidence_cap)
     return MarketRentEstimate(
         monthly,
         rent_m2,
@@ -1144,7 +1473,7 @@ def market_evidence_fingerprint(
                 "confidence": i.confidence,
                 "checked_at": i.checked_at.date().isoformat(),
                 "expires_at": i.expires_at.date().isoformat() if i.expires_at else None,
-                "source_url_normalized": i.source_url_normalized,
+                "source_url_hash": _safe_url_fingerprint(i.source_url_normalized),
                 "asset_type": i.asset_type,
                 "deal_type": i.deal_type,
                 "location_key": i.location_key,
@@ -1157,6 +1486,13 @@ def market_evidence_fingerprint(
                 "capex_required": i.capex_required,
                 "first_line": i.first_line,
                 "floor_access": i.floor_access,
+                "verification_status": i.verification_status,
+                "human_verified": i.human_verified,
+                "verified_by_human": i.verified_by_human,
+                "reviewed_by_human": i.reviewed_by_human,
+                "source_verified": i.source_verified,
+                "source_origin": i.source_origin,
+                "published_at": i.published_at.isoformat() if i.published_at else None,
             }
             for i in sorted(context.items, key=lambda x: x.id)
         ],
@@ -1168,6 +1504,16 @@ def market_evidence_fingerprint(
         "quality_as_of_datetime": context.retrieval_as_of_datetime.isoformat(),
         "adjusted_comparable_model_version": ADJUSTED_COMPARABLE_MODEL_VERSION,
         "adjusted_comparable_config_version": ADJUSTED_COMPARABLE_CONFIG_VERSION,
+        "source_quality_model_version": SOURCE_QUALITY_MODEL_VERSION,
+        "source_quality_config_version": SOURCE_QUALITY_CONFIG_VERSION,
+        "source_quality_constants": {
+            "stale_days": SOURCE_QUALITY_STALE_DAYS,
+            "aging_days": SOURCE_QUALITY_AGING_DAYS,
+            "cap_weak": SOURCE_QUALITY_CAP_WEAK,
+            "cap_indicative": SOURCE_QUALITY_CAP_INDICATIVE,
+            "max_fact_items": MAX_SOURCE_QUALITY_FACT_ITEMS,
+        },
+        "source_quality_as_of_datetime": context.retrieval_as_of_datetime.isoformat(),
         "adjusted_comparable_constants": {
             "max_adjustment_abs_pct": MAX_ADJUSTMENT_ABS_PCT,
             "max_single_adjustment_abs_pct": MAX_SINGLE_ADJUSTMENT_ABS_PCT,
