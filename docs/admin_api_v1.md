@@ -506,3 +506,38 @@ Meta contract additions:
 - `enums.risk_severity`
 
 The meta contract exposes enum values and labels only. It does not expose a frontend-side severity formula and does not add write, report, workflow-action execution, readiness, or price-position capabilities.
+
+## PR35: Readiness Checklist v1 read API
+
+PR35 adds deterministic, backend-owned readiness metadata for internal workflow review. It is read-only and does not add write endpoints, execute actions, run parser/monitor jobs, call LLM/agents/RAG/external services, query `market_evidence_items`, or mutate listings, analyses, human reviews, evidence, workflow state, score, verdict, recommendation, or risk attention.
+
+Endpoint:
+
+- `GET /api/admin/v1/listings/{listing_id}/readiness-checklist`
+
+The endpoint uses the standard Admin API v1 envelope and existing read-key authentication. Query-string auth remains rejected. Missing listings return the standard `not_found` envelope; non-integer listing ids return the standard validation envelope.
+
+The response DTO is `readiness-checklist-v1` and includes:
+
+- `schema_version = "readiness-checklist-v1"`
+- `readiness_model_version = "readiness-checklist-v1"`
+- `readiness_policy_version = "readiness-policy-v1"`
+- `readiness_label_version = "readiness-labels-v1"`
+- `status`, `label`, `label_key`
+- backend-derived counters: `checked_count`, `total_count`, `critical_missing_count`, `blocking_item_count`
+- full `items` using `readiness-checklist-item-v1`
+- safe `source_refs`, `input_hashes`, and `limitations`
+
+Overall statuses are exactly `ready`, `partial`, `blocked`, and `not_applicable`. `ready` means data is ready for internal workflow review only; it does not mean investment ready, buy/sell ready, legal/tax safe, appraised, valued, or externally reportable.
+
+Item statuses are exactly `ok`, `warning`, `missing`, `blocked`, and `not_applicable`. Groups are exactly `listing_data`, `freshness`, `price_area`, `market_evidence`, `source_quality`, `financial_assumptions`, `object_quality`, `human_confirmation`, and `report_readiness`. Item ids are exactly `listing_exists`, `listing_url_present`, `analysis_available`, `freshness_known`, `price_present`, `area_present`, `market_evidence_checked`, `source_trace_available`, `financial_assumptions_present`, `object_quality_available`, `human_review_available`, and `report_inputs_ready`.
+
+Counters are derived only from returned items. `total_count` excludes `not_applicable` items. `checked_count` counts evaluated applicable checks, including `ok`, `warning`, `missing`, and `blocked`; `not_applicable` items are excluded. In PR35 v1, `checked_count` equals `total_count` because every applicable returned item has been evaluated by the backend. `critical_missing_count` and `blocking_item_count` count critical items with status `missing` or `blocked`. `not_applicable` items do not hurt readiness and are not counted in `total_count`.
+
+Readiness is metadata only. It does not mutate or override PR32 `workflow_state` or `allowed_actions`, PR33 `primary_recommendation`, headline, score/verdict, or PR34 `risk_attention`. If readiness is `blocked` while workflow is `ready_for_work`, the API exposes limitations such as `readiness_blocks_do_not_mutate_workflow_in_pr35`, `readiness_is_not_action_authorization`, and `workflow_state_is_read_only_from_pr32`; the frontend must render the mismatch and must not infer action authorization from readiness.
+
+Decision Card v1 now embeds a full `readiness_checklist` section produced by the same service as the standalone endpoint. The embedded checklist is not compacted in PR35. Decision-source now exposes only a compact `readiness_checklist_ref` with `route_name`, `listing_id`, and `schema_version`; it does not embed the full checklist and does not include absolute URLs, auth parameters, tokens, API keys, methods, or execution endpoints.
+
+The meta contract remains `meta_contract_version = "v1"` and adds `readiness_checklist_contract_version = "readiness-checklist-v1"`, `capabilities.readiness_checklist = true`, and enum entries for readiness statuses, item statuses, groups, and item ids. Meta exposes enums and labels only; it does not expose frontend-side readiness calculation formulas. Existing write/report/action capabilities remain false.
+
+Boundary notes: PR35 does not implement PR36 price-position or comparable chart DTOs. It does not implement scenario/DCF/IRR/NPV, financing/tax, confirmed data workflow, report generation, memo generation, commercial offer generation, or report/export actions. `report_inputs_ready`, `financial_assumptions_present`, and `object_quality_available` are `not_applicable` by default while those future systems are absent.
