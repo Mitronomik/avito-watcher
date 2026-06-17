@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.analysis.market_comps import ALLOWED_SOURCE_TYPES, ALLOWED_VERIFICATION_STATUSES
+from app.api.admin_v1.decision_card import DECISION_CARD_DTO_VERSION, RECOMMENDATIONS
 from app.api.admin_v1.schemas import API_VERSION
 from app.api.admin_v1.workflow import WORKFLOW_ACTIONS, WORKFLOW_STATE_DTO_VERSION, WORKFLOW_STATES
 from app.models.agent_task import ALLOWED_AGENT_TASK_STATUSES
@@ -83,6 +84,14 @@ LABELS: dict[str, dict[str, dict[str, str]]] = {
         "report_ready": _text("Отчёт готов", "Report ready"),
         "closed": _text("Закрыто", "Closed"),
     },
+    "decision_recommendation": {
+        "analysis_pending": _text("Ожидать анализа", "Wait for analysis"),
+        "needs_data": _text("Нужны данные", "Needs data"),
+        "watchlist": _text("В наблюдение", "Watchlist"),
+        "reject": _text("Отклонить", "Reject"),
+        "take_in_work": _text("Взять в работу", "Take into work"),
+        "insufficient_evidence": _text("Недостаточно данных", "Insufficient evidence"),
+    },
     "workflow_action": {
         "open_listing": _text("Открыть объявление", "Open listing"),
         "take_in_work": _text("Взять в работу", "Take in work"),
@@ -106,7 +115,7 @@ CAPABILITIES = {
     "read_api": True,
     "write_api": False,
     "technical_api_actions": False,
-    "decision_card": False,
+    "decision_card": True,
     "report_export": False,
     "workflow_state_read": True,
     "workflow_actions_execute": False,
@@ -192,6 +201,7 @@ ENUM_LABELS: dict[str, dict[str, dict[str, str]]] = {
     },
     "workflow_state": LABELS["workflow_state"],
     "workflow_action": LABELS["workflow_action"],
+    "decision_recommendation": LABELS["decision_recommendation"],
     "verification_status": {
         "human_verified": _text("Проверено человеком", "Human verified"),
         "unknown": _text("Неизвестно", "Unknown"),
@@ -216,6 +226,7 @@ def build_meta_contract() -> dict[str, Any]:
         "api_version": API_VERSION,
         "meta_contract_version": META_CONTRACT_VERSION,
         "workflow_contract_version": WORKFLOW_STATE_DTO_VERSION,
+        "decision_card_contract_version": DECISION_CARD_DTO_VERSION,
         "service": "avito-watcher",
         "status": "ok",
         "roles": [{"id": role, "label": ROLE_LABELS[role], "description": ROLE_DESCRIPTIONS[role]} for role in ROLE_IDS],
@@ -230,6 +241,7 @@ def build_meta_contract() -> dict[str, Any]:
             "verification_status": _enum("verification_status", ALLOWED_VERIFICATION_STATUSES),
             "workflow_state": _enum("workflow_state", WORKFLOW_STATES),
             "workflow_action": _enum("workflow_action", WORKFLOW_ACTIONS),
+            "decision_recommendation": _enum("decision_recommendation", RECOMMENDATIONS),
         },
         "labels": LABELS,
         "legacy_labels": LEGACY_LABELS,

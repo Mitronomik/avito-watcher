@@ -97,7 +97,9 @@ def test_listing_detail_and_decision_source_safe_boundaries(monkeypatch):
 
     ds = _get(client, "/api/admin/v1/listings/2/decision-source").json()["data"]
     assert ds["schema_version"] == "decision-source-v1"
-    assert "decision_card_not_implemented_in_pr32" in ds["limitations"]
+    assert "decision_card_available_in_pr33" in ds["limitations"]
+    assert ds["available_sections"]["decision_card"] is True
+    assert ds["decision_card_ref"]["schema_version"] == "decision-card-v1"
     assert ds["workflow"]["schema_version"] == "workflow-state-v1"
     for forbidden_key in ["decision_card", "primary_recommendation", "headline", "top_reasons", "top_risks", "next_steps", "missing_data", "readiness_checklist", "facts_json", "result_json", "risks_json", "questions_json", "report_md"]:
         assert forbidden_key not in ds
