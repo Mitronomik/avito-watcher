@@ -191,7 +191,7 @@ def build_readiness_checklist(listing: Listing, analysis: ListingAnalysis | None
         "status": status,
         "label": _STATUS_LABELS[status],
         "label_key": f"readiness_status.{status}",
-        "checked_count": sum(1 for item in items if item["status"] in {"ok", "warning"}),
+        "checked_count": len(applicable),
         "total_count": len(applicable),
         "critical_missing_count": critical_missing_count,
         "blocking_item_count": critical_missing_count,

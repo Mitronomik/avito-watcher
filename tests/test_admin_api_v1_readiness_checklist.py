@@ -113,7 +113,8 @@ def test_readiness_statuses_counters_and_defaults(monkeypatch):
 
     for data in [no_analysis, missing_area, missing_price, freshness, ready]:
         assert data["total_count"] == sum(1 for item in data["items"] if item["status"] != "not_applicable")
-        assert data["checked_count"] == sum(1 for item in data["items"] if item["status"] in {"ok", "warning"})
+        assert data["checked_count"] == sum(1 for item in data["items"] if item["status"] != "not_applicable")
+        assert data["checked_count"] == data["total_count"]
         assert data["critical_missing_count"] == sum(1 for item in data["items"] if item["critical"] and item["status"] in {"missing", "blocked"})
         assert data["blocking_item_count"] == data["critical_missing_count"]
 
