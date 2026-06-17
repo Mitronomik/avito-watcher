@@ -66,7 +66,7 @@ def latest_review_subquery():
         HumanReview.listing_external_id.label("external_id"),
         func.row_number().over(
             partition_by=HumanReview.listing_external_id,
-            order_by=(HumanReview.reviewed_at.desc().nullslast(), HumanReview.id.desc()),
+            order_by=(HumanReview.updated_at.desc(), HumanReview.id.desc()),
         ).label("rn"),
     ).subquery()
     return select(ranked.c.review_id, ranked.c.external_id).where(ranked.c.rn == 1).subquery()

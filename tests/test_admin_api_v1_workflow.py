@@ -66,6 +66,7 @@ def _seed(Session):
             _listing(10, "rejected"),
             _listing(11, "closed"),
             _listing(12, "unsafe-url", url="https://example.com/item"),
+            _listing(13, "latest-review-convention"),
         ])
         s.add_all([
             _analysis(1, "missing-area", verdict="strong"),
@@ -80,12 +81,33 @@ def _seed(Session):
             _analysis(10, "rejected", verdict="strong"),
             _analysis(11, "closed", verdict="strong"),
             _analysis(12, "unsafe-url", verdict="strong"),
+            _analysis(13, "latest-review-convention", verdict="strong"),
         ])
         now = datetime(2026, 1, 2, 12, 0, 0)
         s.add_all([
             HumanReview(id=1, listing_id=9, listing_external_id="watchlist", listing_analysis_id=9, review_context_key="w", watchlist=True, reviewed_at=now),
             HumanReview(id=2, listing_id=10, listing_external_id="rejected", listing_analysis_id=10, review_context_key="r", human_verdict="not_interesting", reviewed_at=now),
             HumanReview(id=3, listing_id=11, listing_external_id="closed", listing_analysis_id=11, review_context_key="c", review_status="closed", reviewed_at=now),
+            HumanReview(
+                id=4,
+                listing_id=13,
+                listing_external_id="latest-review-convention",
+                listing_analysis_id=13,
+                review_context_key="old-closed",
+                review_status="closed",
+                reviewed_at=now,
+                updated_at=now,
+            ),
+            HumanReview(
+                id=5,
+                listing_id=13,
+                listing_external_id="latest-review-convention",
+                listing_analysis_id=13,
+                review_context_key="new-unreviewed",
+                review_status="needs_review",
+                reviewed_at=None,
+                updated_at=now + timedelta(hours=1),
+            ),
         ])
         s.commit()
 
@@ -140,6 +162,23 @@ def test_workflow_state_derivation_and_actions(monkeypatch):
     open_listing = {a["id"]: a for a in unsafe["allowed_actions"] + unsafe["blocked_actions"]}["open_listing"]
     assert open_listing["available_now"] is False
     assert open_listing["reason"] == "missing_listing_url"
+
+
+def test_latest_human_review_uses_pr31_updated_at_id_convention(monkeypatch):
+    client, Session = _client(monkeypatch)
+    _seed(Session)
+
+    workflow = _get(client, 13).json()["data"]
+    assert workflow["workflow_state"] == "ready_for_work"
+    assert workflow["state_reasons"] == ["latest_analysis_verdict_strong"]
+    assert workflow["source_refs"]["human_review_id"] == 5
+
+    decision_source = client.get("/api/admin/v1/listings/13/decision-source", headers={"X-API-Key": "read"}).json()["data"]
+    assert decision_source["workflow"] == workflow
+    assert decision_source["human_review"]["id"] == 5
+
+    detail = client.get("/api/admin/v1/listings/13", headers={"X-API-Key": "read"}).json()["data"]
+    assert detail["latest_human_review"]["id"] == 5
 
 
 def test_decision_source_workflow_and_no_side_effects(monkeypatch):
