@@ -4,6 +4,21 @@ from typing import Any
 
 from app.analysis.market_comps import ALLOWED_SOURCE_TYPES, ALLOWED_VERIFICATION_STATUSES
 from app.api.admin_v1.decision_card import DECISION_CARD_DTO_VERSION, RECOMMENDATIONS
+from app.api.admin_v1.price_position import (
+    PRICE_POSITION_CHART_REASONS,
+    PRICE_POSITION_CONFIDENCE,
+    PRICE_POSITION_DTO_VERSION,
+    PRICE_POSITION_LOCATION_BASIS,
+    PRICE_POSITION_METRICS,
+    PRICE_POSITION_CODES,
+    PRICE_POSITION_RANGE_BASIS,
+    CHART_REASON_LABELS,
+    CONFIDENCE_LABELS,
+    LOCATION_LABELS,
+    METRIC_LABELS,
+    POSITION_LABELS,
+    RANGE_BASIS_LABELS,
+)
 from app.api.admin_v1.risk_attention import RISK_ATTENTION_DTO_VERSION, RISK_CATEGORIES, RISK_SEVERITIES
 from app.api.admin_v1.readiness_checklist import READINESS_CHECKLIST_DTO_VERSION, READINESS_GROUPS, READINESS_ITEM_IDS, READINESS_ITEM_STATUSES, READINESS_STATUSES
 from app.api.admin_v1.schemas import API_VERSION
@@ -152,6 +167,7 @@ CAPABILITIES = {
     "decision_card": True,
     "risk_attention": True,
     "readiness_checklist": True,
+    "price_position": True,
     "report_export": False,
     "workflow_state_read": True,
     "workflow_actions_execute": False,
@@ -244,6 +260,12 @@ ENUM_LABELS: dict[str, dict[str, dict[str, str]]] = {
     "readiness_item_status": LABELS["readiness_item_status"],
     "readiness_group": LABELS["readiness_group"],
     "readiness_item_id": LABELS["readiness_item_id"],
+    "price_position": POSITION_LABELS,
+    "price_position_confidence": CONFIDENCE_LABELS,
+    "price_position_location_basis": LOCATION_LABELS,
+    "price_position_chart_reason": CHART_REASON_LABELS,
+    "price_position_metric": METRIC_LABELS,
+    "price_position_range_basis": RANGE_BASIS_LABELS,
     "verification_status": {
         "human_verified": _text("Проверено человеком", "Human verified"),
         "unknown": _text("Неизвестно", "Unknown"),
@@ -271,6 +293,7 @@ def build_meta_contract() -> dict[str, Any]:
         "decision_card_contract_version": DECISION_CARD_DTO_VERSION,
         "risk_attention_contract_version": RISK_ATTENTION_DTO_VERSION,
         "readiness_checklist_contract_version": READINESS_CHECKLIST_DTO_VERSION,
+        "price_position_contract_version": PRICE_POSITION_DTO_VERSION,
         "service": "avito-watcher",
         "status": "ok",
         "roles": [{"id": role, "label": ROLE_LABELS[role], "description": ROLE_DESCRIPTIONS[role]} for role in ROLE_IDS],
@@ -292,6 +315,12 @@ def build_meta_contract() -> dict[str, Any]:
             "readiness_item_status": _enum("readiness_item_status", READINESS_ITEM_STATUSES),
             "readiness_group": _enum("readiness_group", READINESS_GROUPS),
             "readiness_item_id": _enum("readiness_item_id", READINESS_ITEM_IDS),
+            "price_position_code": _enum("price_position", PRICE_POSITION_CODES),
+            "price_position_confidence": _enum("price_position_confidence", PRICE_POSITION_CONFIDENCE),
+            "price_position_location_basis": _enum("price_position_location_basis", PRICE_POSITION_LOCATION_BASIS),
+            "price_position_chart_reason": _enum("price_position_chart_reason", PRICE_POSITION_CHART_REASONS),
+            "price_position_metric": _enum("price_position_metric", PRICE_POSITION_METRICS),
+            "price_position_range_basis": _enum("price_position_range_basis", PRICE_POSITION_RANGE_BASIS),
         },
         "labels": LABELS,
         "legacy_labels": LEGACY_LABELS,

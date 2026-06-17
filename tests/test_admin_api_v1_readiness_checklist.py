@@ -147,7 +147,7 @@ def test_readiness_decision_card_decision_source_meta_and_boundaries(monkeypatch
     assert [v["value"] for v in meta["enums"]["readiness_item_id"]["values"]] == sorted(READINESS_ITEM_IDS)
 
     keys = set(_walk_keys({"readiness": standalone, "card": card, "source": source}))
-    for forbidden in {"facts_json", "result_json", "payload_json", "risks_json", "questions_json", "report_md", "execution_endpoint", "price_position", "scenario", "dcf", "irr", "npv", "loan", "tax", "confirmed_rent", "confirmed_price", "confirmed_area", "appraisal", "valuation_opinion", "investment_advice"}:
+    for forbidden in {"facts_json", "result_json", "payload_json", "risks_json", "questions_json", "report_md", "execution_endpoint", "scenario", "dcf", "irr", "npv", "loan", "tax", "confirmed_rent", "confirmed_price", "confirmed_area", "appraisal", "valuation_opinion", "investment_advice"}:
         assert forbidden not in keys
     visible = "\n".join(_walk_text(standalone)).lower()
     for unsafe in ["must buy", "must sell", "guaranteed yield", "guaranteed rent", "guaranteed market value", "legal advice", "tax advice", "external report ready", "investment ready"]:
