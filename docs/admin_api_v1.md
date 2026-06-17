@@ -195,3 +195,71 @@ The API-boundary redaction helper recursively redacts secret-bearing keys in res
 - PR30 does not add DB/session dependency.
 - PR30 does not change CORS.
 - PR30 does not expose settings, env, keys, provider config, webhook state, worker diagnostics, or runtime secrets.
+
+## PR31 — read-only listing and review queue APIs
+
+PR31 adds stable JSON read endpoints for frontend listing, detail, review queue, and safe decision-source views. These routes are read-only and live only under `/api/admin/v1`; no unversioned `/api/admin/...` aliases and no `/admin` HTML namespace routes are added.
+
+### Endpoints
+
+- `GET /api/admin/v1/listings`
+- `GET /api/admin/v1/listings/{listing_id}`
+- `GET /api/admin/v1/review-queue`
+- `GET /api/admin/v1/listings/{listing_id}/decision-source`
+
+`listing_id` is the internal integer `listings.id`. PR31 does not add external-id path variants. Exact external id lookup is available only as `GET /api/admin/v1/listings?external_id=...`.
+
+All success responses keep the PR29 envelope:
+
+```json
+{
+  "ok": true,
+  "data": {},
+  "meta": {"api_version": "admin-v1", "generated_at": "..."}
+}
+```
+
+Errors keep the Admin API v1 JSON error envelope. The existing read key header is required; query-string auth, cookies, Bearer auth, technical key-only access, and new auth transports are not supported.
+
+### Pagination, ordering, and filters
+
+List endpoints use bounded `limit` and `offset` pagination with response metadata:
+
+```json
+{"pagination": {"limit": 50, "offset": 0, "has_more": true}}
+```
+
+`has_more` is computed by fetching one extra row or an equivalent bounded slice. PR31 avoids count queries for these endpoints.
+
+`/listings` supports allowlisted ordering by `id`, `first_seen_at`, `last_seen_at`, `published_at`, `price`, and `area_m2`. Null values sort last and `id` is used as the stable tie-breaker. Minimal filters are `is_active`, exact `external_id`, `search_job_id`, `min_price`, `max_price`, `min_area_m2`, and `max_area_m2`.
+
+`/review-queue` accepts bounded pagination and the minimal filters `verdict`, `min_score`, `max_score`, and `profile`. The API reuses the existing server-rendered review queue read service for eligibility instead of parsing HTML or creating a separate workflow model.
+
+Unknown ordering fields, invalid directions, and unknown query parameters return validation errors.
+
+### DTOs and schema versions
+
+PR31 DTOs are allowlisted and versioned:
+
+- `listing-summary-v1`
+- `listing-detail-v1`
+- `review-queue-item-v1`
+- `decision-source-v1`
+
+Listing summaries include safe listing fields and the latest successful analysis summary. Listing detail adds compact `latest_human_review` and an optional compact `alert_summary` placeholder. Review queue items expose listing summary fields, analysis summary fields, and `review.queue_status = "needs_review"` when the row is in the display queue.
+
+Latest analysis selection for listing APIs is deterministic: latest successful analysis by `created_at desc, id desc`. Failed or skipped analyses do not replace the latest successful analysis.
+
+### Decision-source boundary
+
+`GET /api/admin/v1/listings/{listing_id}/decision-source` returns a safe source bundle only: listing summary, latest analysis summary, compact human review summary when present, availability flags, source refs, and limitations. It is intentionally not Decision Card v1.
+
+PR31 decision-source explicitly does not include recommendations, headline, top reasons, top risks, next steps, missing-data ranking, readiness checklist, `workflow_state`, or `allowed_actions`.
+
+### Security, redaction, and side effects
+
+PR31 does not expose raw `facts_json`, `result_json`, `payload_json`, `risks_json`, `questions_json`, provider/debug payloads, or `report_md`. URLs and nested optional data pass through the Admin API redaction boundary.
+
+PR31 performs SELECT-only read operations. It does not add migrations, write endpoints, technical actions, parser runs, scoring recalculation, evidence mutation, agent calls, LLM/RAG calls, alert delivery, human review writes, audit writes for reads, CORS changes, or new auth transport.
+
+Existing `/admin` HTML routes remain unchanged, and existing `/api/admin/v1/status` and `/api/admin/v1/meta` remain compatible with PR29/PR30, including `meta_contract_version = "v1"`.

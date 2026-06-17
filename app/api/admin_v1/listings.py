@@ -1,0 +1,139 @@
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import asc, desc, func, select
+from sqlalchemy.orm import Session
+
+from app.api.admin_v1.listing_dtos import DECISION_SOURCE_DTO_VERSION, listing_detail_dto, listing_summary_dto, latest_analysis_dto, human_review_dto
+from app.api.admin_v1.ordering import parse_ordering
+from app.api.admin_v1.pagination import parse_pagination
+from app.api.admin_v1.schemas import success_response
+from app.db.session import get_db
+from app.models.human_review import HumanReview
+from app.models.listing import Listing
+from app.models.listing_analysis import ListingAnalysis
+
+router = APIRouter(tags=["Admin API v1"])
+
+LISTING_FILTERS = {"limit", "offset", "order_by", "order_dir", "is_active", "external_id", "search_job_id", "min_price", "max_price", "min_area_m2", "max_area_m2"}
+
+
+def _reject_unknown(request: Request, allowed: set[str]) -> None:
+    unknown = set(request.query_params) - allowed
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"unknown query parameter: {sorted(unknown)[0]}")
+
+
+def _latest_successful_analysis_subquery():
+    ranked = select(
+        ListingAnalysis.id.label("analysis_id"),
+        ListingAnalysis.listing_external_id.label("external_id"),
+        func.row_number().over(
+            partition_by=ListingAnalysis.listing_external_id,
+            order_by=(ListingAnalysis.created_at.desc(), ListingAnalysis.id.desc()),
+        ).label("rn"),
+    ).where(ListingAnalysis.status == "success").subquery()
+    return select(ranked.c.analysis_id, ranked.c.external_id).where(ranked.c.rn == 1).subquery()
+
+
+def _latest_review_subquery():
+    ranked = select(
+        HumanReview.id.label("review_id"),
+        HumanReview.listing_external_id.label("external_id"),
+        func.row_number().over(partition_by=HumanReview.listing_external_id, order_by=(HumanReview.updated_at.desc(), HumanReview.id.desc())).label("rn"),
+    ).subquery()
+    return select(ranked.c.review_id, ranked.c.external_id).where(ranked.c.rn == 1).subquery()
+
+
+def _order(expr: object, direction: str):
+    return (desc(expr) if direction == "desc" else asc(expr)).nullslast()
+
+
+@router.get("/listings")
+def list_listings(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int | None = Query(default=None),
+    offset: int | None = Query(default=None),
+    order_by: str | None = Query(default=None),
+    order_dir: str | None = Query(default=None),
+    is_active: bool | None = Query(default=None),
+    external_id: str | None = Query(default=None),
+    search_job_id: int | None = Query(default=None),
+    min_price: float | None = Query(default=None),
+    max_price: float | None = Query(default=None),
+    min_area_m2: float | None = Query(default=None),
+    max_area_m2: float | None = Query(default=None),
+) -> dict[str, Any]:
+    _reject_unknown(request, LISTING_FILTERS)
+    pagination = parse_pagination(limit, offset)
+    latest = _latest_successful_analysis_subquery()
+    allowed = {"id": Listing.id, "first_seen_at": Listing.first_seen_at, "last_seen_at": Listing.last_seen_at, "published_at": Listing.published_at, "price": Listing.price, "area_m2": Listing.area_m2}
+    ordering = parse_ordering(order_by=order_by, order_dir=order_dir, allowed_fields=allowed, default_field="last_seen_at")
+    stmt = select(Listing, ListingAnalysis).outerjoin(latest, latest.c.external_id == Listing.external_id).outerjoin(ListingAnalysis, ListingAnalysis.id == latest.c.analysis_id)
+    if is_active is not None:
+        stmt = stmt.where(Listing.is_active == is_active)
+    if external_id:
+        stmt = stmt.where(Listing.external_id == external_id)
+    if search_job_id is not None:
+        stmt = stmt.where(ListingAnalysis.search_job_id == search_job_id)
+    if min_price is not None:
+        stmt = stmt.where(Listing.price >= min_price)
+    if max_price is not None:
+        stmt = stmt.where(Listing.price <= max_price)
+    if min_area_m2 is not None:
+        stmt = stmt.where(Listing.area_m2 >= min_area_m2)
+    if max_area_m2 is not None:
+        stmt = stmt.where(Listing.area_m2 <= max_area_m2)
+    stmt = stmt.order_by(_order(ordering.expression, ordering.direction), Listing.id.asc()).offset(pagination.offset).limit(pagination.limit + 1)
+    rows = db.execute(stmt).all()
+    has_more = len(rows) > pagination.limit
+    items = [listing_summary_dto(listing, analysis) for listing, analysis in rows[: pagination.limit]]
+    return success_response({"schema_version": "listing-list-v1", "items": items}, meta={**success_response({})["meta"], **pagination.meta(has_more=has_more)})
+
+
+@router.get("/listings/{listing_id}")
+def get_listing(listing_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    latest = _latest_successful_analysis_subquery()
+    reviews = _latest_review_subquery()
+    row = db.execute(
+        select(Listing, ListingAnalysis, HumanReview)
+        .outerjoin(latest, latest.c.external_id == Listing.external_id)
+        .outerjoin(ListingAnalysis, ListingAnalysis.id == latest.c.analysis_id)
+        .outerjoin(reviews, reviews.c.external_id == Listing.external_id)
+        .outerjoin(HumanReview, HumanReview.id == reviews.c.review_id)
+        .where(Listing.id == listing_id)
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found")
+    listing, analysis, review = row
+    return success_response(listing_detail_dto(listing, analysis, review))
+
+
+@router.get("/listings/{listing_id}/decision-source")
+def get_decision_source(listing_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    latest = _latest_successful_analysis_subquery()
+    reviews = _latest_review_subquery()
+    row = db.execute(
+        select(Listing, ListingAnalysis, HumanReview)
+        .outerjoin(latest, latest.c.external_id == Listing.external_id)
+        .outerjoin(ListingAnalysis, ListingAnalysis.id == latest.c.analysis_id)
+        .outerjoin(reviews, reviews.c.external_id == Listing.external_id)
+        .outerjoin(HumanReview, HumanReview.id == reviews.c.review_id)
+        .where(Listing.id == listing_id)
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    listing, analysis, review = row
+    data = {
+        "schema_version": DECISION_SOURCE_DTO_VERSION,
+        "listing": listing_summary_dto(listing, analysis),
+        "latest_analysis": latest_analysis_dto(analysis),
+        "human_review": human_review_dto(review),
+        "available_sections": {"listing": True, "analysis": analysis is not None, "market_facts": False, "human_review": review is not None, "alerts": False},
+        "source_refs": {"listing_id": listing.id, "listing_external_id": listing.external_id, "listing_analysis_id": analysis.id if analysis else None, "human_review_id": review.id if review else None},
+        "limitations": ["decision_card_not_implemented_in_pr31", "workflow_state_not_implemented_in_pr31", "allowed_actions_not_implemented_in_pr31"],
+    }
+    return success_response(data)
