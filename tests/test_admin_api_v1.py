@@ -124,8 +124,8 @@ def test_admin_api_meta_contract_errors_capabilities_and_secret_safety(monkeypat
     openapi = client.get("/openapi.json").text
     assert "ADMIN_UI_READ_KEY" not in openapi
     assert "ADMIN_UI_TECHNICAL_WRITE_KEY" not in openapi
-    assert "/api/admin/v1/list" not in openapi
-    assert "/api/admin/v1/review" not in openapi
+    assert "/api/admin/v1/alerts" not in openapi
+    assert "/api/admin/v1/evidence" not in openapi
 
 
 def test_admin_api_meta_contract_uses_no_db_dependency(monkeypatch):
@@ -243,7 +243,9 @@ def test_scope_regression_routes_and_no_migration(monkeypatch):
     paths = {route.path for route in client.app.routes}
     assert "/api/admin/v1/status" in paths
     assert "/api/admin/v1/meta" in paths
-    assert not any(path.startswith("/api/admin/v1/list") for path in paths)
-    assert not any(path.startswith("/api/admin/v1/review") for path in paths)
+    assert "/api/admin/v1/listings" in paths
+    assert "/api/admin/v1/listings/{listing_id}" in paths
+    assert "/api/admin/v1/listings/{listing_id}/decision-source" in paths
+    assert "/api/admin/v1/review-queue" in paths
     assert not any(path.startswith("/api/admin/v1/evidence") for path in paths)
     assert not any(getattr(route, "methods", set()) & {"POST", "PUT", "PATCH", "DELETE"} for route in client.app.routes if route.path.startswith("/api/admin/v1"))
