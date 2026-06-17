@@ -19,9 +19,4 @@ def status() -> dict[str, object]:
 
 @router.get("/meta")
 def meta() -> dict[str, object]:
-    return success_response(
-        {
-            "api_version": API_VERSION,
-            "capabilities": {"read_api": True, "technical_actions": False, "domain_endpoints": False},
-        }
-    )
+    return success_response({"api_version": API_VERSION, "service": "avito-watcher", "status": "ok"})

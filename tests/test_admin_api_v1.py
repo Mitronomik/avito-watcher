@@ -60,11 +60,22 @@ def test_admin_api_success_and_minimal_endpoint_envelopes(monkeypatch):
 
     meta_body = _get_ok(client, "/api/admin/v1/meta").json()
     assert meta_body["ok"] is True
-    assert meta_body["data"] == {
-        "api_version": "admin-v1",
-        "capabilities": {"read_api": True, "technical_actions": False, "domain_endpoints": False},
-    }
-    assert not ({"permissions", "enums", "labels", "roles", "errors", "workflow_actions"} & set(meta_body["data"]))
+    assert meta_body["data"] == {"api_version": "admin-v1", "service": "avito-watcher", "status": "ok"}
+    assert not (
+        {
+            "permissions",
+            "enums",
+            "labels",
+            "roles",
+            "role_matrix",
+            "errors",
+            "workflow_actions",
+            "capabilities",
+            "technical_actions",
+            "domain_endpoints",
+        }
+        & set(meta_body["data"])
+    )
 
 
 def test_admin_api_error_envelope_scoped_and_safe(monkeypatch):

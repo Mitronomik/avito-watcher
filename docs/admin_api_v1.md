@@ -15,7 +15,7 @@ PR29 includes only:
 - `GET /api/admin/v1/status`
 - `GET /api/admin/v1/meta`
 
-PR29 does not implement listing/review/evidence endpoints. PR29 does not implement decision cards. PR29 does not implement workflow state. PR29 does not implement technical actions. PR29 does not implement PR30 meta registry. PR29 does not replace server-rendered `/admin` pages. PR29 does not change CORS.
+PR29 does not implement listing/review/evidence endpoints. PR29 does not implement decision cards. PR29 does not implement workflow state. PR29 does not implement technical actions. PR29 does not implement PR30 meta registry, capability matrix, permissions, enums, labels, roles, or error catalog. PR29 does not replace server-rendered `/admin` pages. PR29 does not change CORS.
 
 ## Authentication
 
@@ -127,7 +127,7 @@ The endpoint does not expose environment variables, settings, provider config, d
 
 ## `GET /api/admin/v1/meta`
 
-Purpose: minimal API self-description, not the PR30 registry.
+Purpose: minimal API smoke/self-description, not the PR30 registry or capability matrix.
 
 Example response:
 
@@ -136,11 +136,8 @@ Example response:
   "ok": true,
   "data": {
     "api_version": "admin-v1",
-    "capabilities": {
-      "read_api": true,
-      "technical_actions": false,
-      "domain_endpoints": false
-    }
+    "service": "avito-watcher",
+    "status": "ok"
   },
   "meta": {
     "api_version": "admin-v1",
@@ -149,7 +146,7 @@ Example response:
 }
 ```
 
-The endpoint does not include a permission registry, enum registry, label registry, role matrix, workflow actions, UI labels, or a full error catalog.
+The endpoint does not include capability-style fields, a permission registry, enum registry, label registry, role matrix, workflow actions, UI labels, or a full error catalog.
 
 ## Non-goals
 
@@ -158,7 +155,7 @@ The endpoint does not include a permission registry, enum registry, label regist
 - No listing/review/evidence domain-heavy endpoints.
 - No decision card.
 - No workflow state or allowed actions.
-- No technical admin actions.
+- No technical admin actions or capability matrix.
 - No scoring, alert, parser, market evidence, source quality, or sale/cap-rate changes.
 - No migrations.
 - No CORS changes.
