@@ -4,6 +4,7 @@ from typing import Any
 
 from app.analysis.market_comps import ALLOWED_SOURCE_TYPES, ALLOWED_VERIFICATION_STATUSES
 from app.api.admin_v1.schemas import API_VERSION
+from app.api.admin_v1.workflow import WORKFLOW_ACTIONS, WORKFLOW_STATE_DTO_VERSION, WORKFLOW_STATES
 from app.models.agent_task import ALLOWED_AGENT_TASK_STATUSES
 from app.models.human_review import HUMAN_VERDICTS, NEXT_ACTIONS, OUTCOME_STATUSES, REVIEW_STATUSES
 
@@ -71,6 +72,29 @@ LABELS: dict[str, dict[str, dict[str, str]]] = {
     "outcome_status": {
         "sent_to_expert": _text("Сформировано экспертное заключение системы", "System expert memo prepared"),
     },
+    "workflow_state": {
+        "new": _text("Новый", "New"),
+        "analysis_pending": _text("Ожидает анализа", "Analysis pending"),
+        "needs_review": _text("Нужна проверка", "Needs review"),
+        "needs_data": _text("Нужны данные", "Needs data"),
+        "ready_for_work": _text("Готово к работе", "Ready for work"),
+        "watchlist": _text("В наблюдении", "Watchlist"),
+        "rejected": _text("Отклонено", "Rejected"),
+        "report_ready": _text("Отчёт готов", "Report ready"),
+        "closed": _text("Закрыто", "Closed"),
+    },
+    "workflow_action": {
+        "open_listing": _text("Открыть объявление", "Open listing"),
+        "take_in_work": _text("Взять в работу", "Take in work"),
+        "request_data": _text("Запросить данные", "Request data"),
+        "call_owner": _text("Связаться с владельцем", "Call owner"),
+        "watchlist": _text("Добавить в наблюдение", "Watchlist"),
+        "reject": _text("Отклонить", "Reject"),
+        "generate_memo": _text("Сформировать memo", "Generate memo"),
+        "generate_commercial_offer": _text("Сформировать КП", "Generate commercial offer"),
+        "export_report": _text("Экспортировать отчёт", "Export report"),
+        "close": _text("Закрыть", "Close"),
+    },
 }
 
 LEGACY_LABELS = {
@@ -84,6 +108,8 @@ CAPABILITIES = {
     "technical_api_actions": False,
     "decision_card": False,
     "report_export": False,
+    "workflow_state_read": True,
+    "workflow_actions_execute": False,
 }
 
 
@@ -164,6 +190,8 @@ ENUM_LABELS: dict[str, dict[str, dict[str, str]]] = {
         "manual": _text("Вручную", "Manual"),
         "unknown": _text("Неизвестно", "Unknown"),
     },
+    "workflow_state": LABELS["workflow_state"],
+    "workflow_action": LABELS["workflow_action"],
     "verification_status": {
         "human_verified": _text("Проверено человеком", "Human verified"),
         "unknown": _text("Неизвестно", "Unknown"),
@@ -187,6 +215,7 @@ def build_meta_contract() -> dict[str, Any]:
     return {
         "api_version": API_VERSION,
         "meta_contract_version": META_CONTRACT_VERSION,
+        "workflow_contract_version": WORKFLOW_STATE_DTO_VERSION,
         "service": "avito-watcher",
         "status": "ok",
         "roles": [{"id": role, "label": ROLE_LABELS[role], "description": ROLE_DESCRIPTIONS[role]} for role in ROLE_IDS],
@@ -199,6 +228,8 @@ def build_meta_contract() -> dict[str, Any]:
             "agent_task_status": _enum("agent_task_status", ALLOWED_AGENT_TASK_STATUSES),
             "source_type": _enum("source_type", ALLOWED_SOURCE_TYPES),
             "verification_status": _enum("verification_status", ALLOWED_VERIFICATION_STATUSES),
+            "workflow_state": _enum("workflow_state", WORKFLOW_STATES),
+            "workflow_action": _enum("workflow_action", WORKFLOW_ACTIONS),
         },
         "labels": LABELS,
         "legacy_labels": LEGACY_LABELS,
