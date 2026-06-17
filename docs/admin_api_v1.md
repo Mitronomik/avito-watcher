@@ -436,7 +436,7 @@ Confidence values are deterministic and limited to `high`, `medium`, `low`, and 
 
 `decision_card_input_hash` is a stable hash of output-affecting safe scalar inputs, decision-card versions/policy constants, source availability, workflow fields, and limitations. It excludes response-envelope metadata such as `generated_at`, excludes secrets, and uses stable JSON serialization. `analysis_input_hash` is exposed only when present as a safe scalar. `workflow_source_hash` is derived from safe workflow fields.
 
-`source_trace.market_evidence` is tri-state in PR33. The endpoint does not query market evidence tables and does not parse raw evidence JSON; when no safe pre-existing summary is used, market evidence is returned as `present=null` with `status="not_checked_in_pr33"`.
+`source_trace.market_evidence` is tri-state in PR33. The endpoint does not query market evidence tables and does not parse raw evidence JSON; when no safe pre-existing summary is used, market evidence is returned as `present=null` with `status="not_checked_in_pr33"`. PR33 does not emit `market_evidence_unavailable` as a top risk when evidence was merely not checked.
 
 `GET /api/admin/v1/listings/{listing_id}/decision-source` remains compatible and now includes compact Decision Card availability/reference only via `available_sections.decision_card=true` and `decision_card_ref`. It does not embed the full card and does not expose execution endpoints.
 

@@ -134,7 +134,6 @@ def build_decision_card(listing: Listing, analysis: ListingAnalysis | None, revi
         risk_ids.append(("weak_or_review_verdict", analysis_ref))
     if workflow["workflow_state"] == "rejected":
         risk_ids.append(("human_rejected", review_ref))
-    risk_ids.append(("market_evidence_unavailable", None))
     risks = [_item(id_, _RISK_LABELS, "decision_risk", rank, ref) for rank, (id_, ref) in enumerate(risk_ids[:3], start=1)]
 
     missing_ids = []

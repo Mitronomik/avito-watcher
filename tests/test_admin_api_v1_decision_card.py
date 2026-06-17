@@ -91,6 +91,8 @@ def test_decision_card_limits_boundaries_hashes_and_no_side_effects(monkeypatch)
         assert forbidden not in keys
     assert all(step["executable_now"] == (step["action_id"] == "open_listing") for step in card["next_steps"])
     assert card["source_trace"]["market_evidence"] == {"present": None, "ref": None, "status": "not_checked_in_pr33"}
+    assert {risk["id"] for risk in card["top_risks"]}.isdisjoint({"market_evidence_unavailable"})
+    assert "market_evidence_not_checked_in_pr33" in card["limitations"]
     visible = "\n".join(_walk_text(card)).lower()
     for unsafe in ["valuation report", "valuation opinion", "guaranteed yield", "guaranteed rent", "guaranteed market value", "must buy", "must sell", "legal advice", "tax advice"]:
         assert unsafe not in visible
