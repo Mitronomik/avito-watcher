@@ -436,7 +436,7 @@ Confidence values are deterministic and limited to `high`, `medium`, `low`, and 
 
 `decision_card_input_hash` is a stable hash of output-affecting safe scalar inputs, decision-card versions/policy constants, source availability, workflow fields, and limitations. It excludes response-envelope metadata such as `generated_at`, excludes secrets, and uses stable JSON serialization. `analysis_input_hash` is exposed only when present as a safe scalar. `workflow_source_hash` is derived from safe workflow fields.
 
-`source_trace.market_evidence` is tri-state in PR33. The endpoint does not query market evidence tables and does not parse raw evidence JSON; when no safe pre-existing summary is used, market evidence is returned as `present=null` with `status="not_checked_in_pr33"`. PR33 does not emit `market_evidence_unavailable` as a top risk when evidence was merely not checked.
+`source_trace.market_evidence` is tri-state in PR33. The endpoint does not query market evidence tables and does not parse raw evidence JSON; when no safe pre-existing summary is used, market evidence is returned as `present=null` with `status="not_checked_in_pr33"`. Market evidence not checked remains source-trace/limitations metadata, not a visual risk.
 
 `GET /api/admin/v1/listings/{listing_id}/decision-source` remains compatible and now includes compact Decision Card availability/reference only via `available_sections.decision_card=true` and `decision_card_ref`. It does not embed the full card and does not expose execution endpoints.
 
@@ -445,3 +445,64 @@ The meta contract remains `meta_contract_version = "v1"` and adds `decision_card
 PR33 read-only guarantees: no POST/PUT/PATCH/DELETE endpoints, no action execution, no state transitions, no watchlist/reject/close writes, no report/memo/offer generation, no parser runs, no LLM/agent/RAG/external calls, no market evidence ingestion, no score/verdict/listing/evidence/human-review mutation, and no migration.
 
 Future boundaries: PR34 owns risk severity, visual attention, visual weight, and blocking flags; PR35 owns readiness checklist/status/counts; PR36 owns price-position/comparable chart DTOs. PR33 does not compute scenario, DCF, IRR, NPV, financing, or tax layers.
+
+## PR34 Risk Attention v1
+
+PR34 adds deterministic, read-only visual-attention metadata for risks already selected by Decision Card v1. It does not create a full risk inventory, a second risk engine, investment advice, an appraisal, a valuation report, guaranteed yield/value/rent, or action enforcement. The frontend must visualize the backend-provided severity fields and must not compute risk severity itself.
+
+Endpoint:
+
+- `GET /api/admin/v1/listings/{listing_id}/risk-attention`
+
+The endpoint uses the existing Admin API v1 read-key header and the standard Admin API v1 success/error envelope. Query-string auth, cookies, bearer auth, and technical-key-only access remain unsupported.
+
+The response data has `schema_version = "risk-attention-v1"`, `risk_attention_model_version = "risk-attention-v1"`, `risk_attention_policy_version = "risk-attention-policy-v1"`, and `risk_attention_label_version = "risk-attention-labels-v1"`. Each item has `schema_version = "risk-attention-item-v1"` and uses `id` as the canonical risk identifier.
+
+Risk Attention v1 mirrors/enriches PR33 `top_risks` only. It preserves PR33 risk ordering and rank, does not add hidden risks, does not parse `facts_json`, `result_json`, `payload_json`, `risks_json`, or `questions_json`, does not query `market_evidence_items`, does not add market-evidence unavailable risk semantics in PR34 v1, and does not use LLMs, agents, RAG, external HTTP calls, parser runs, scoring recalculation, verdict recalculation, or workflow mutation.
+
+Risk categories are exactly:
+
+- `data_quality`
+- `market`
+- `financial`
+- `legal`
+- `location`
+- `object_quality`
+- `source_quality`
+- `system`
+
+Risk severities are exactly:
+
+- `info`
+- `low`
+- `medium`
+- `high`
+- `critical`
+
+`severity_score` and `visual_weight` are deterministic UI attention values bounded from `0.0` to `1.0`. They are not probabilities, expected loss, valuation risk, or investment advice. In v1, `visual_weight = severity_score`, and `visual_weight` never exceeds `severity_score`.
+
+`blocking = true` means blocking-level visual attention only. `blocking_scope` is always `visual_attention`. It does not disable PR32 actions, authorize or enforce actions, change workflow state, change primary recommendation, change score/verdict, or produce readiness semantics.
+
+PR34 deliberately does not add readiness checklist/status, `ready`/`not_ready`, `checked_count`, `total_count`, `critical_missing_count`, price-position DTOs, comparable chart DTOs, scenarios, DCF, IRR, NPV, financing, or tax layers. Those remain future PR35/PR36 boundaries.
+
+Decision Card v1 integration:
+
+- `GET /api/admin/v1/listings/{listing_id}/decision-card` keeps `schema_version = "decision-card-v1"`.
+- `top_risks` keeps PR33 fields (`id`, `label`, `label_key`, `rank`, `evidence_ref`) and is enriched with backend-provided category, severity, score, visual weight, blocking, explanation, and recommended action metadata.
+- The new `risk_attention` section is generated by the same service as the enriched `top_risks`; its `risks` array matches the standalone `/risk-attention` endpoint for the same listing/input.
+- PR34 does not change PR33 `primary_recommendation`, recommendation scope, headline, top reasons, next steps, missing data selection, workflow snapshot, score, verdict, or risk selection/rank.
+
+Decision Source integration:
+
+- `available_sections.risk_attention = true`.
+- `risk_attention_ref` contains only `route_name`, `listing_id`, and `schema_version`.
+- It does not embed full risk attention, absolute URLs, host/domain, auth parameters, tokens, API keys, or execution endpoints.
+
+Meta contract additions:
+
+- `risk_attention_contract_version = "risk-attention-v1"`
+- `capabilities.risk_attention = true`
+- `enums.risk_category`
+- `enums.risk_severity`
+
+The meta contract exposes enum values and labels only. It does not expose a frontend-side severity formula and does not add write, report, workflow-action execution, readiness, or price-position capabilities.

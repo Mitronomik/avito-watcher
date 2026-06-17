@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from sqlalchemy import func, select
 
+from app.api.admin_v1.risk_attention import RISK_ATTENTION_MAPPING
+
 from app.models.admin_audit_event import AdminAuditEvent
 from app.models.agent_task import AgentTask
 from app.models.alert_sent import AlertSent
@@ -87,11 +89,13 @@ def test_decision_card_limits_boundaries_hashes_and_no_side_effects(monkeypatch)
     assert card["input_hashes"]["decision_card_input_hash"] == body2["data"]["input_hashes"]["decision_card_input_hash"]
     assert body1["meta"]["generated_at"] != ""
     keys = set(_walk_keys(card))
-    for forbidden in {"facts_json", "result_json", "payload_json", "risks_json", "questions_json", "report_md", "before_json", "after_json", "execution_endpoint", "risk_severity", "visual_weight", "blocking", "readiness_checklist", "readiness", "price_position", "scenario", "dcf", "irr", "npv", "loan", "tax"}:
+    for forbidden in {"facts_json", "result_json", "payload_json", "risks_json", "questions_json", "report_md", "before_json", "after_json", "execution_endpoint", "readiness_checklist", "readiness", "price_position", "scenario", "dcf", "irr", "npv", "loan", "tax"}:
         assert forbidden not in keys
     assert all(step["executable_now"] == (step["action_id"] == "open_listing") for step in card["next_steps"])
     assert card["source_trace"]["market_evidence"] == {"present": None, "ref": None, "status": "not_checked_in_pr33"}
+    assert "market_evidence_unavailable" not in RISK_ATTENTION_MAPPING
     assert {risk["id"] for risk in card["top_risks"]}.isdisjoint({"market_evidence_unavailable"})
+    assert {risk["id"] for risk in card["risk_attention"]["risks"]}.isdisjoint({"market_evidence_unavailable"})
     assert "market_evidence_not_checked_in_pr33" in card["limitations"]
     visible = "\n".join(_walk_text(card)).lower()
     for unsafe in ["valuation report", "valuation opinion", "guaranteed yield", "guaranteed rent", "guaranteed market value", "must buy", "must sell", "legal advice", "tax advice"]:
@@ -108,6 +112,8 @@ def test_decision_card_meta_contract(monkeypatch):
     assert data["meta_contract_version"] == "v1"
     assert data["decision_card_contract_version"] == "decision-card-v1"
     assert data["capabilities"]["decision_card"] is True
+    assert data["capabilities"]["risk_attention"] is True
+    assert data["risk_attention_contract_version"] == "risk-attention-v1"
     assert data["capabilities"]["report_export"] is False
     assert data["capabilities"]["write_api"] is False
     assert data["capabilities"]["technical_api_actions"] is False

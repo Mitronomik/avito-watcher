@@ -4,6 +4,7 @@ from typing import Any
 
 from app.analysis.market_comps import ALLOWED_SOURCE_TYPES, ALLOWED_VERIFICATION_STATUSES
 from app.api.admin_v1.decision_card import DECISION_CARD_DTO_VERSION, RECOMMENDATIONS
+from app.api.admin_v1.risk_attention import RISK_ATTENTION_DTO_VERSION, RISK_CATEGORIES, RISK_SEVERITIES
 from app.api.admin_v1.schemas import API_VERSION
 from app.api.admin_v1.workflow import WORKFLOW_ACTIONS, WORKFLOW_STATE_DTO_VERSION, WORKFLOW_STATES
 from app.models.agent_task import ALLOWED_AGENT_TASK_STATUSES
@@ -84,6 +85,23 @@ LABELS: dict[str, dict[str, dict[str, str]]] = {
         "report_ready": _text("Отчёт готов", "Report ready"),
         "closed": _text("Закрыто", "Closed"),
     },
+    "risk_category": {
+        "data_quality": _text("Качество данных", "Data quality"),
+        "market": _text("Рынок", "Market"),
+        "financial": _text("Финансы", "Financial"),
+        "legal": _text("Юридическое", "Legal"),
+        "location": _text("Локация", "Location"),
+        "object_quality": _text("Качество объекта", "Object quality"),
+        "source_quality": _text("Качество источника", "Source quality"),
+        "system": _text("Система", "System"),
+    },
+    "risk_severity": {
+        "info": _text("Информация", "Info"),
+        "low": _text("Низкая", "Low"),
+        "medium": _text("Средняя", "Medium"),
+        "high": _text("Высокая", "High"),
+        "critical": _text("Критическая", "Critical"),
+    },
     "decision_recommendation": {
         "analysis_pending": _text("Ожидать анализа", "Wait for analysis"),
         "needs_data": _text("Нужны данные", "Needs data"),
@@ -116,6 +134,7 @@ CAPABILITIES = {
     "write_api": False,
     "technical_api_actions": False,
     "decision_card": True,
+    "risk_attention": True,
     "report_export": False,
     "workflow_state_read": True,
     "workflow_actions_execute": False,
@@ -202,6 +221,8 @@ ENUM_LABELS: dict[str, dict[str, dict[str, str]]] = {
     "workflow_state": LABELS["workflow_state"],
     "workflow_action": LABELS["workflow_action"],
     "decision_recommendation": LABELS["decision_recommendation"],
+    "risk_category": LABELS["risk_category"],
+    "risk_severity": LABELS["risk_severity"],
     "verification_status": {
         "human_verified": _text("Проверено человеком", "Human verified"),
         "unknown": _text("Неизвестно", "Unknown"),
@@ -227,6 +248,7 @@ def build_meta_contract() -> dict[str, Any]:
         "meta_contract_version": META_CONTRACT_VERSION,
         "workflow_contract_version": WORKFLOW_STATE_DTO_VERSION,
         "decision_card_contract_version": DECISION_CARD_DTO_VERSION,
+        "risk_attention_contract_version": RISK_ATTENTION_DTO_VERSION,
         "service": "avito-watcher",
         "status": "ok",
         "roles": [{"id": role, "label": ROLE_LABELS[role], "description": ROLE_DESCRIPTIONS[role]} for role in ROLE_IDS],
@@ -242,6 +264,8 @@ def build_meta_contract() -> dict[str, Any]:
             "workflow_state": _enum("workflow_state", WORKFLOW_STATES),
             "workflow_action": _enum("workflow_action", WORKFLOW_ACTIONS),
             "decision_recommendation": _enum("decision_recommendation", RECOMMENDATIONS),
+            "risk_category": _enum("risk_category", RISK_CATEGORIES),
+            "risk_severity": _enum("risk_severity", RISK_SEVERITIES),
         },
         "labels": LABELS,
         "legacy_labels": LEGACY_LABELS,
