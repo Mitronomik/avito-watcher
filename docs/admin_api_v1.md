@@ -95,7 +95,7 @@ Purpose: static, read-only frontend metadata contract. The contract version is s
 META_CONTRACT_VERSION = "v1"
 ```
 
-The endpoint remains backward-compatible with PR29 by keeping `api_version`, `service`, `status`, and the existing `capabilities.read_api`, `capabilities.technical_actions`, and `capabilities.domain_endpoints` fields. PR30 adds `meta_contract_version`, `roles`, `permissions`, `enums`, `labels`, `legacy_labels`, `errors`, and expanded safe capabilities.
+The endpoint remains backward-compatible with PR29 by keeping `api_version`, `service`, and `status`. PR30 adds `meta_contract_version`, `roles`, `permissions`, `enums`, `labels`, `legacy_labels`, `errors`, and a new safe `capabilities` contract block.
 
 Example shape:
 
@@ -117,9 +117,7 @@ Example shape:
       "admin_api_v1": true,
       "read_api": true,
       "write_api": false,
-      "technical_actions": false,
       "technical_api_actions": false,
-      "domain_endpoints": false,
       "decision_card": false,
       "report_export": false
     }
@@ -143,7 +141,7 @@ Permissions metadata is not backend authorization. Frontend clients may use it t
 
 ### Enum registry
 
-The enum registry exposes stable display values grounded in code constants where available, including analysis verdicts, human review statuses/actions/outcomes, agent task statuses, source types, verification statuses, and risk levels. Every enum group includes an `unknown_value` fallback so frontend clients can safely render unexpected values.
+The enum registry exposes stable display values grounded in existing code constants, including human review statuses/actions/outcomes, agent task statuses, source types, and verification statuses. Values without real stable code constants are omitted rather than invented. Every enum group includes an `unknown_value` fallback so frontend clients can safely render unexpected values.
 
 ### Labels and legacy labels
 

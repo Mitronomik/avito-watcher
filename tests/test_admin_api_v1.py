@@ -70,9 +70,8 @@ def test_admin_api_meta_contract_shape_permissions_and_determinism(monkeypatch):
     assert data["meta_contract_version"] == META_CONTRACT_VERSION == "v1"
     assert data["service"] == "avito-watcher"
     assert data["status"] == "ok"
+    assert set(data["capabilities"]) == {"admin_api_v1", "read_api", "write_api", "technical_api_actions", "decision_card", "report_export"}
     assert data["capabilities"]["read_api"] is True
-    assert data["capabilities"]["technical_actions"] is False
-    assert data["capabilities"]["domain_endpoints"] is False
     assert data["capabilities"]["write_api"] is False
     assert data["capabilities"]["technical_api_actions"] is False
     assert [role["id"] for role in data["roles"]] == ["reader", "reviewer", "technical"]
@@ -83,12 +82,14 @@ def test_admin_api_meta_contract_shape_permissions_and_determinism(monkeypatch):
     assert data["permissions"][PERMISSION_ADMIN_HUMAN_REVIEW_WRITE]["available_now"] is False
     assert data["permissions"][PERMISSION_ADMIN_TECHNICAL_ACTIONS_WRITE]["roles"]["technical"] is True
     assert data["permissions"][PERMISSION_ADMIN_TECHNICAL_ACTIONS_WRITE]["available_now"] is False
-    assert {"analysis_verdict", "review_status", "agent_task_status", "source_type", "verification_status", "risk_level"} <= set(data["enums"])
+    assert {"review_status", "human_verdict", "next_action", "outcome_status", "agent_task_status", "source_type", "verification_status"} == set(data["enums"])
     assert "success" in {item["value"] for item in data["enums"]["agent_task_status"]["values"]}
     assert "succeeded" not in {item["value"] for item in data["enums"]["agent_task_status"]["values"]}
     for enum in data["enums"].values():
         assert enum["unknown_value"]["display"] == "fallback"
         assert set(enum["unknown_value"]["label"]) == {"ru", "en"}
+        for item in enum["values"]:
+            assert set(item["label"]) == {"ru", "en"}
     assert data["legacy_labels"]["sent_to_expert"]["ru"] == "Сформировать экспертное заключение системы"
     assert data["legacy_labels"]["sent_to_expert"]["en"] == "Prepare system expert memo"
     assert "Отправить эксперту" not in str(data)
