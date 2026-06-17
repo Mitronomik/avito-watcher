@@ -206,10 +206,12 @@ def build_price_position(
     if source is None:
         limitations.extend(["selected_adjusted_comps_not_available_in_pr36", "adjusted_comps_not_available_in_pr36", "excluded_comps_count_not_available_in_pr36"])
     else:
-        if source.excluded_count is None:
-            limitations.append("excluded_comps_count_not_available_in_pr36")
-        else:
+        if source.excluded_count is not None:
             excluded_count = max(0, int(source.excluded_count))
+        elif source.excluded_evidence_ids:
+            excluded_count = len(source.excluded_evidence_ids)
+        else:
+            limitations.append("excluded_comps_count_not_available_in_pr36")
         for item in sorted(source.items, key=lambda x: x.evidence_id):
             if item.adjusted_price_per_m2 is None:
                 continue

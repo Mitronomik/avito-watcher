@@ -149,6 +149,33 @@ def test_price_position_selected_adjusted_comps_and_median(monkeypatch):
     assert "source_quality_confidence_cap_not_available_in_pr36" in data["limitations"]
     assert data["chart"] == {"visible": True, "reason": "selected_comps_available"}
 
+    with_excluded_ids = pp.build_price_position(
+        listing,
+        analysis,
+        comparable_source=pp.SelectedAdjustedComparableSource(
+            items=source.items[:3],
+            location_basis="same_location_key",
+            excluded_count=None,
+            excluded_evidence_ids=(4, 5, 6),
+        ),
+    )
+    assert with_excluded_ids["excluded_comps_count"] == 3
+    assert with_excluded_ids["source_refs"]["excluded_evidence_ids"] == [4, 5, 6]
+    assert "excluded_comps_count_not_available_in_pr36" not in with_excluded_ids["limitations"]
+
+    with_explicit_excluded_count = pp.build_price_position(
+        listing,
+        analysis,
+        comparable_source=pp.SelectedAdjustedComparableSource(
+            items=source.items[:3],
+            location_basis="same_location_key",
+            excluded_count=2,
+            excluded_evidence_ids=(4, 5, 6),
+        ),
+    )
+    assert with_explicit_excluded_count["excluded_comps_count"] == 2
+    assert with_explicit_excluded_count["source_refs"]["excluded_evidence_ids"] == [4, 5, 6]
+
     below = pp.build_price_position(_listing(31, "below", price=80, area_m2=1), analysis, comparable_source=source)
     assert below["position"] == "below_market"
     near = pp.build_price_position(_listing(32, "near", price=94.5, area_m2=1), analysis, comparable_source=source)
