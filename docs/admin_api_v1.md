@@ -263,3 +263,157 @@ PR31 does not expose raw `facts_json`, `result_json`, `payload_json`, `risks_jso
 PR31 performs SELECT-only read operations. It does not add migrations, write endpoints, technical actions, parser runs, scoring recalculation, evidence mutation, agent calls, LLM/RAG calls, alert delivery, human review writes, audit writes for reads, CORS changes, or new auth transport.
 
 Existing `/admin` HTML routes remain unchanged, and existing `/api/admin/v1/status` and `/api/admin/v1/meta` remain compatible with PR29/PR30, including `meta_contract_version = "v1"`.
+
+## PR32: derived workflow state read API
+
+PR32 adds a deterministic, read-only workflow snapshot for Admin API v1. The endpoint lives only under the versioned prefix:
+
+- `GET /api/admin/v1/listings/{listing_id}/workflow`
+
+`GET /api/admin/v1/listings/{listing_id}/decision-source` also includes the exact same workflow DTO under `workflow`. PR32 does not add unversioned aliases, `/admin` HTML routes, write endpoints, state transitions, action execution endpoints, parser runs, agents, LLM/RAG calls, report generation, or score/verdict recalculation.
+
+### DTO version
+
+Workflow responses use a separate DTO schema version:
+
+```json
+{
+  "schema_version": "workflow-state-v1"
+}
+```
+
+This is distinct from `api_version`, `meta_contract_version`, analysis model versions, and future Decision Card versions.
+
+### Workflow states
+
+The PR32 vocabulary is stable:
+
+- `new`
+- `analysis_pending`
+- `needs_review`
+- `needs_data`
+- `ready_for_work`
+- `watchlist`
+- `rejected`
+- `report_ready`
+- `closed`
+
+PR32 only emits states that are safely derivable from current persisted listing, latest successful analysis, and compact human-review fields. `report_ready` is not emitted unless report readiness exists as safe persisted data; PR32 does not generate or prepare reports.
+
+### State derivation order
+
+The deterministic priority order is:
+
+1. explicit human closed state;
+2. explicit human rejected state;
+3. explicit human watchlist state;
+4. missing required listing data (`price`, `area_m2`) -> `needs_data`;
+5. no latest successful analysis -> `analysis_pending`;
+6. blocking review conditions such as unknown freshness or analysis verdict `review` -> `needs_review`;
+7. latest successful analysis verdict `strong` with no PR32 blocking missing data -> `ready_for_work`;
+8. fallback -> `needs_review`.
+
+`ready_for_work` is verdict-based. It does not use a score threshold fallback, so a high score with verdict `review` remains `needs_review`. Verdict `weak` does not automatically become `rejected`; rejected/watchlist/closed states require explicit human-review/outcome data.
+
+### State reasons
+
+`state_reasons` are stable machine-readable codes, not display prose. Examples include:
+
+- `missing_price`
+- `missing_area_m2`
+- `freshness_unknown`
+- `latest_analysis_missing`
+- `latest_analysis_verdict_review`
+- `latest_analysis_verdict_strong`
+- `human_review_rejected`
+- `human_review_watchlist`
+- `human_review_closed`
+- `fallback_needs_review`
+
+### Workflow actions
+
+The PR32 action vocabulary is stable:
+
+- `open_listing`
+- `take_in_work`
+- `request_data`
+- `call_owner`
+- `watchlist`
+- `reject`
+- `generate_memo`
+- `generate_commercial_offer`
+- `export_report`
+- `close`
+
+Action objects are metadata only:
+
+```json
+{
+  "id": "open_listing",
+  "business_applicable": true,
+  "implemented": true,
+  "available_now": true,
+  "requires_write_endpoint": false,
+  "reason": "listing_url_available"
+}
+```
+
+`allowed_actions` are not backend authorization. Future write endpoints must independently enforce auth, permissions, and business rules. Frontend code should treat an action as executable only when `implemented=true` and `available_now=true`.
+
+In PR32, every write/report action is non-executable:
+
+```json
+{
+  "implemented": false,
+  "available_now": false,
+  "requires_write_endpoint": true
+}
+```
+
+`open_listing` is the only action that can be `implemented=true` and `available_now=true`, and only when a safe public listing URL is present. PR32 does not expose phone/contact data, provider/debug URLs, webhook URLs, execution endpoints, or raw URL diagnostics through actions.
+
+### Response shape
+
+A successful workflow response uses the normal Admin API v1 envelope:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "schema_version": "workflow-state-v1",
+    "listing_id": 123,
+    "listing_external_id": "7520363836",
+    "workflow_state": "needs_review",
+    "allowed_actions": [],
+    "blocked_actions": [],
+    "state_reasons": ["latest_analysis_verdict_review"],
+    "source_refs": {
+      "listing_id": 123,
+      "listing_external_id": "7520363836",
+      "listing_analysis_id": 730,
+      "human_review_id": null
+    },
+    "limitations": [
+      "derived_read_only_state",
+      "write_transitions_not_implemented_in_pr32",
+      "decision_card_not_implemented_in_pr32"
+    ]
+  },
+  "meta": {
+    "api_version": "admin-v1",
+    "generated_at": "..."
+  }
+}
+```
+
+`generated_at` remains envelope metadata only and is not part of deterministic workflow semantics.
+
+### Security and side effects
+
+PR32 workflow reads require the existing Admin API v1 read-key header. Query auth, cookie auth, Authorization/Bearer auth, and technical-key-only access are not accepted by Admin API v1.
+
+The workflow layer is read-only. It does not create audit rows, human reviews, alerts, agent tasks, evidence rows, parser work, reports, or listing/analysis mutations. It does not read or expose raw `facts_json`, `result_json`, `payload_json`, `risks_json`, `questions_json`, `report_md`, provider payloads, debug HTML, request headers, cookies, auth keys, database URLs, Telegram tokens, SMTP secrets, LLM keys, or webhook URLs.
+
+### Decision Card boundary
+
+PR32 is not Decision Card v1. Workflow and decision-source responses intentionally do not include `decision_card`, `recommendation`, `primary_recommendation`, `headline`, `top_reasons`, `top_risks`, `next_steps`, missing-data ranking, readiness checklist, risk severity/visual attention, price position DTOs, memo generation, commercial-offer generation, or export/report readiness.

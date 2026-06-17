@@ -97,11 +97,12 @@ def test_listing_detail_and_decision_source_safe_boundaries(monkeypatch):
 
     ds = _get(client, "/api/admin/v1/listings/2/decision-source").json()["data"]
     assert ds["schema_version"] == "decision-source-v1"
-    assert "decision_card_not_implemented_in_pr31" in ds["limitations"]
-    assert "workflow_state_not_implemented_in_pr31" in ds["limitations"]
-    for forbidden_key in ["decision_card", "primary_recommendation", "headline", "top_reasons", "top_risks", "next_steps", "missing_data", "readiness_checklist", "workflow_state", "allowed_actions", "facts_json", "result_json", "risks_json", "questions_json", "report_md"]:
+    assert "decision_card_not_implemented_in_pr32" in ds["limitations"]
+    assert ds["workflow"]["schema_version"] == "workflow-state-v1"
+    for forbidden_key in ["decision_card", "primary_recommendation", "headline", "top_reasons", "top_risks", "next_steps", "missing_data", "readiness_checklist", "facts_json", "result_json", "risks_json", "questions_json", "report_md"]:
         assert forbidden_key not in ds
         assert forbidden_key not in ds.get("listing", {})
+        assert forbidden_key not in ds["workflow"]
 
 
 def test_review_queue_and_no_side_effects(monkeypatch):

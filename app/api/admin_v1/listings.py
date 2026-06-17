@@ -3,10 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import asc, desc, func, select
+from sqlalchemy import asc, desc, select
 from sqlalchemy.orm import Session
 
 from app.api.admin_v1.listing_dtos import DECISION_SOURCE_DTO_VERSION, listing_detail_dto, listing_summary_dto, latest_analysis_dto, human_review_dto
+from app.api.admin_v1.workflow import build_workflow_snapshot, latest_review_subquery, latest_successful_analysis_subquery, workflow_row_for_listing
 from app.api.admin_v1.ordering import parse_ordering
 from app.api.admin_v1.pagination import parse_pagination
 from app.api.admin_v1.schemas import success_response
@@ -27,24 +28,11 @@ def _reject_unknown(request: Request, allowed: set[str]) -> None:
 
 
 def _latest_successful_analysis_subquery():
-    ranked = select(
-        ListingAnalysis.id.label("analysis_id"),
-        ListingAnalysis.listing_external_id.label("external_id"),
-        func.row_number().over(
-            partition_by=ListingAnalysis.listing_external_id,
-            order_by=(ListingAnalysis.created_at.desc(), ListingAnalysis.id.desc()),
-        ).label("rn"),
-    ).where(ListingAnalysis.status == "success").subquery()
-    return select(ranked.c.analysis_id, ranked.c.external_id).where(ranked.c.rn == 1).subquery()
+    return latest_successful_analysis_subquery()
 
 
 def _latest_review_subquery():
-    ranked = select(
-        HumanReview.id.label("review_id"),
-        HumanReview.listing_external_id.label("external_id"),
-        func.row_number().over(partition_by=HumanReview.listing_external_id, order_by=(HumanReview.updated_at.desc(), HumanReview.id.desc())).label("rn"),
-    ).subquery()
-    return select(ranked.c.review_id, ranked.c.external_id).where(ranked.c.rn == 1).subquery()
+    return latest_review_subquery()
 
 
 def _order(expr: object, direction: str):
@@ -113,28 +101,30 @@ def get_listing(listing_id: int, db: Session = Depends(get_db)) -> dict[str, Any
     return success_response(listing_detail_dto(listing, analysis, review))
 
 
-@router.get("/listings/{listing_id}/decision-source")
-def get_decision_source(listing_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
-    latest = _latest_successful_analysis_subquery()
-    reviews = _latest_review_subquery()
-    row = db.execute(
-        select(Listing, ListingAnalysis, HumanReview)
-        .outerjoin(latest, latest.c.external_id == Listing.external_id)
-        .outerjoin(ListingAnalysis, ListingAnalysis.id == latest.c.analysis_id)
-        .outerjoin(reviews, reviews.c.external_id == Listing.external_id)
-        .outerjoin(HumanReview, HumanReview.id == reviews.c.review_id)
-        .where(Listing.id == listing_id)
-    ).first()
+@router.get("/listings/{listing_id}/workflow")
+def get_listing_workflow(listing_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    row = workflow_row_for_listing(db, listing_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Listing not found")
     listing, analysis, review = row
+    return success_response(build_workflow_snapshot(listing, analysis, review))
+
+
+@router.get("/listings/{listing_id}/decision-source")
+def get_decision_source(listing_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    row = workflow_row_for_listing(db, listing_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    listing, analysis, review = row
+    workflow = build_workflow_snapshot(listing, analysis, review)
     data = {
         "schema_version": DECISION_SOURCE_DTO_VERSION,
         "listing": listing_summary_dto(listing, analysis),
         "latest_analysis": latest_analysis_dto(analysis),
         "human_review": human_review_dto(review),
-        "available_sections": {"listing": True, "analysis": analysis is not None, "market_facts": False, "human_review": review is not None, "alerts": False},
+        "workflow": workflow,
+        "available_sections": {"listing": True, "analysis": analysis is not None, "market_facts": False, "human_review": review is not None, "alerts": False, "workflow": True},
         "source_refs": {"listing_id": listing.id, "listing_external_id": listing.external_id, "listing_analysis_id": analysis.id if analysis else None, "human_review_id": review.id if review else None},
-        "limitations": ["decision_card_not_implemented_in_pr31", "workflow_state_not_implemented_in_pr31", "allowed_actions_not_implemented_in_pr31"],
+        "limitations": ["decision_card_not_implemented_in_pr32", "write_transitions_not_implemented_in_pr32", "action_execution_not_implemented_in_pr32"],
     }
     return success_response(data)

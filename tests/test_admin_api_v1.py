@@ -70,7 +70,7 @@ def test_admin_api_meta_contract_shape_permissions_and_determinism(monkeypatch):
     assert data["meta_contract_version"] == META_CONTRACT_VERSION == "v1"
     assert data["service"] == "avito-watcher"
     assert data["status"] == "ok"
-    assert set(data["capabilities"]) == {"admin_api_v1", "read_api", "write_api", "technical_api_actions", "decision_card", "report_export"}
+    assert set(data["capabilities"]) == {"admin_api_v1", "read_api", "write_api", "technical_api_actions", "decision_card", "report_export", "workflow_state_read", "workflow_actions_execute"}
     assert data["capabilities"]["read_api"] is True
     assert data["capabilities"]["write_api"] is False
     assert data["capabilities"]["technical_api_actions"] is False
@@ -82,7 +82,7 @@ def test_admin_api_meta_contract_shape_permissions_and_determinism(monkeypatch):
     assert data["permissions"][PERMISSION_ADMIN_HUMAN_REVIEW_WRITE]["available_now"] is False
     assert data["permissions"][PERMISSION_ADMIN_TECHNICAL_ACTIONS_WRITE]["roles"]["technical"] is True
     assert data["permissions"][PERMISSION_ADMIN_TECHNICAL_ACTIONS_WRITE]["available_now"] is False
-    assert {"review_status", "human_verdict", "next_action", "outcome_status", "agent_task_status", "source_type", "verification_status"} == set(data["enums"])
+    assert {"review_status", "human_verdict", "next_action", "outcome_status", "agent_task_status", "source_type", "verification_status", "workflow_state", "workflow_action"} == set(data["enums"])
     assert "success" in {item["value"] for item in data["enums"]["agent_task_status"]["values"]}
     assert "succeeded" not in {item["value"] for item in data["enums"]["agent_task_status"]["values"]}
     for enum in data["enums"].values():
@@ -245,6 +245,7 @@ def test_scope_regression_routes_and_no_migration(monkeypatch):
     assert "/api/admin/v1/meta" in paths
     assert "/api/admin/v1/listings" in paths
     assert "/api/admin/v1/listings/{listing_id}" in paths
+    assert "/api/admin/v1/listings/{listing_id}/workflow" in paths
     assert "/api/admin/v1/listings/{listing_id}/decision-source" in paths
     assert "/api/admin/v1/review-queue" in paths
     assert not any(path.startswith("/api/admin/v1/evidence") for path in paths)
