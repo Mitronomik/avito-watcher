@@ -112,6 +112,59 @@ def test_sale_price_and_cap_rate_handling_boundaries():
     assert 3 not in by_id
 
 
+def test_sale_and_asking_price_families_do_not_fallback_across_price_type():
+    confirmed_with_only_asking = _comp(
+        1,
+        asking_price_rub=12_000_000,
+        currency="RUB",
+        price_type="confirmed_sale",
+        source_type="confirmed",
+        verification_status="verified",
+    )
+    asking_with_only_sale = _comp(
+        2,
+        sale_price_rub=11_000_000,
+        currency="RUB",
+        price_type="asking_sale",
+    )
+    result = _assess([confirmed_with_only_asking, asking_with_only_sale])
+    assert result.items == []
+    assert "missing_sale_price_for_confirmed_sale" in result.review_reasons
+    assert "missing_asking_price_for_asking_sale" in result.review_reasons
+
+
+def test_correct_price_family_fields_work_for_confirmed_manual_and_asking_sale():
+    confirmed = _comp(
+        1,
+        sale_price_rub=12_000_000,
+        currency="RUB",
+        price_type="confirmed_sale",
+        source_type="confirmed",
+        verification_status="verified",
+        area_m2=120,
+    )
+    manual = _comp(
+        2,
+        sale_price_per_m2_rub=110_000,
+        currency="RUB",
+        price_type="manual_sale",
+    )
+    asking = _comp(
+        3,
+        asking_price_rub=10_000_000,
+        currency="RUB",
+        price_type="asking_sale",
+        area_m2=100,
+    )
+    by_id = {i.evidence_id: i for i in _assess([confirmed, manual, asking]).items}
+    assert by_id[1].price_type == "confirmed_sale"
+    assert by_id[1].price_per_m2_rub == 100_000
+    assert by_id[2].price_type == "manual_sale"
+    assert by_id[2].price_per_m2_rub == 110_000
+    assert by_id[3].price_type == "asking_sale"
+    assert by_id[3].price_per_m2_rub == 100_000
+
+
 def test_currency_invalid_values_area_and_unsupported_price_type_are_reviewed_or_excluded():
     comps = [
         _comp(1, asking_price_rub=1, price_type="asking_sale"),

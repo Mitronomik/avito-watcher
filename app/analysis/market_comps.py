@@ -1156,6 +1156,7 @@ def _normalize_verification(verification: str | None, human_verified: bool | Non
 
 
 def _normalize_sale_price(comp: MarketCompInput, price_type: str, reasons: list[str], flags: list[str]) -> tuple[float | None, float | None, str]:
+    del flags
     currency = (comp.currency or "").strip().upper()
     if not currency:
         reasons.append("missing_currency")
@@ -1165,12 +1166,17 @@ def _normalize_sale_price(comp: MarketCompInput, price_type: str, reasons: list[
         return None, None, "unsupported_currency"
     if price_type == "unknown":
         return None, None, "unknown_price_type"
-    total = comp.sale_price_rub if comp.sale_price_rub is not None else comp.asking_price_rub
-    if total is None:
-        total = None
-    ppm = comp.sale_price_per_m2_rub if comp.sale_price_per_m2_rub is not None else comp.asking_price_per_m2_rub
-    if ppm is None:
-        ppm = None
+    if price_type == "asking_sale":
+        total = comp.asking_price_rub
+        ppm = comp.asking_price_per_m2_rub
+        missing_reason = "missing_asking_price_for_asking_sale"
+    elif price_type in {"confirmed_sale", "manual_sale"}:
+        total = comp.sale_price_rub
+        ppm = comp.sale_price_per_m2_rub
+        missing_reason = "missing_sale_price_for_confirmed_sale"
+    else:
+        reasons.append("unsupported_price_type")
+        return None, None, "unsupported_price_type"
     if ppm is not None:
         if ppm <= 0:
             reasons.append("invalid_price")
@@ -1190,7 +1196,8 @@ def _normalize_sale_price(comp: MarketCompInput, price_type: str, reasons: list[
             return float(total), round(float(total) / float(comp.area_m2), 2), "explicit_total_and_area"
         reasons.append("missing_area")
         return float(total), None, "explicit_total_only"
-    return None, None, "missing"
+    reasons.append(missing_reason)
+    return None, None, missing_reason
 
 
 def _normalize_cap_rate(comp: MarketCompInput, cfg: SaleEvidenceConfig, reasons: list[str]) -> tuple[float | None, str | None]:
