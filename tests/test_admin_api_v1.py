@@ -49,6 +49,95 @@ def test_admin_api_auth_fails_closed_and_rejects_non_read_transports(monkeypatch
     assert _get_ok(client).status_code == 200
 
 
+
+
+def test_admin_api_meta_contract_shape_permissions_and_determinism(monkeypatch):
+    from app.api.admin_v1.meta_contract import (
+        META_CONTRACT_VERSION,
+        PERMISSION_ADMIN_HUMAN_REVIEW_WRITE,
+        PERMISSION_ADMIN_TECHNICAL_ACTIONS_WRITE,
+        PERMISSION_API_META_READ,
+        PERMISSION_API_STATUS_READ,
+        PERMISSION_IDS,
+    )
+
+    client = _client(monkeypatch)
+    first = _get_ok(client, "/api/admin/v1/meta").json()
+    second = _get_ok(client, "/api/admin/v1/meta").json()
+    data = first["data"]
+    assert first["ok"] is True
+    assert data["api_version"] == "admin-v1"
+    assert data["meta_contract_version"] == META_CONTRACT_VERSION == "v1"
+    assert data["service"] == "avito-watcher"
+    assert data["status"] == "ok"
+    assert data["capabilities"]["read_api"] is True
+    assert data["capabilities"]["technical_actions"] is False
+    assert data["capabilities"]["domain_endpoints"] is False
+    assert data["capabilities"]["write_api"] is False
+    assert data["capabilities"]["technical_api_actions"] is False
+    assert [role["id"] for role in data["roles"]] == ["reader", "reviewer", "technical"]
+    assert list(data["permissions"]) == list(PERMISSION_IDS)
+    assert data["permissions"][PERMISSION_API_STATUS_READ]["available_now"] is True
+    assert data["permissions"][PERMISSION_API_META_READ]["implemented"] is True
+    assert data["permissions"][PERMISSION_ADMIN_HUMAN_REVIEW_WRITE]["implemented"] is False
+    assert data["permissions"][PERMISSION_ADMIN_HUMAN_REVIEW_WRITE]["available_now"] is False
+    assert data["permissions"][PERMISSION_ADMIN_TECHNICAL_ACTIONS_WRITE]["roles"]["technical"] is True
+    assert data["permissions"][PERMISSION_ADMIN_TECHNICAL_ACTIONS_WRITE]["available_now"] is False
+    assert {"analysis_verdict", "review_status", "agent_task_status", "source_type", "verification_status", "risk_level"} <= set(data["enums"])
+    assert "success" in {item["value"] for item in data["enums"]["agent_task_status"]["values"]}
+    assert "succeeded" not in {item["value"] for item in data["enums"]["agent_task_status"]["values"]}
+    for enum in data["enums"].values():
+        assert enum["unknown_value"]["display"] == "fallback"
+        assert set(enum["unknown_value"]["label"]) == {"ru", "en"}
+    assert data["legacy_labels"]["sent_to_expert"]["ru"] == "Сформировать экспертное заключение системы"
+    assert data["legacy_labels"]["sent_to_expert"]["en"] == "Prepare system expert memo"
+    assert "Отправить эксперту" not in str(data)
+    assert "Send to expert" not in str(data)
+    assert first["meta"]["generated_at"] != ""
+    first_static = dict(first)
+    second_static = dict(second)
+    first_static["meta"] = {"api_version": first["meta"]["api_version"]}
+    second_static["meta"] = {"api_version": second["meta"]["api_version"]}
+    assert first_static == second_static
+
+
+def test_admin_api_meta_contract_errors_capabilities_and_secret_safety(monkeypatch):
+    client = _client(monkeypatch)
+    response = _get_ok(client, "/api/admin/v1/meta")
+    data = response.json()["data"]
+    assert list(data["errors"]) == ["unauthorized", "forbidden", "not_found", "validation_error", "pagination_limit_exceeded", "internal_error"]
+    for code, error in data["errors"].items():
+        assert error["code"] == code
+        assert isinstance(error["http_status"], int)
+        assert set(error["label"]) == {"ru", "en"}
+        assert set(error["description"]) == {"ru", "en"}
+        assert isinstance(error["retryable"], bool)
+    serialized = response.text
+    for forbidden in [
+        "ADMIN_UI_READ_KEY", "ADMIN_UI_TECHNICAL_WRITE_KEY", "admin_technical_write_key",
+        "GOOGLE_SHEETS_WEBHOOK_URL", "GOOGLE_SHEETS_WEBHOOK_SECRET", "OPENAI_API_KEY",
+        "LLM_API_KEY", "TELEGRAM_BOT_TOKEN", "SMTP_PASSWORD", "DATABASE_URL", "POSTGRES_PASSWORD",
+        "technical_key_exists", "read_key_exists", "webhook_url", "provider_config", "stacktrace", "traceback",
+    ]:
+        assert forbidden not in serialized
+    openapi = client.get("/openapi.json").text
+    assert "ADMIN_UI_READ_KEY" not in openapi
+    assert "ADMIN_UI_TECHNICAL_WRITE_KEY" not in openapi
+    assert "/api/admin/v1/list" not in openapi
+    assert "/api/admin/v1/review" not in openapi
+
+
+def test_admin_api_meta_contract_uses_no_db_dependency(monkeypatch):
+    from app.db import session as db_session_module
+
+    def fail_session(*args, **kwargs):  # pragma: no cover - should never be called
+        raise AssertionError("meta must not require a DB session")
+
+    monkeypatch.setattr(db_session_module, "SessionLocal", fail_session)
+    client = _client(monkeypatch)
+    assert _get_ok(client, "/api/admin/v1/meta").status_code == 200
+
+
 def test_admin_api_success_and_minimal_endpoint_envelopes(monkeypatch):
     client = _client(monkeypatch)
     status_body = _get_ok(client).json()
@@ -60,22 +149,11 @@ def test_admin_api_success_and_minimal_endpoint_envelopes(monkeypatch):
 
     meta_body = _get_ok(client, "/api/admin/v1/meta").json()
     assert meta_body["ok"] is True
-    assert meta_body["data"] == {"api_version": "admin-v1", "service": "avito-watcher", "status": "ok"}
-    assert not (
-        {
-            "permissions",
-            "enums",
-            "labels",
-            "roles",
-            "role_matrix",
-            "errors",
-            "workflow_actions",
-            "capabilities",
-            "technical_actions",
-            "domain_endpoints",
-        }
-        & set(meta_body["data"])
-    )
+    assert meta_body["data"]["api_version"] == "admin-v1"
+    assert meta_body["data"]["meta_contract_version"] == "v1"
+    assert meta_body["data"]["service"] == "avito-watcher"
+    assert meta_body["data"]["status"] == "ok"
+    assert {"roles", "permissions", "enums", "labels", "legacy_labels", "errors", "capabilities"} <= set(meta_body["data"])
 
 
 def test_admin_api_error_envelope_scoped_and_safe(monkeypatch):

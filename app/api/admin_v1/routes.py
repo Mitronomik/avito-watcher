@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from app.api.admin_v1.dependencies import require_admin_api_read_access
+from app.api.admin_v1.meta_contract import build_meta_contract
 from app.api.admin_v1.schemas import API_VERSION, success_response
 
 router = APIRouter(
@@ -19,4 +20,4 @@ def status() -> dict[str, object]:
 
 @router.get("/meta")
 def meta() -> dict[str, object]:
-    return success_response({"api_version": API_VERSION, "service": "avito-watcher", "status": "ok"})
+    return success_response(build_meta_contract())
