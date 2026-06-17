@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from sqlalchemy import func, select
 
-from app.api.admin_v1.risk_attention import RISK_CATEGORIES, RISK_SEVERITIES, build_risk_attention_from_card
+from app.api.admin_v1.risk_attention import RISK_ATTENTION_MAPPING, RISK_CATEGORIES, RISK_SEVERITIES, build_risk_attention_from_card
 from app.models.admin_audit_event import AdminAuditEvent
 from app.models.agent_task import AgentTask
 from app.models.alert_sent import AlertSent
@@ -66,6 +68,9 @@ def test_risk_attention_contract_mapping_and_no_side_effects(monkeypatch):
     assert set(risk["label"]) == {"ru", "en"}
     assert set(risk["explanation"]) == {"ru", "en"}
     assert risk["recommended_action"]["action_id"] == "request_data"
+    assert "market_evidence_unavailable" not in RISK_ATTENTION_MAPPING
+    assert "market_evidence_unavailable" not in str(data)
+    assert "market_evidence_unavailable" not in Path("docs/admin_api_v1.md").read_text()
     for item in data["risks"]:
         assert item["category"] in RISK_CATEGORIES
         assert item["severity"] in RISK_SEVERITIES
@@ -89,6 +94,11 @@ def test_decision_card_and_source_integration(monkeypatch):
     for risk in card["top_risks"]:
         assert {"category", "severity", "severity_score", "visual_weight", "blocking", "blocking_scope", "explanation", "recommended_action"} <= set(risk)
     assert [r["rank"] for r in card["top_risks"]] == sorted(r["rank"] for r in card["top_risks"])
+    attention_by_rank = {risk["rank"]: risk for risk in attention["risks"]}
+    for risk in card["top_risks"]:
+        matched = attention_by_rank[risk["rank"]]
+        for field in ("id", "rank", "category", "severity", "severity_score", "visual_weight", "blocking", "recommended_action"):
+            assert risk[field] == matched[field]
     source = client.get("/api/admin/v1/listings/2/decision-source", headers={"X-API-Key": "read"}).json()["data"]
     assert source["available_sections"]["risk_attention"] is True
     assert source["risk_attention_ref"] == {"route_name": "admin_api_v1_risk_attention", "listing_id": 2, "schema_version": "risk-attention-v1"}
@@ -123,3 +133,4 @@ def test_meta_contract_risk_attention(monkeypatch):
     assert [v["value"] for v in data["enums"]["risk_category"]["values"]] == sorted(RISK_CATEGORIES)
     assert [v["value"] for v in data["enums"]["risk_severity"]["values"]] == sorted(RISK_SEVERITIES)
     assert "formula" not in str(data).lower()
+    assert "market_evidence_unavailable" not in str(data)

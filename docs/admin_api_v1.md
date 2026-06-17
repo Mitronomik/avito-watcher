@@ -436,7 +436,7 @@ Confidence values are deterministic and limited to `high`, `medium`, `low`, and 
 
 `decision_card_input_hash` is a stable hash of output-affecting safe scalar inputs, decision-card versions/policy constants, source availability, workflow fields, and limitations. It excludes response-envelope metadata such as `generated_at`, excludes secrets, and uses stable JSON serialization. `analysis_input_hash` is exposed only when present as a safe scalar. `workflow_source_hash` is derived from safe workflow fields.
 
-`source_trace.market_evidence` is tri-state in PR33. The endpoint does not query market evidence tables and does not parse raw evidence JSON; when no safe pre-existing summary is used, market evidence is returned as `present=null` with `status="not_checked_in_pr33"`. PR33 does not emit `market_evidence_unavailable` as a top risk when evidence was merely not checked.
+`source_trace.market_evidence` is tri-state in PR33. The endpoint does not query market evidence tables and does not parse raw evidence JSON; when no safe pre-existing summary is used, market evidence is returned as `present=null` with `status="not_checked_in_pr33"`. Market evidence not checked remains source-trace/limitations metadata, not a visual risk.
 
 `GET /api/admin/v1/listings/{listing_id}/decision-source` remains compatible and now includes compact Decision Card availability/reference only via `available_sections.decision_card=true` and `decision_card_ref`. It does not embed the full card and does not expose execution endpoints.
 
@@ -458,7 +458,7 @@ The endpoint uses the existing Admin API v1 read-key header and the standard Adm
 
 The response data has `schema_version = "risk-attention-v1"`, `risk_attention_model_version = "risk-attention-v1"`, `risk_attention_policy_version = "risk-attention-policy-v1"`, and `risk_attention_label_version = "risk-attention-labels-v1"`. Each item has `schema_version = "risk-attention-item-v1"` and uses `id` as the canonical risk identifier.
 
-Risk Attention v1 mirrors/enriches PR33 `top_risks` only. It preserves PR33 risk ordering and rank, does not add hidden risks, does not parse `facts_json`, `result_json`, `payload_json`, `risks_json`, or `questions_json`, does not query `market_evidence_items`, and does not use LLMs, agents, RAG, external HTTP calls, parser runs, scoring recalculation, verdict recalculation, or workflow mutation.
+Risk Attention v1 mirrors/enriches PR33 `top_risks` only. It preserves PR33 risk ordering and rank, does not add hidden risks, does not parse `facts_json`, `result_json`, `payload_json`, `risks_json`, or `questions_json`, does not query `market_evidence_items`, does not add market-evidence unavailable risk semantics in PR34 v1, and does not use LLMs, agents, RAG, external HTTP calls, parser runs, scoring recalculation, verdict recalculation, or workflow mutation.
 
 Risk categories are exactly:
 

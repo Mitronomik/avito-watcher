@@ -30,7 +30,6 @@ RISK_ATTENTION_MAPPING: dict[str, dict[str, Any]] = {
     "source_trace_limited": {"category": "source_quality", "severity": "medium", "severity_score": 0.50, "visual_weight": 0.50, "blocking": False, "recommended_action_id": "request_data"},
     "human_rejected": {"category": "system", "severity": "critical", "severity_score": 1.00, "visual_weight": 1.00, "blocking": True, "recommended_action_id": "review_human_rejection"},
     "unsafe_listing_url": {"category": "source_quality", "severity": "high", "severity_score": 0.85, "visual_weight": 0.85, "blocking": True, "recommended_action_id": "request_data"},
-    "market_evidence_unavailable": {"category": "market", "severity": "info", "severity_score": 0.10, "visual_weight": 0.10, "blocking": False, "recommended_action_id": "request_data"},
     "market_evidence_not_checked": {"category": "market", "severity": "info", "severity_score": 0.10, "visual_weight": 0.10, "blocking": False, "recommended_action_id": "request_data"},
     "unknown_risk": {"category": "system", "severity": "info", "severity_score": 0.10, "visual_weight": 0.10, "blocking": False, "recommended_action_id": "request_data"},
 }
@@ -44,7 +43,6 @@ _EXPLANATIONS = {
     "source_trace_limited": {"ru": "Трассировка источников ограничена для внутреннего workflow.", "en": "Source trace is limited for the internal workflow."},
     "human_rejected": {"ru": "Объект ранее был отклонён человеком.", "en": "The listing was previously rejected by a human reviewer."},
     "unsafe_listing_url": {"ru": "Ссылка объявления не проходит безопасную проверку источника.", "en": "The listing URL does not pass the safe source check."},
-    "market_evidence_unavailable": {"ru": "Рыночные данные недоступны в текущем источнике решения.", "en": "Market evidence is unavailable in the current decision source."},
     "market_evidence_not_checked": {"ru": "Рыночные данные не проверялись в текущем контракте.", "en": "Market evidence was not checked in the current contract."},
     "unknown_risk": {"ru": "Риск не классифицирован контрактом Risk Attention v1.", "en": "This risk is not classified by the Risk Attention v1 contract."},
 }

@@ -55,7 +55,6 @@ _RISK_LABELS = {
     "analysis_missing": {"ru": "Нет успешного анализа", "en": "Successful analysis is missing"},
     "weak_or_review_verdict": {"ru": "Слабый или требующий проверки вердикт", "en": "Weak or review verdict"},
     "source_trace_limited": {"ru": "Ограниченная трассировка источников", "en": "Source trace is limited"},
-    "market_evidence_unavailable": {"ru": "Рыночные доказательства недоступны", "en": "Market evidence is unavailable"},
     "human_rejected": {"ru": "Отклонено человеком", "en": "Rejected by human review"},
     "unsafe_listing_url": {"ru": "Небезопасная ссылка объявления", "en": "Unsafe listing URL"},
 }

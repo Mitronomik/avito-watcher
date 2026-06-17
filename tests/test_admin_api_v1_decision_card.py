@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from sqlalchemy import func, select
 
+from app.api.admin_v1.risk_attention import RISK_ATTENTION_MAPPING
+
 from app.models.admin_audit_event import AdminAuditEvent
 from app.models.agent_task import AgentTask
 from app.models.alert_sent import AlertSent
@@ -91,7 +93,9 @@ def test_decision_card_limits_boundaries_hashes_and_no_side_effects(monkeypatch)
         assert forbidden not in keys
     assert all(step["executable_now"] == (step["action_id"] == "open_listing") for step in card["next_steps"])
     assert card["source_trace"]["market_evidence"] == {"present": None, "ref": None, "status": "not_checked_in_pr33"}
+    assert "market_evidence_unavailable" not in RISK_ATTENTION_MAPPING
     assert {risk["id"] for risk in card["top_risks"]}.isdisjoint({"market_evidence_unavailable"})
+    assert {risk["id"] for risk in card["risk_attention"]["risks"]}.isdisjoint({"market_evidence_unavailable"})
     assert "market_evidence_not_checked_in_pr33" in card["limitations"]
     visible = "\n".join(_walk_text(card)).lower()
     for unsafe in ["valuation report", "valuation opinion", "guaranteed yield", "guaranteed rent", "guaranteed market value", "must buy", "must sell", "legal advice", "tax advice"]:
