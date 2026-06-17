@@ -7,6 +7,7 @@ from typing import Any
 from app.api.admin_v1.listing_dtos import iso
 from app.api.admin_v1.workflow import WORKFLOW_STATE_DTO_VERSION
 from app.api.admin_v1.risk_attention import build_risk_attention_from_card, enrich_top_risk
+from app.api.admin_v1.readiness_checklist import build_readiness_checklist
 from app.models.human_review import HumanReview
 from app.models.listing import Listing
 from app.models.listing_analysis import ListingAnalysis
@@ -182,7 +183,7 @@ def build_decision_card(listing: Listing, analysis: ListingAnalysis | None, revi
         status = "partial"
     else:
         status = "ok"
-    limitations = ["decision_card_v1_deterministic", "recommendation_scope_internal_workflow", "not_investment_advice", "not_certified_appraisal", "not_valuation_report", "no_valuation_opinion", "no_llm_wording_in_v1", "write_actions_not_executable_in_pr33", "risk_visual_severity_not_implemented_in_pr33", "readiness_checklist_not_implemented_in_pr33", "price_position_not_implemented_in_pr33", "market_evidence_not_checked_in_pr33"]
+    limitations = ["decision_card_v1_deterministic", "recommendation_scope_internal_workflow", "not_investment_advice", "not_certified_appraisal", "not_valuation_report", "no_valuation_opinion", "no_llm_wording_in_v1", "write_actions_not_executable_in_pr33", "risk_visual_severity_not_implemented_in_pr33", "price_position_not_implemented_in_pr33", "market_evidence_not_checked_in_pr33"]
     if analysis is None:
         limitations.append("analysis_missing")
     if review is None:
@@ -198,4 +199,5 @@ def build_decision_card(listing: Listing, analysis: ListingAnalysis | None, revi
     risk_attention = build_risk_attention_from_card(card)
     card["risk_attention"] = risk_attention
     card["top_risks"] = [enrich_top_risk(risk, workflow) for risk in risks]
+    card["readiness_checklist"] = build_readiness_checklist(listing, analysis, review, workflow, card)
     return card

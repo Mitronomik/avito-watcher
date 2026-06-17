@@ -5,6 +5,7 @@ from typing import Any
 from app.analysis.market_comps import ALLOWED_SOURCE_TYPES, ALLOWED_VERIFICATION_STATUSES
 from app.api.admin_v1.decision_card import DECISION_CARD_DTO_VERSION, RECOMMENDATIONS
 from app.api.admin_v1.risk_attention import RISK_ATTENTION_DTO_VERSION, RISK_CATEGORIES, RISK_SEVERITIES
+from app.api.admin_v1.readiness_checklist import READINESS_CHECKLIST_DTO_VERSION, READINESS_GROUPS, READINESS_ITEM_IDS, READINESS_ITEM_STATUSES, READINESS_STATUSES
 from app.api.admin_v1.schemas import API_VERSION
 from app.api.admin_v1.workflow import WORKFLOW_ACTIONS, WORKFLOW_STATE_DTO_VERSION, WORKFLOW_STATES
 from app.models.agent_task import ALLOWED_AGENT_TASK_STATUSES
@@ -102,6 +103,21 @@ LABELS: dict[str, dict[str, dict[str, str]]] = {
         "high": _text("Высокая", "High"),
         "critical": _text("Критическая", "Critical"),
     },
+    "readiness_status": {
+        "ready": _text("Данные готовы для внутреннего разбора", "Data is ready for internal review"),
+        "partial": _text("Можно разобрать, но нужны уточнения", "Can be reviewed, but needs clarification"),
+        "blocked": _text("Не хватает критичных данных для внутреннего разбора", "Critical data is missing for internal review"),
+        "not_applicable": _text("Чеклист неприменим", "Checklist is not applicable"),
+    },
+    "readiness_item_status": {
+        "ok": _text("ОК", "OK"),
+        "warning": _text("Требует внимания", "Needs attention"),
+        "missing": _text("Отсутствует", "Missing"),
+        "blocked": _text("Блокирует", "Blocked"),
+        "not_applicable": _text("Неприменимо", "Not applicable"),
+    },
+    "readiness_group": {key: _text(key, key.replace("_", " ").title()) for key in READINESS_GROUPS},
+    "readiness_item_id": {key: _text(key, key.replace("_", " ").title()) for key in READINESS_ITEM_IDS},
     "decision_recommendation": {
         "analysis_pending": _text("Ожидать анализа", "Wait for analysis"),
         "needs_data": _text("Нужны данные", "Needs data"),
@@ -135,6 +151,7 @@ CAPABILITIES = {
     "technical_api_actions": False,
     "decision_card": True,
     "risk_attention": True,
+    "readiness_checklist": True,
     "report_export": False,
     "workflow_state_read": True,
     "workflow_actions_execute": False,
@@ -223,6 +240,10 @@ ENUM_LABELS: dict[str, dict[str, dict[str, str]]] = {
     "decision_recommendation": LABELS["decision_recommendation"],
     "risk_category": LABELS["risk_category"],
     "risk_severity": LABELS["risk_severity"],
+    "readiness_status": LABELS["readiness_status"],
+    "readiness_item_status": LABELS["readiness_item_status"],
+    "readiness_group": LABELS["readiness_group"],
+    "readiness_item_id": LABELS["readiness_item_id"],
     "verification_status": {
         "human_verified": _text("Проверено человеком", "Human verified"),
         "unknown": _text("Неизвестно", "Unknown"),
@@ -249,6 +270,7 @@ def build_meta_contract() -> dict[str, Any]:
         "workflow_contract_version": WORKFLOW_STATE_DTO_VERSION,
         "decision_card_contract_version": DECISION_CARD_DTO_VERSION,
         "risk_attention_contract_version": RISK_ATTENTION_DTO_VERSION,
+        "readiness_checklist_contract_version": READINESS_CHECKLIST_DTO_VERSION,
         "service": "avito-watcher",
         "status": "ok",
         "roles": [{"id": role, "label": ROLE_LABELS[role], "description": ROLE_DESCRIPTIONS[role]} for role in ROLE_IDS],
@@ -266,6 +288,10 @@ def build_meta_contract() -> dict[str, Any]:
             "decision_recommendation": _enum("decision_recommendation", RECOMMENDATIONS),
             "risk_category": _enum("risk_category", RISK_CATEGORIES),
             "risk_severity": _enum("risk_severity", RISK_SEVERITIES),
+            "readiness_status": _enum("readiness_status", READINESS_STATUSES),
+            "readiness_item_status": _enum("readiness_item_status", READINESS_ITEM_STATUSES),
+            "readiness_group": _enum("readiness_group", READINESS_GROUPS),
+            "readiness_item_id": _enum("readiness_item_id", READINESS_ITEM_IDS),
         },
         "labels": LABELS,
         "legacy_labels": LEGACY_LABELS,

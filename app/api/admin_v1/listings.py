@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.api.admin_v1.decision_card import DECISION_CARD_DTO_VERSION, build_decision_card
 from app.api.admin_v1.risk_attention import RISK_ATTENTION_DTO_VERSION, build_risk_attention_from_card
+from app.api.admin_v1.readiness_checklist import READINESS_CHECKLIST_DTO_VERSION, build_readiness_checklist
 from app.api.admin_v1.listing_dtos import DECISION_SOURCE_DTO_VERSION, listing_detail_dto, listing_summary_dto, latest_analysis_dto, human_review_dto
 from app.api.admin_v1.workflow import build_workflow_snapshot, latest_review_subquery, latest_successful_analysis_subquery, workflow_row_for_listing
 from app.api.admin_v1.ordering import parse_ordering
@@ -123,6 +124,17 @@ def get_listing_risk_attention(listing_id: int, db: Session = Depends(get_db)) -
     return success_response(build_risk_attention_from_card(card))
 
 
+@router.get("/listings/{listing_id}/readiness-checklist", name="admin_api_v1_readiness_checklist")
+def get_listing_readiness_checklist(listing_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    row = workflow_row_for_listing(db, listing_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    listing, analysis, review = row
+    workflow = build_workflow_snapshot(listing, analysis, review)
+    card = build_decision_card(listing, analysis, review, workflow)
+    return success_response(build_readiness_checklist(listing, analysis, review, workflow, card))
+
+
 @router.get("/listings/{listing_id}/decision-card", name="admin_api_v1_decision_card")
 def get_listing_decision_card(listing_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
     row = workflow_row_for_listing(db, listing_id)
@@ -146,9 +158,10 @@ def get_decision_source(listing_id: int, db: Session = Depends(get_db)) -> dict[
         "latest_analysis": latest_analysis_dto(analysis),
         "human_review": human_review_dto(review),
         "workflow": workflow,
-        "available_sections": {"listing": True, "analysis": analysis is not None, "market_facts": False, "human_review": review is not None, "alerts": False, "workflow": True, "decision_card": True, "risk_attention": True},
+        "available_sections": {"listing": True, "analysis": analysis is not None, "market_facts": False, "human_review": review is not None, "alerts": False, "workflow": True, "decision_card": True, "risk_attention": True, "readiness_checklist": True},
         "decision_card_ref": {"route_name": "admin_api_v1_decision_card", "listing_id": listing.id, "schema_version": DECISION_CARD_DTO_VERSION},
         "risk_attention_ref": {"route_name": "admin_api_v1_risk_attention", "listing_id": listing.id, "schema_version": RISK_ATTENTION_DTO_VERSION},
+        "readiness_checklist_ref": {"route_name": "admin_api_v1_readiness_checklist", "listing_id": listing.id, "schema_version": READINESS_CHECKLIST_DTO_VERSION},
         "source_refs": {"listing_id": listing.id, "listing_external_id": listing.external_id, "listing_analysis_id": analysis.id if analysis else None, "human_review_id": review.id if review else None},
         "limitations": ["decision_card_available_in_pr33", "write_transitions_not_implemented_in_pr32", "action_execution_not_implemented_in_pr32"],
     }
