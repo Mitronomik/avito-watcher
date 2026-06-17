@@ -76,12 +76,6 @@ def install_admin_api_v1_error_handlers(app_instance: FastAPI) -> None:
             content=error_response("validation_error", "Validation error", details=safe_errors),
         )
 
-    @app_instance.exception_handler(Exception)
-    async def admin_api_unhandled_exception_handler(request: Request, exc: Exception):
-        if not _is_admin_api_v1_request(request):
-            raise exc
-        return JSONResponse(status_code=500, content=error_response("internal_error", "Internal error"))
-
 
 def create_app(admin_ui_enabled: bool | None = None) -> FastAPI:
     if not logging.getLogger().handlers:

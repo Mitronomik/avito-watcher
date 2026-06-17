@@ -93,6 +93,12 @@ def test_admin_api_error_envelope_scoped_and_safe(monkeypatch):
     assert "ok" not in html_response.json()
 
 
+def test_admin_api_does_not_install_global_exception_catch_all(monkeypatch):
+    client = _client(monkeypatch)
+    assert Exception not in client.app.exception_handlers
+    assert client.get("/admin/system", headers={"X-API-Key": "bad"}).status_code == 403
+
+
 def test_redaction_recurses_case_insensitive_urls_and_preserves_original():
     original = {
         "Api_Key": "secret",
