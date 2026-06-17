@@ -201,7 +201,7 @@ def test_decision_source_workflow_and_no_side_effects(monkeypatch):
                 yield from walk_keys(child)
 
     keys = set(walk_keys(ds))
-    for forbidden in ["decision_card", "primary_recommendation", "recommendation", "headline", "top_reasons", "top_risks", "next_steps", "missing_data", "readiness", "risk_severity", "risk_visual", "price_position", "facts_json", "result_json", "payload_json", "risks_json", "questions_json", "report_md"]:
+    for forbidden in ["primary_recommendation", "recommendation", "headline", "top_reasons", "top_risks", "next_steps", "missing_data", "readiness", "risk_severity", "risk_visual", "price_position", "facts_json", "result_json", "payload_json", "risks_json", "questions_json", "report_md"]:
         assert forbidden not in keys
     with Session() as s:
         after = {m.__tablename__: s.scalar(select(func.count()).select_from(m)) for m in models}

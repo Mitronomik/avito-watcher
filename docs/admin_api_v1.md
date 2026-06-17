@@ -417,3 +417,31 @@ The workflow layer is read-only. It does not create audit rows, human reviews, a
 ### Decision Card boundary
 
 PR32 is not Decision Card v1. Workflow and decision-source responses intentionally do not include `decision_card`, `recommendation`, `primary_recommendation`, `headline`, `top_reasons`, `top_risks`, `next_steps`, missing-data ranking, readiness checklist, risk severity/visual attention, price position DTOs, memo generation, commercial-offer generation, or export/report readiness.
+
+## PR33: deterministic Decision Card v1
+
+PR33 adds a deterministic, read-only Decision Card v1 endpoint under the existing Admin API v1 prefix only:
+
+- `GET /api/admin/v1/listings/{listing_id}/decision-card`
+
+The response uses the standard Admin API v1 success/error envelope. The card payload has `schema_version = "decision-card-v1"`, `decision_card_model_version = "decision-card-v1"`, `decision_card_template_version = "decision-card-templates-v1"`, and `decision_card_policy_version = "decision-card-policy-v1"`.
+
+`recommendation_scope` is always `internal_workflow`. The primary recommendation is internal workflow decision support only: it is not investment advice, not certified appraisal, not a valuation report, and not a professional valuation opinion. PR33 does not guarantee rent, yield, price growth, value, liquidity, or deal success.
+
+Recommendation vocabulary is fixed: `take_in_work`, `needs_data`, `watchlist`, `reject`, `analysis_pending`, and `insufficient_evidence`. The recommendation is derived from the PR32 workflow snapshot only: `analysis_pending` maps to `analysis_pending`, `needs_data` maps to `needs_data`, `rejected` maps to `reject`, `watchlist` maps to `watchlist`, and `ready_for_work` maps to `take_in_work`; all other workflow states map to `insufficient_evidence`. Score thresholds are not used as fallback, and PR33 does not recalculate score, verdict, or workflow state.
+
+The card contains compact sections for `primary_recommendation`, `headline`, `top_reasons`, `top_risks`, `next_steps`, `missing_data`, `data_quality`, `source_trace`, embedded PR32 `workflow`, `model_versions`, `input_hashes`, and `limitations`. The 15-second limits are enforced by contract: one headline, at most 3 top reasons, at most 3 top risks, at most 3 next steps, and at most 5 missing-data items.
+
+Confidence values are deterministic and limited to `high`, `medium`, `low`, and `unknown`. Confidence describes decision-card evidence availability only; it is not investment certainty and never overrides the workflow-derived recommendation.
+
+`decision_card_input_hash` is a stable hash of output-affecting safe scalar inputs, decision-card versions/policy constants, source availability, workflow fields, and limitations. It excludes response-envelope metadata such as `generated_at`, excludes secrets, and uses stable JSON serialization. `analysis_input_hash` is exposed only when present as a safe scalar. `workflow_source_hash` is derived from safe workflow fields.
+
+`source_trace.market_evidence` is tri-state in PR33. The endpoint does not query market evidence tables and does not parse raw evidence JSON; when no safe pre-existing summary is used, market evidence is returned as `present=null` with `status="not_checked_in_pr33"`.
+
+`GET /api/admin/v1/listings/{listing_id}/decision-source` remains compatible and now includes compact Decision Card availability/reference only via `available_sections.decision_card=true` and `decision_card_ref`. It does not embed the full card and does not expose execution endpoints.
+
+The meta contract remains `meta_contract_version = "v1"` and adds `decision_card_contract_version = "decision-card-v1"`, the `decision_recommendation` enum, and `capabilities.decision_card = true`. Write/report capabilities remain false: `write_api=false`, `technical_api_actions=false`, `workflow_actions_execute=false`, and `report_export=false`.
+
+PR33 read-only guarantees: no POST/PUT/PATCH/DELETE endpoints, no action execution, no state transitions, no watchlist/reject/close writes, no report/memo/offer generation, no parser runs, no LLM/agent/RAG/external calls, no market evidence ingestion, no score/verdict/listing/evidence/human-review mutation, and no migration.
+
+Future boundaries: PR34 owns risk severity, visual attention, visual weight, and blocking flags; PR35 owns readiness checklist/status/counts; PR36 owns price-position/comparable chart DTOs. PR33 does not compute scenario, DCF, IRR, NPV, financing, or tax layers.
