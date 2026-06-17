@@ -89,7 +89,7 @@ def test_decision_card_limits_boundaries_hashes_and_no_side_effects(monkeypatch)
     assert card["input_hashes"]["decision_card_input_hash"] == body2["data"]["input_hashes"]["decision_card_input_hash"]
     assert body1["meta"]["generated_at"] != ""
     keys = set(_walk_keys(card))
-    for forbidden in {"facts_json", "result_json", "payload_json", "risks_json", "questions_json", "report_md", "before_json", "after_json", "execution_endpoint", "readiness", "price_position", "scenario", "dcf", "irr", "npv", "loan", "tax"}:
+    for forbidden in {"facts_json", "result_json", "payload_json", "risks_json", "questions_json", "report_md", "before_json", "after_json", "execution_endpoint", "readiness", "scenario", "dcf", "irr", "npv", "loan", "tax"}:
         assert forbidden not in keys
     assert all(step["executable_now"] == (step["action_id"] == "open_listing") for step in card["next_steps"])
     assert card["source_trace"]["market_evidence"] == {"present": None, "ref": None, "status": "not_checked_in_pr33"}

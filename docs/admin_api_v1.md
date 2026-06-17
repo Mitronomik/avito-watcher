@@ -541,3 +541,52 @@ Decision Card v1 now embeds a full `readiness_checklist` section produced by the
 The meta contract remains `meta_contract_version = "v1"` and adds `readiness_checklist_contract_version = "readiness-checklist-v1"`, `capabilities.readiness_checklist = true`, and enum entries for readiness statuses, item statuses, groups, and item ids. Meta exposes enums and labels only; it does not expose frontend-side readiness calculation formulas. Existing write/report/action capabilities remain false.
 
 Boundary notes: PR35 does not implement PR36 price-position or comparable chart DTOs. It does not implement scenario/DCF/IRR/NPV, financing/tax, confirmed data workflow, report generation, memo generation, commercial offer generation, or report/export actions. `report_inputs_ready`, `financial_assumptions_present`, and `object_quality_available` are `not_applicable` by default while those future systems are absent.
+
+## PR36: Price Position v1
+
+`GET /api/admin/v1/listings/{listing_id}/price-position` returns a deterministic read-only `price-position-v1` DTO inside the standard Admin API v1 envelope. The route uses the same header-only read key as the other `/api/admin/v1` read endpoints; query-string auth, bearer auth, cookie auth, and technical-write-key-only access are not accepted.
+
+The DTO is positioned as internal relative price/rent screening and decision-support metadata. It is not an appraisal, not a valuation report, and not investment, legal, or tax advice. The `market_low`, `market_median`, and `market_high` names mean the selected adjusted comparable asking-price/rent range exposed by the backend contract, not a full market-value conclusion.
+
+Core fields include:
+
+- `schema_version`, `price_position_model_version`, `price_position_policy_version`, `price_position_label_version`.
+- `listing_id`, `listing_external_id`.
+- `metric`, `currency`, `period`, `area_unit`, and `range_basis`.
+- `subject_price_per_m2`, `market_low`, `market_median`, and `market_high`.
+- `position`, `confidence`, `location_basis`.
+- `selected_comps_count`, `excluded_comps_count`, and `selected_evidence_ids`.
+- `chart.visible` and `chart.reason`.
+- finite RU/EN `labels`, stable `label_keys`, safe `source_refs`, deterministic `input_hashes`, and stable `limitations`.
+
+PR36 v1 supports `commercial_rent` by default. Unknown or unsupported profiles return `metric=not_applicable`, `position=not_applicable`, `confidence=not_applicable`, and a hidden chart with `chart.reason=not_applicable_profile`. The profile is read from safe existing analysis/listing read models only and is not inferred from title, address, category text, or raw JSON.
+
+Supported enum values:
+
+- `price_position_code`: `below_market`, `near_market`, `above_market`, `insufficient_data`, `not_applicable`.
+- `price_position_confidence`: `high`, `medium`, `low`, `insufficient_data`, `not_applicable`.
+- `price_position_location_basis`: `same_listing_context`, `same_location_key`, `manual_location`, `insufficient_location`.
+- `price_position_chart_reason`: `selected_comps_available`, `insufficient_selected_comps`, `insufficient_subject_price`, `insufficient_subject_area`, `insufficient_location`, `not_applicable_profile`.
+- `price_position_metric`: `asking_rent_per_m2`, `asking_sale_price_per_m2`, `not_applicable`.
+- `price_position_range_basis`: `selected_adjusted_comparables`.
+
+For `commercial_rent`, `subject_price_per_m2` is calculated server-side from safe scalar listing fields as `listing.price / listing.area_m2` when both fields are present and `area_m2 > 0`. It is numeric or `null`, never a formatted money string. PR36 does not annualize rent, does not convert rent to NOI, and does not compute cap rate, yield, payback, DCF, IRR, NPV, financing, or tax fields.
+
+The backend computes low/median/high, position, confidence, counts, and chart visibility. The frontend must not compute median, range, position, or confidence. The frontend should render only the server-provided DTO.
+
+Comparable data boundary:
+
+- PR36 consumes already-selected/adjusted comparable outputs only.
+- PR36 does not add a comparable selection engine, adjustment engine, or source quality engine.
+- PR36 does not scan arbitrary `market_evidence_items` rows and does not parse raw JSON blobs.
+- If no safe selected/adjusted comparable source is available, the DTO returns `insufficient_data`, empty selected evidence refs, hidden chart, and stable limitation codes such as `selected_adjusted_comps_not_available_in_pr36`.
+- `selected_comps_count` equals `len(selected_evidence_ids)` and counts only usable selected adjusted comps used in the range calculation.
+- `excluded_comps_count` is non-zero only when a safe existing read source exposes it; otherwise it is `0` with `excluded_comps_count_not_available_in_pr36`.
+
+The Decision Card v1 response now embeds `price_position`. For the same listing, `decision_card.price_position` matches the standalone `/price-position` DTO, ignoring the outer response envelope metadata. Existing Decision Card primary recommendation, workflow, risks, readiness checklist, score/verdict-derived behavior, and next steps are not mutated by Price Position.
+
+`GET /api/admin/v1/listings/{listing_id}/decision-source` now exposes a compact `price_position_ref` with `route_name=admin_api_v1_price_position`, `listing_id`, and `schema_version=price-position-v1`. It does not embed the full DTO, absolute URLs, endpoint URLs, auth params, tokens, or API keys.
+
+`GET /api/admin/v1/meta` now exposes `price_position_contract_version=price-position-v1`, `capabilities.price_position=true`, and the price-position enums/labels. `/meta` exposes contract values only and does not provide frontend formulas for median/range/position/confidence recomputation.
+
+Out-of-scope boundaries remain unchanged: PR37+ agent flows, PR47/PR48 scenarios, PR49+ maps/geocoding/location taxonomy, and PR56+ confirmed data workflows are not part of PR36.
