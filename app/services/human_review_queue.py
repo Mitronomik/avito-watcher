@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import case, func, select
+from sqlalchemy import asc, case, desc, func, select
 from sqlalchemy.orm import Session
 
 from app.models.alert_delivery_attempt import AlertDeliveryAttempt
@@ -46,6 +46,7 @@ class HumanReviewQueueRow:
     latest_decision_type: str | None
     latest_decision_status: str | None
     latest_decision_at: datetime | None
+    published_at: datetime | None = None
 
 
 def normalize_review_queue_limit(value: int | str | None) -> int:
@@ -82,6 +83,12 @@ def get_human_review_queue_rows(
     limit: int | str | None = None,
     profile: str | None = None,
     unreviewed_only: bool | str | None = None,
+    offset: int = 0,
+    order_by: str | None = None,
+    order_dir: str | None = None,
+    verdict: str | None = None,
+    min_score: float | None = None,
+    max_score: float | None = None,
 ) -> list[HumanReviewQueueRow]:
     """Return a bounded, read-only, one-row-per-listing review queue.
 
@@ -92,6 +99,14 @@ def get_human_review_queue_rows(
     effective_limit = normalize_review_queue_limit(limit)
     normalized_profile = (profile or "").strip() or None
     only_unreviewed = parse_unreviewed_only(unreviewed_only)
+    effective_offset = max(0, int(offset or 0))
+    direction = (order_dir or "desc").lower()
+    if direction not in {"asc", "desc"}:
+        direction = "desc"
+
+    def ordered(expression, *, default_desc: bool = True):
+        use_desc = (direction == "desc") if order_by else default_desc
+        return (desc(expression) if use_desc else asc(expression)).nullslast()
 
     analysis_base = select(
         ListingAnalysis.id.label("analysis_id"),
@@ -173,14 +188,31 @@ def get_human_review_queue_rows(
         # PR23c unreviewed_only means no human_reviews rows for this listing.
         # Investment decisions are summarized independently and are not a filter.
         stmt = stmt.where(review_count == 0)
-    stmt = stmt.order_by(
+    if verdict is not None:
+        stmt = stmt.where(ListingAnalysis.verdict == verdict)
+    if min_score is not None:
+        stmt = stmt.where(ListingAnalysis.score.is_not(None), ListingAnalysis.score >= min_score)
+    if max_score is not None:
+        stmt = stmt.where(ListingAnalysis.score.is_not(None), ListingAnalysis.score <= max_score)
+
+    orderings = {
+        "analysis_created_at": (ordered(ListingAnalysis.created_at), ordered(Listing.id)),
+        "score": (ordered(ListingAnalysis.score), ordered(Listing.id)),
+        "verdict": (ordered(ListingAnalysis.verdict), ordered(Listing.id)),
+        "listing_id": (ordered(Listing.id),),
+        "published_at": (ordered(Listing.published_at), ordered(Listing.id)),
+        "price": (ordered(Listing.price), ordered(Listing.id)),
+        "area_m2": (ordered(Listing.area_m2), ordered(Listing.id)),
+    }
+    default_ordering = (
         review_count.asc(),
         verdict_rank.desc(),
         ListingAnalysis.score.desc().nullslast(),
         alert_count.desc(),
         Listing.last_seen_at.desc(),
         Listing.id.desc(),
-    ).limit(effective_limit)
+    )
+    stmt = stmt.order_by(*(orderings.get(order_by or "", default_ordering))).offset(effective_offset).limit(effective_limit)
 
     rows: list[HumanReviewQueueRow] = []
     for listing, analysis, sent_count, attempt, human_count, review, decision in db.execute(stmt).all():
@@ -214,6 +246,7 @@ def get_human_review_queue_rows(
                 latest_decision_type=decision.decision_type if decision else None,
                 latest_decision_status=decision.decision_status if decision else None,
                 latest_decision_at=decision.created_at if decision else None,
+                published_at=listing.published_at,
             )
         )
     return rows

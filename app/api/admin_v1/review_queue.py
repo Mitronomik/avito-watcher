@@ -35,7 +35,7 @@ def _item(row) -> dict[str, Any]:
             "price": row.price,
             "area_m2": row.area_m2,
             "address": row.address or None,
-            "published_at": None,
+            "published_at": iso(row.published_at),
             "last_seen_at": iso(row.last_seen_at),
         },
         "analysis": None if row.analysis_id is None else {
@@ -73,16 +73,17 @@ def review_queue(
     if order_dir is not None and order_dir.lower() not in {"asc", "desc"}:
         raise HTTPException(status_code=422, detail="invalid order direction")
     pagination = parse_pagination(limit, offset)
-    # Reuse the HTML queue read service for eligibility, then apply API-only simple filters in memory
-    # over a bounded limit+offset+1 slice. PR31 intentionally avoids adding a second queue business model.
-    rows = get_human_review_queue_rows(db, limit=pagination.limit + pagination.offset + 1, profile=profile)
-    if verdict is not None:
-        rows = [r for r in rows if r.analysis_verdict == verdict]
-    if min_score is not None:
-        rows = [r for r in rows if r.analysis_score is not None and r.analysis_score >= min_score]
-    if max_score is not None:
-        rows = [r for r in rows if r.analysis_score is not None and r.analysis_score <= max_score]
-    page = rows[pagination.offset : pagination.offset + pagination.limit + 1]
-    has_more = len(page) > pagination.limit
-    items = [_item(row) for row in page[: pagination.limit]]
+    rows = get_human_review_queue_rows(
+        db,
+        limit=pagination.limit + 1,
+        offset=pagination.offset,
+        profile=profile,
+        order_by=order_by,
+        order_dir=order_dir,
+        verdict=verdict,
+        min_score=min_score,
+        max_score=max_score,
+    )
+    has_more = len(rows) > pagination.limit
+    items = [_item(row) for row in rows[: pagination.limit]]
     return success_response({"schema_version": "review-queue-v1", "items": items}, meta={**api_meta(), **pagination.meta(has_more=has_more)})

@@ -87,7 +87,8 @@ def list_listings(
         stmt = stmt.where(Listing.area_m2 >= min_area_m2)
     if max_area_m2 is not None:
         stmt = stmt.where(Listing.area_m2 <= max_area_m2)
-    stmt = stmt.order_by(_order(ordering.expression, ordering.direction), Listing.id.asc()).offset(pagination.offset).limit(pagination.limit + 1)
+    id_tiebreaker = Listing.id.desc() if ordering.direction == "desc" else Listing.id.asc()
+    stmt = stmt.order_by(_order(ordering.expression, ordering.direction), id_tiebreaker).offset(pagination.offset).limit(pagination.limit + 1)
     rows = db.execute(stmt).all()
     has_more = len(rows) > pagination.limit
     items = [listing_summary_dto(listing, analysis) for listing, analysis in rows[: pagination.limit]]

@@ -231,9 +231,9 @@ List endpoints use bounded `limit` and `offset` pagination with response metadat
 
 `has_more` is computed by fetching one extra row or an equivalent bounded slice. PR31 avoids count queries for these endpoints.
 
-`/listings` supports allowlisted ordering by `id`, `first_seen_at`, `last_seen_at`, `published_at`, `price`, and `area_m2`. Null values sort last and `id` is used as the stable tie-breaker. Minimal filters are `is_active`, exact `external_id`, `search_job_id`, `min_price`, `max_price`, `min_area_m2`, and `max_area_m2`.
+`/listings` supports allowlisted ordering by `id`, `first_seen_at`, `last_seen_at`, `published_at`, `price`, and `area_m2`. Null values sort last and `id` is used as a direction-aware stable tie-breaker. Minimal filters are `is_active`, exact `external_id`, `search_job_id`, `min_price`, `max_price`, `min_area_m2`, and `max_area_m2`.
 
-`/review-queue` accepts bounded pagination and the minimal filters `verdict`, `min_score`, `max_score`, and `profile`. The API reuses the existing server-rendered review queue read service for eligibility instead of parsing HTML or creating a separate workflow model.
+`/review-queue` accepts bounded pagination, deterministic allowlisted ordering by `analysis_created_at`, `score`, `verdict`, `listing_id`, `published_at`, `price`, and `area_m2`, and the minimal filters `verdict`, `min_score`, `max_score`, and `profile`. The shared review queue read service applies eligibility, filters, ordering, then pagination, so filtered pages and `has_more` are computed from the filtered ordered set instead of an unfiltered slice.
 
 Unknown ordering fields, invalid directions, and unknown query parameters return validation errors.
 

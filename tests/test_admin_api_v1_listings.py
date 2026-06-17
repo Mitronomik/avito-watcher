@@ -70,7 +70,9 @@ def test_listings_auth_pagination_ordering_redaction_and_latest_analysis(monkeyp
     assert body["meta"]["api_version"] == "admin-v1"
     assert body["meta"]["pagination"] == {"limit": 2, "offset": 0, "has_more": True}
     items = body["data"]["items"]
-    assert [i["id"] for i in items] == [2, 3]  # nulls last, id tiebreak stable among non-nulls
+    assert [i["id"] for i in items] == [2, 3]  # nulls last, direction-aware id tiebreak among non-nulls
+    desc_tie = _get(client, "/api/admin/v1/listings?limit=3&order_by=first_seen_at&order_dir=desc").json()["data"]["items"]
+    assert [i["id"] for i in desc_tie] == [3, 2, 1]
     assert items[0]["schema_version"] == "listing-summary-v1"
     assert items[0]["latest_analysis"]["id"] == 3
     text = str(body)
@@ -115,6 +117,16 @@ def test_review_queue_and_no_side_effects(monkeypatch):
     text = str(body)
     for forbidden in ["workflow_state", "allowed_actions", "risk_severity", "facts_json", "payload_json", "risks_json", "report_md"]:
         assert forbidden not in text
+    strong = _get(client, "/api/admin/v1/review-queue?limit=1&offset=0&profile=p&verdict=strong").json()
+    assert [item["listing"]["id"] for item in strong["data"]["items"]] == [2]
+    assert strong["meta"]["pagination"]["has_more"] is False
+
+    score_asc = _get(client, "/api/admin/v1/review-queue?limit=1&offset=0&profile=p&order_by=score&order_dir=asc").json()
+    assert [item["listing"]["id"] for item in score_asc["data"]["items"]] == [3]
+    assert score_asc["meta"]["pagination"]["has_more"] is True
+    score_desc = _get(client, "/api/admin/v1/review-queue?limit=1&offset=0&profile=p&order_by=score&order_dir=desc").json()
+    assert [item["listing"]["id"] for item in score_desc["data"]["items"]] == [2]
+
     assert _get(client, "/api/admin/v1/review-queue?order_by=bad").status_code == 422
     assert _get(client, "/api/admin/v1/review-queue?unknown=1").status_code == 422
     with Session() as s:
