@@ -31,12 +31,14 @@ from app.agents.contracts import (
     AgentTaskClass,
 )
 from app.agents.registry import get_agent_task_registry, get_agent_workflow_registry
+from app.models.agent_artifact import AGENT_ARTIFACT_REDACTION_STATUSES, AGENT_ARTIFACT_TYPES
 from app.models.agent_task import (
     AGENT_TASK_DEPENDENCY_STATUSES,
     AGENT_TASK_ORCHESTRATION_STATUSES,
     ALLOWED_AGENT_TASK_STATUSES,
 )
 from app.models.human_review import HUMAN_VERDICTS, NEXT_ACTIONS, OUTCOME_STATUSES, REVIEW_STATUSES
+from app.services.agent_artifact_service import AGENT_ARTIFACT_DTO_VERSION, AGENT_ARTIFACT_LABEL_VERSION, AGENT_ARTIFACT_POLICY_VERSION, AGENT_ARTIFACT_SCHEMA_VERSION
 
 META_CONTRACT_VERSION = "v1"
 
@@ -108,6 +110,26 @@ LABELS: dict[str, dict[str, dict[str, str]]] = {
         "failed": _text("Ошибка", "Failed"),
         "skipped": _text("Пропущено", "Skipped"),
         "blocked": _text("Заблокировано", "Blocked"),
+    },
+
+    "agent_artifact_type": {
+        "evidence_candidates": _text("Кандидаты доказательств", "Evidence candidates"),
+        "normalized_evidence": _text("Нормализованные доказательства", "Normalized evidence"),
+        "data_gap_report": _text("Отчёт о пробелах данных", "Data gap report"),
+        "call_questions": _text("Вопросы для звонка", "Call questions"),
+        "decision_wording": _text("Формулировка решения", "Decision wording"),
+        "claim_review": _text("Проверка утверждений", "Claim review"),
+        "report_draft": _text("Черновик отчёта", "Report draft"),
+        "offer_draft": _text("Черновик оффера", "Offer draft"),
+        "presentation_outline": _text("План презентации", "Presentation outline"),
+        "geo_context": _text("Геоконтекст", "Geo context"),
+        "portfolio_memory_finding": _text("Находка из памяти портфеля", "Portfolio memory finding"),
+    },
+    "agent_artifact_redaction_status": {
+        "not_required": _text("Редакция не требуется", "Not required"),
+        "redacted": _text("Отредактировано", "Redacted"),
+        "blocked": _text("Заблокировано", "Blocked"),
+        "unknown": _text("Неизвестно", "Unknown"),
     },
     "review_status": {
         "new": _text("Новый", "New"),
@@ -199,6 +221,7 @@ CAPABILITIES = {
     "report_export": False,
     "workflow_state_read": True,
     "workflow_actions_execute": False,
+    "agent_artifacts_read": True,
 }
 
 
@@ -229,6 +252,8 @@ ERRORS = (
 
 
 ENUM_LABELS: dict[str, dict[str, dict[str, str]]] = {
+    "agent_artifact_type": LABELS["agent_artifact_type"],
+    "agent_artifact_redaction_status": LABELS["agent_artifact_redaction_status"],
     "review_status": LABELS["review_status"],
     "human_verdict": {
         "false_negative": _text("Ложно отрицательное", "False negative"),
@@ -339,6 +364,10 @@ def build_meta_contract() -> dict[str, Any]:
         "risk_attention_contract_version": RISK_ATTENTION_DTO_VERSION,
         "readiness_checklist_contract_version": READINESS_CHECKLIST_DTO_VERSION,
         "price_position_contract_version": PRICE_POSITION_DTO_VERSION,
+        "agent_artifact_contract_version": AGENT_ARTIFACT_DTO_VERSION,
+        "agent_artifact_policy_version": AGENT_ARTIFACT_POLICY_VERSION,
+        "agent_artifact_schema_version": AGENT_ARTIFACT_SCHEMA_VERSION,
+        "agent_artifact_label_version": AGENT_ARTIFACT_LABEL_VERSION,
         "service": "avito-watcher",
         "status": "ok",
         "roles": [{"id": role, "label": ROLE_LABELS[role], "description": ROLE_DESCRIPTIONS[role]} for role in ROLE_IDS],
@@ -349,6 +378,8 @@ def build_meta_contract() -> dict[str, Any]:
             "next_action": _enum("next_action", NEXT_ACTIONS),
             "outcome_status": _enum("outcome_status", OUTCOME_STATUSES),
             "agent_task_status": _enum("agent_task_status", ALLOWED_AGENT_TASK_STATUSES),
+            "agent_artifact_type": _enum("agent_artifact_type", AGENT_ARTIFACT_TYPES),
+            "agent_artifact_redaction_status": _enum("agent_artifact_redaction_status", AGENT_ARTIFACT_REDACTION_STATUSES),
             "agent_task_dependency_status": _enum("agent_task_dependency_status", AGENT_TASK_DEPENDENCY_STATUSES),
             "agent_task_orchestration_status": _enum("agent_task_orchestration_status", AGENT_TASK_ORCHESTRATION_STATUSES),
             "source_type": _enum("source_type", ALLOWED_SOURCE_TYPES),

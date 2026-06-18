@@ -6,6 +6,7 @@ from app.api.admin_v1.dependencies import require_admin_api_read_access
 from app.api.admin_v1.meta_contract import build_meta_contract
 from app.api.admin_v1.schemas import API_VERSION, success_response
 from app.api.admin_v1.listings import router as listings_router
+from app.api.admin_v1.agent_artifacts import router as agent_artifacts_router
 from app.api.admin_v1.review_queue import router as review_queue_router
 
 router = APIRouter(
@@ -26,4 +27,5 @@ def meta() -> dict[str, object]:
 
 
 router.include_router(listings_router)
+router.include_router(agent_artifacts_router)
 router.include_router(review_queue_router)
