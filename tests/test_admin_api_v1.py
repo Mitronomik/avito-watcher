@@ -70,7 +70,10 @@ def test_admin_api_meta_contract_shape_permissions_and_determinism(monkeypatch):
     assert data["meta_contract_version"] == META_CONTRACT_VERSION == "v1"
     assert data["service"] == "avito-watcher"
     assert data["status"] == "ok"
-    assert set(data["capabilities"]) == {"admin_api_v1", "read_api", "write_api", "technical_api_actions", "decision_card", "risk_attention", "readiness_checklist", "price_position", "report_export", "workflow_state_read", "workflow_actions_execute", "agent_artifacts_read"}
+    assert set(data["capabilities"]) == {"admin_api_v1", "read_api", "write_api", "technical_api_actions", "decision_card", "risk_attention", "readiness_checklist", "price_position", "report_export", "workflow_state_read", "workflow_actions_execute", "agent_artifacts_read", "orchestration_planning_supported", "orchestration_enqueue_enabled", "orchestration_monitor_trigger_enabled"}
+    assert data["capabilities"]["orchestration_planning_supported"] is True
+    assert data["capabilities"]["orchestration_enqueue_enabled"] is False
+    assert data["capabilities"]["orchestration_monitor_trigger_enabled"] is False
     assert data["capabilities"]["read_api"] is True
     assert data["capabilities"]["write_api"] is False
     assert data["capabilities"]["technical_api_actions"] is False
@@ -126,6 +129,38 @@ def test_admin_api_meta_contract_errors_capabilities_and_secret_safety(monkeypat
     assert "ADMIN_UI_TECHNICAL_WRITE_KEY" not in openapi
     assert "/api/admin/v1/alerts" not in openapi
     assert "/api/admin/v1/evidence" not in openapi
+
+
+
+def test_admin_api_meta_contract_orchestration_flags_reflect_settings_and_no_execution_metadata(monkeypatch):
+    from app.api.admin_v1 import meta_contract
+
+    monkeypatch.setattr(meta_contract.settings, "agent_orchestration_enabled", True)
+    monkeypatch.setattr(meta_contract.settings, "agent_orchestration_allow_monitor_trigger", True)
+
+    response = _get_ok(_client(monkeypatch), "/api/admin/v1/meta")
+    data = response.json()["data"]
+
+    assert data["capabilities"]["orchestration_planning_supported"] is True
+    assert data["capabilities"]["orchestration_enqueue_enabled"] is True
+    assert data["capabilities"]["orchestration_monitor_trigger_enabled"] is True
+
+    serialized = response.text.lower()
+    for forbidden in [
+        "execution_endpoint",
+        "http_method",
+        "absolute_url",
+        "auth_param",
+        "raw_result_json",
+        "raw_payload_json",
+        "provider_payload",
+        "debug_html",
+        "authorization",
+        "cookie",
+        "x-api-key",
+        "bearer",
+    ]:
+        assert forbidden not in serialized
 
 
 def test_admin_api_meta_contract_uses_no_db_dependency(monkeypatch):

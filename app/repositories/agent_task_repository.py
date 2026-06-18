@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.agent_task import ALLOWED_AGENT_TASK_STATUSES, AgentTask
@@ -30,8 +30,28 @@ class AgentTaskRepository:
         context_key: str | None = None,
         payload_json: dict | None = None,
         result_json: dict | None = None,
+        orchestration_run_id: str | None = None,
+        workflow_id: str | None = None,
+        parent_task_id: int | None = None,
+        depends_on_task_id: int | None = None,
+        chain_depth: int | None = None,
+        blocking: bool | None = None,
+        dependency_status: str | None = None,
+        orchestration_status: str | None = None,
     ) -> AgentTask:
         self._validate_status(status)
+        from app.agents.orchestration_metadata import validate_agent_task_orchestration_metadata
+
+        validation = validate_agent_task_orchestration_metadata(
+            workflow_id=workflow_id,
+            parent_task_id=parent_task_id,
+            depends_on_task_id=depends_on_task_id,
+            chain_depth=chain_depth,
+            dependency_status=dependency_status,
+            orchestration_status=orchestration_status,
+        )
+        if not validation.valid:
+            raise ValueError(f"Invalid agent task orchestration metadata: {validation.reason}")
         existing = self.get_by_dedupe_key(dedupe_key)
         if existing is not None:
             return existing
@@ -44,6 +64,14 @@ class AgentTaskRepository:
             listing_analysis_id=listing_analysis_id,
             search_job_id=search_job_id,
             context_key=context_key,
+            orchestration_run_id=orchestration_run_id,
+            workflow_id=workflow_id,
+            parent_task_id=parent_task_id,
+            depends_on_task_id=depends_on_task_id,
+            chain_depth=chain_depth,
+            blocking=blocking,
+            dependency_status=dependency_status,
+            orchestration_status=orchestration_status,
             dedupe_key=dedupe_key,
             payload_json=payload_json or {},
             result_json=result_json or {},
@@ -55,7 +83,10 @@ class AgentTaskRepository:
     def list_pending(self, limit: int, task_type: str | None = None) -> list[AgentTask]:
         if limit <= 0:
             return []
-        stmt = select(AgentTask).where(AgentTask.status == "pending")
+        stmt = select(AgentTask).where(
+            AgentTask.status == "pending",
+            or_(AgentTask.dependency_status.is_(None), AgentTask.dependency_status.in_(("not_applicable", "ready"))),
+        )
         if task_type is not None:
             stmt = stmt.where(AgentTask.task_type == task_type)
         stmt = stmt.order_by(AgentTask.priority.asc(), AgentTask.created_at.asc(), AgentTask.id.asc()).limit(limit)

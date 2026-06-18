@@ -106,8 +106,7 @@ def test_self_reference_validation_is_safe():
     assert validate_agent_task_orchestration_metadata(task_id=7, depends_on_task_id=7).reason == "dependency_task_self_reference"
 
 
-def test_pr38_scope_does_not_add_runtime_orchestration_and_pr38_migration_has_no_artifacts():
-    assert not Path("app/services/agent_orchestrator_service.py").exists()
+def test_pr38_migration_scope_has_no_artifacts_or_score_verdict_columns():
     assert "agent_artifacts" not in Path("alembic/versions/0018_agent_task_orchestration_metadata.py").read_text()
     assert "score" not in Path("alembic/versions/0018_agent_task_orchestration_metadata.py").read_text()
     assert "verdict" not in Path("alembic/versions/0018_agent_task_orchestration_metadata.py").read_text()
