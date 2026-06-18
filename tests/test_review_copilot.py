@@ -151,7 +151,9 @@ def test_unknown_handler_behavior_remains_skipped(db_session):
 
     assert result["skipped"] == 1
     assert task.status == "skipped"
-    assert task.result_json == {"reason": "no_handler_registered", "task_type": "unknown_task_type"}
+    assert task.result_json["reason"] == "unknown_agent_task_type"
+    assert task.result_json["error_type"] == "unknown_agent_task_type"
+    assert task.result_json["task_type"] == "unknown_task_type"
 
 
 def test_review_copilot_disabled_mode_skips_without_provider_call(db_session):

@@ -34,13 +34,42 @@ class NoopAgentTaskHandler:
 
 class MissingAgentTaskHandler:
     def handle(self, task: AgentTask) -> AgentTaskHandlerResult:
+        try:
+            from app.agents.registry import get_agent_task_registry
+
+            registry = get_agent_task_registry()
+            reason = (
+                "agent_handler_not_registered"
+                if task.task_type in registry
+                else "unknown_agent_task_type"
+            )
+        except Exception:
+            reason = "agent_handler_not_registered"
         return AgentTaskHandlerResult(
             status="skipped",
             result_json={
-                "reason": "no_handler_registered",
+                "reason": reason,
+                "error_type": reason,
+                "error_message": "Agent task handler is not registered for this task type.",
                 "task_type": task.task_type,
             },
         )
+
+
+def get_registered_agent_task_handler_names() -> set[str]:
+    from app.agents.data_quality_agent import DATA_QUALITY_AGENT_TASK_TYPE
+    from app.agents.listing_detail_extraction import LISTING_DETAIL_EXTRACTION_TASK_TYPE
+    from app.agents.research_agent import MARKET_RESEARCH_TASK_TYPE
+    from app.agents.review_copilot import REVIEW_COPILOT_TASK_TYPE
+    from app.agents.weekly_strategy_agent import WEEKLY_STRATEGY_AGENT_TASK_TYPE
+
+    return {
+        REVIEW_COPILOT_TASK_TYPE,
+        LISTING_DETAIL_EXTRACTION_TASK_TYPE,
+        DATA_QUALITY_AGENT_TASK_TYPE,
+        MARKET_RESEARCH_TASK_TYPE,
+        WEEKLY_STRATEGY_AGENT_TASK_TYPE,
+    }
 
 
 def build_default_agent_task_handlers(db) -> dict[str, AgentTaskHandler]:
@@ -66,7 +95,7 @@ def build_default_agent_task_handlers(db) -> dict[str, AgentTaskHandler]:
         WeeklyStrategyAgentTaskHandler,
     )
 
-    return {
+    handlers = {
         REVIEW_COPILOT_TASK_TYPE: ReviewCopilotAgentTaskHandler(db),
         LISTING_DETAIL_EXTRACTION_TASK_TYPE: ListingDetailExtractionAgentTaskHandler(
             db
@@ -75,6 +104,8 @@ def build_default_agent_task_handlers(db) -> dict[str, AgentTaskHandler]:
         MARKET_RESEARCH_TASK_TYPE: ResearchAgentTaskHandler(db),
         WEEKLY_STRATEGY_AGENT_TASK_TYPE: WeeklyStrategyAgentTaskHandler(db),
     }
+    assert set(handlers) == get_registered_agent_task_handler_names()
+    return handlers
 
 
 class AgentTaskRunner:

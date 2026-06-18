@@ -245,10 +245,9 @@ def test_agent_task_runner_missing_handler_skips_unregistered_task_type(db_sessi
     assert result["succeeded"] == 0
     assert result["skipped"] == 1
     assert task.status == "skipped"
-    assert task.result_json == {
-        "reason": "no_handler_registered",
-        "task_type": "unregistered_task",
-    }
+    assert task.result_json["reason"] == "unknown_agent_task_type"
+    assert task.result_json["error_type"] == "unknown_agent_task_type"
+    assert task.result_json["task_type"] == "unregistered_task"
 
 
 def test_agent_task_runner_filters_by_task_type(db_session):
@@ -349,10 +348,9 @@ def test_cli_run_agent_tasks_skips_task_without_registered_handler(db_session, m
     assert output["succeeded"] == 0
     assert output["skipped"] == 1
     assert task.status == "skipped"
-    assert task.result_json == {
-        "reason": "no_handler_registered",
-        "task_type": "unregistered_task",
-    }
+    assert task.result_json["reason"] == "unknown_agent_task_type"
+    assert task.result_json["error_type"] == "unknown_agent_task_type"
+    assert task.result_json["task_type"] == "unregistered_task"
 
 
 def test_cli_run_agent_tasks_rejects_non_positive_limit(db_session, monkeypatch, capsys):
