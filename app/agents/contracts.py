@@ -82,7 +82,7 @@ class AgentTaskContract:
     safety_category: AgentSafetyCategory
     blocking: bool
     declared_side_effects: tuple[AgentSideEffect, ...]
-    required_capabilities: tuple[str, ...]
+    required_permission_refs: tuple[str, ...]
     timeout_policy: AgentTimeoutPolicy
     retry_policy: AgentRetryPolicy
     dedupe_policy: AgentDedupePolicy
@@ -103,7 +103,7 @@ class AgentWorkflowContract:
     implemented: bool
     max_chain_depth: int
     blocking_policy: str
-    required_capabilities: tuple[str, ...]
+    required_permission_refs: tuple[str, ...]
     limitations: tuple[str, ...]
 
 

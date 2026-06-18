@@ -1,6 +1,6 @@
 # Agent task contracts and governance registry (PR37)
 
-PR37 adds a passive governance layer for the existing one-shot `AgentTask` runtime. It catalogs task types, task classes, safety categories, declared side-effect metadata, capability metadata, output schema metadata, policy metadata, and future workflow skeletons before later orchestration PRs add dependency graphs or runtime orchestration.
+PR37 adds a passive governance layer for the existing one-shot `AgentTask` runtime. It catalogs task types, task classes, safety categories, declared side-effect metadata, permission-reference metadata, output schema metadata, policy metadata, and future workflow skeletons before later orchestration PRs add dependency graphs or runtime orchestration.
 
 Codex checkout note: this environment did not expose local `main` or `origin/main`, so the prerequisite was verified by fallback inspection of the current branch. The current checkout includes the expected PR29-PR36 foundation: Admin API v1, meta/capability/enums/errors contract, listing/review queue read APIs, derived workflow state/allowed actions, Decision Card, Risk Attention, Readiness Checklist, Price Position, and the existing `AgentTaskRunner` plus current handlers. The final reviewer must still verify base branch, PR36 merge status, and CI against `main` in GitHub.
 
@@ -79,20 +79,9 @@ Allowed metadata values are:
 
 `write_agent_artifact_future` and `rag_write_future` are future-only metadata and do not execute in PR37.
 
-## Capability metadata
+## Permission-reference metadata
 
-Contracts use `required_capabilities: list[str]` as metadata only. PR37 does not create `AgentPermission`, roles, write endpoints, or a second permission evaluator. The existing Admin API meta/access layer remains the source of truth for permissions, roles, capabilities, labels, and errors.
-
-Suggested strings used by contracts include:
-
-- `agent_task.read`
-- `agent_task.run_manual`
-- `agent_task.run_research`
-- `agent_task.run_extraction`
-- `agent_task.run_governance`
-- `agent_task.view_redacted_result`
-
-These strings do not grant access by themselves.
+Contracts use `required_permission_refs: list[str]` as metadata only. Every value must reference an existing PR30 Admin API permission id from the current meta contract, such as `api.meta.read`, `api.review_queue.read`, or `api.listing_analyses.read`. PR37 does not create `AgentPermission`, new `agent_task.*` capability strings, roles, write endpoints, or a second permission evaluator. The existing Admin API meta/access layer remains the source of truth for permissions, roles, capabilities, labels, and errors. These refs do not grant access by themselves.
 
 ## Timeout, retry, dedupe, and redaction policies
 

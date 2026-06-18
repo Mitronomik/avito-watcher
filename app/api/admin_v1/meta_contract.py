@@ -354,7 +354,7 @@ def build_meta_contract() -> dict[str, Any]:
                     "handler_required": contract.handler_required,
                     "safety_category": contract.safety_category.value,
                     "blocking": contract.blocking,
-                    "required_capabilities": list(contract.required_capabilities),
+                    "required_permission_refs": list(contract.required_permission_refs),
                     "legacy_compatibility": contract.legacy_compatibility,
                     "legacy_semantic_label": contract.legacy_semantic_label,
                     "limitations": list(contract.limitations),
@@ -369,7 +369,7 @@ def build_meta_contract() -> dict[str, Any]:
                     "task_classes": [item.value for item in workflow.task_classes],
                     "max_chain_depth": workflow.max_chain_depth,
                     "blocking_policy": workflow.blocking_policy,
-                    "required_capabilities": list(workflow.required_capabilities),
+                    "required_permission_refs": list(workflow.required_permission_refs),
                     "limitations": list(workflow.limitations),
                 }
                 for workflow_id, workflow in agent_workflow_registry.items()

@@ -4,7 +4,9 @@ from dataclasses import asdict
 
 from app.agents.contracts import AgentSafetyCategory, AgentSideEffect, AgentTaskClass
 from app.agents.registry import get_agent_task_registry, get_agent_workflow_registry
+from app.api.admin_v1.meta_contract import PERMISSION_IDS
 from app.core.config import settings
+from app.services import agent_task_runner
 from app.services.agent_task_runner import get_registered_agent_task_handler_names
 
 FORBIDDEN_TEXT = (
@@ -39,7 +41,8 @@ def test_agent_task_registry_loads_and_is_deterministic():
         assert contract.retry_policy.max_retries >= 0
         assert contract.dedupe_policy.dedupe_required is True
         assert contract.redaction_policy.canonical_helper == "app.api.admin_v1.redaction.redact_api_response"
-        assert contract.required_capabilities
+        assert contract.required_permission_refs
+        assert not any(ref.startswith("agent_task.") for ref in contract.required_permission_refs)
         assert contract.declared_side_effects
         assert all(side_effect in AgentSideEffect for side_effect in contract.declared_side_effects)
         assert contract.output_schema["metadata_only"] is True
@@ -63,6 +66,35 @@ def test_implemented_flags_match_actual_registered_handlers():
             assert contract.handler_name is None
             assert contract.handler_required is False
             assert "handler_not_present_in_current_codebase" in contract.limitations
+
+
+def test_permission_refs_reuse_existing_pr30_permission_registry():
+    registry = get_agent_task_registry()
+    workflows = get_agent_workflow_registry()
+    known_permissions = set(PERMISSION_IDS)
+
+    for contract in registry.values():
+        assert set(contract.required_permission_refs) <= known_permissions
+        assert not any(ref.startswith("agent_task.") for ref in contract.required_permission_refs)
+
+    for workflow in workflows.values():
+        assert set(workflow.required_permission_refs) <= known_permissions
+        assert not any(ref.startswith("agent_task.") for ref in workflow.required_permission_refs)
+
+
+def test_handler_discovery_skips_absent_optional_modules(monkeypatch):
+    real_import_module = agent_task_runner.import_module
+
+    def fake_import_module(module_name: str):
+        if module_name == "app.agents.weekly_strategy_agent":
+            raise ModuleNotFoundError("No module named 'app.agents.weekly_strategy_agent'", name=module_name)
+        return real_import_module(module_name)
+
+    monkeypatch.setattr(agent_task_runner, "import_module", fake_import_module)
+
+    handlers = get_registered_agent_task_handler_names()
+    assert "weekly_strategy_agent" not in handlers
+    assert "review_copilot" in handlers
 
 
 def test_data_quality_agent_legacy_mapping_not_pr43_data_gap_agent():
@@ -98,9 +130,10 @@ def test_workflow_registry_is_skeleton_only_and_safe_flags_default_off():
     assert settings.agent_orchestration_default_timeout_sec == 120
 
 
-def test_declared_side_effects_are_metadata_only_not_permission_grants():
+def test_declared_side_effects_and_permission_refs_are_metadata_only():
     registry = get_agent_task_registry()
     for contract in registry.values():
         assert not hasattr(contract, "allowed_side_effects")
+        assert not hasattr(contract, "required_capabilities")
         assert "permission" not in contract.redaction_policy.source
         assert "authorization" not in contract.dedupe_policy.source
