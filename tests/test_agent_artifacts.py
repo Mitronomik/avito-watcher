@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import json
+
 import pytest
 from sqlalchemy import select
 
@@ -10,6 +12,7 @@ from app.models.agent_task import AgentTask
 from app.services.agent_artifact_service import (
     AGENT_ARTIFACT_DTO_VERSION,
     AGENT_ARTIFACT_SCHEMA_VERSION,
+    MAX_PREVIEW_CHARS,
     AgentArtifactValidationError,
     compute_agent_artifact_content_hash,
     compute_agent_artifact_input_hash,
@@ -92,10 +95,10 @@ def test_create_append_only_duplicate_detection_and_latest(db_session):
     db_session.flush()
     first = create_agent_artifact(db_session, artifact_type="evidence_candidates", schema_version=AGENT_ARTIFACT_SCHEMA_VERSION, input_hash="input-a", content_hash=content_hash, payload_json=payload(), source_refs_json=[{"agent_task_id": task.id}], redaction_status="not_required", listing_external_id="ext-1", context_key="ctx", source_task_id=task.id)
     db_session.flush()
-    duplicate = find_duplicate_agent_artifact(db_session, artifact_type="evidence_candidates", content_hash=content_hash, listing_external_id="ext-1", context_key="ctx", source_task_id=task.id)
-    assert duplicate.id == first.id
     second = create_agent_artifact(db_session, artifact_type="evidence_candidates", schema_version=AGENT_ARTIFACT_SCHEMA_VERSION, input_hash="input-b", content_hash=content_hash, payload_json=payload(), source_refs_json=[], redaction_status="not_required", listing_external_id="ext-1", context_key="ctx", source_task_id=task.id)
     assert second.id != first.id
+    duplicate = find_duplicate_agent_artifact(db_session, artifact_type="evidence_candidates", content_hash=content_hash, listing_external_id="ext-1", context_key="ctx", source_task_id=task.id)
+    assert duplicate.id in {first.id, second.id}
     assert len(db_session.scalars(select(AgentArtifact)).all()) == 2
     first.created_at = datetime(2026, 1, 1)
     second.created_at = datetime(2026, 1, 2)
@@ -134,6 +137,8 @@ def test_serialization_redaction_preview_bounds_and_forbidden_keys_absent(db_ses
     assert dto["payload_available"] is True
     assert len(dto["payload_preview"]["items"]) == 5
     assert len(dto["payload_preview"]["items"][0]["text"]) == 300
+    encoded = json.dumps(dto["payload_preview"], ensure_ascii=False, sort_keys=True)
+    assert len(encoded) <= MAX_PREVIEW_CHARS
     forbidden = {"execution_endpoint", "http_method", "absolute_url", "auth_param", "raw_result_json", "raw_payload_json", "provider_payload", "debug_html", "payload_json"}
     assert forbidden.isdisjoint(dto)
     artifact.redaction_status = "blocked"
@@ -141,6 +146,26 @@ def test_serialization_redaction_preview_bounds_and_forbidden_keys_absent(db_ses
     assert blocked["payload_preview"] is None
     assert blocked["payload_available"] is False
     assert "safe_payload_json" not in blocked
+
+
+def test_oversized_payload_preview_compacts_to_total_char_limit(db_session):
+    safe = payload(
+        summary="s" * 500,
+        items=[{f"key_{idx}": "x" * 500 for idx in range(8)} for _ in range(20)],
+        limitations=["not_investment_advice", "not_certified_appraisal", "not_valuation_report"],
+        notes=["n" * 500 for _ in range(20)],
+        metadata={f"meta_{idx}": "m" * 500 for idx in range(20)},
+    )
+    artifact = AgentArtifact(artifact_type="evidence_candidates", schema_version=AGENT_ARTIFACT_SCHEMA_VERSION, input_hash="i", content_hash="c", payload_json=safe, source_refs_json=[], redaction_status="not_required")
+    db_session.add(artifact)
+    db_session.flush()
+
+    dto = serialize_agent_artifact(artifact)
+    encoded = json.dumps(dto["payload_preview"], ensure_ascii=False, sort_keys=True)
+
+    assert len(encoded) <= MAX_PREVIEW_CHARS
+    assert "payload_preview_truncated" in dto["payload_preview"].get("limitations", [])
+    assert "payload_json" not in dto
 
 
 def test_admin_agent_artifacts_read_endpoints_auth_redaction_and_no_mutation(monkeypatch):
@@ -189,6 +214,9 @@ def test_admin_agent_artifacts_read_endpoints_auth_redaction_and_no_mutation(mon
     assert detail_body["data"]["safe_payload_json"]["summary"] == "safe summary"
     missing = client.get("/api/admin/v1/agent-artifacts/999", headers={"X-API-Key": "read"})
     assert missing.status_code == 404
+    missing_body = missing.json()
+    assert missing_body["ok"] is False
+    assert missing_body["error"]["code"] == "not_found"
 
     with Session() as s:
         after = s.scalar(select(func.count()).select_from(AgentArtifact))

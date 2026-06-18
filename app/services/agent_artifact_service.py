@@ -111,17 +111,13 @@ def compute_agent_artifact_content_hash(*, artifact_type: str, schema_version: s
     return hashlib.sha256(canonicalize_agent_artifact_payload(envelope).encode("utf-8")).hexdigest()
 
 
-def create_agent_artifact(db: Session, *, artifact_type: str, schema_version: str, input_hash: str, content_hash: str, payload_json: dict[str, Any], source_refs_json: list[dict[str, Any]] | dict[str, Any], redaction_status: str, listing_external_id: str | None = None, listing_analysis_id: int | None = None, search_job_id: int | None = None, context_key: str | None = None, source_task_id: int | None = None, orchestration_run_id: str | None = None, dedupe: bool = False) -> AgentArtifact:
+def create_agent_artifact(db: Session, *, artifact_type: str, schema_version: str, input_hash: str, content_hash: str, payload_json: dict[str, Any], source_refs_json: list[dict[str, Any]] | dict[str, Any], redaction_status: str, listing_external_id: str | None = None, listing_analysis_id: int | None = None, search_job_id: int | None = None, context_key: str | None = None, source_task_id: int | None = None, orchestration_run_id: str | None = None) -> AgentArtifact:
     if redaction_status not in AGENT_ARTIFACT_REDACTION_STATUSES:
         raise AgentArtifactValidationError("unknown redaction_status")
     _validate_non_empty(input_hash, "input_hash")
     _validate_non_empty(content_hash, "content_hash")
     validate_agent_artifact_payload(payload_json, artifact_type=artifact_type, schema_version=schema_version)
     validate_agent_artifact_source_refs(source_refs_json)
-    if dedupe:
-        existing = find_duplicate_agent_artifact(db, artifact_type=artifact_type, content_hash=content_hash, listing_external_id=listing_external_id, context_key=context_key, source_task_id=source_task_id)
-        if existing is not None:
-            return existing
     artifact = AgentArtifact(artifact_type=artifact_type, schema_version=schema_version, input_hash=input_hash, content_hash=content_hash, payload_json=payload_json, source_refs_json=source_refs_json, redaction_status=redaction_status, listing_external_id=listing_external_id, listing_analysis_id=listing_analysis_id, search_job_id=search_job_id, context_key=context_key, source_task_id=source_task_id, orchestration_run_id=orchestration_run_id)
     db.add(artifact)
     db.flush()
@@ -175,9 +171,22 @@ def _safe_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def _preview(payload: dict[str, Any]) -> dict[str, Any]:
     preview = _safe_payload(payload)
     encoded = json.dumps(preview, ensure_ascii=False, sort_keys=True)
-    if len(encoded) > MAX_PREVIEW_CHARS:
-        preview["limitations"] = list(preview.get("limitations") or [])[:MAX_PREVIEW_ITEMS] + ["payload_preview_truncated"]
-    return preview
+    if len(encoded) <= MAX_PREVIEW_CHARS:
+        return preview
+
+    compact: dict[str, Any] = {
+        "schema_version": preview.get("schema_version"),
+        "artifact_type": preview.get("artifact_type"),
+        "result_kind": preview.get("result_kind"),
+        "summary": preview.get("summary"),
+        "limitations": list(preview.get("limitations") or [])[:MAX_PREVIEW_ITEMS] + ["payload_preview_truncated"],
+    }
+    while len(json.dumps(compact, ensure_ascii=False, sort_keys=True)) > MAX_PREVIEW_CHARS and compact["limitations"]:
+        compact["limitations"] = compact["limitations"][:-1]
+    if len(json.dumps(compact, ensure_ascii=False, sort_keys=True)) > MAX_PREVIEW_CHARS:
+        compact["summary"] = None
+        compact["limitations"] = ["payload_preview_truncated"]
+    return compact
 
 
 def serialize_agent_artifact(artifact: AgentArtifact, *, include_payload: bool = False) -> dict[str, Any]:

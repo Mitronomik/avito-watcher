@@ -95,3 +95,31 @@ def test_pr38_migration_has_upgrade_and_downgrade_and_expected_operations():
         assert f'op.drop_constraint("{name}"' in migration
     for name in columns:
         assert f'op.drop_column("agent_tasks", "{name}")' in migration
+
+
+def test_agent_artifacts_migration_file_contains_required_constraints_indexes_and_downgrade():
+    text = Path("alembic/versions/0019_agent_artifacts.py").read_text(encoding="utf-8")
+    required = [
+        'op.create_table(\n        "agent_artifacts"',
+        "ck_agent_artifacts_artifact_type",
+        "ck_agent_artifacts_redaction_status",
+        "ck_agent_artifacts_input_hash_not_empty",
+        "ck_agent_artifacts_content_hash_not_empty",
+        "ck_agent_artifacts_schema_version_not_empty",
+        "ix_agent_artifacts_artifact_type",
+        "ix_agent_artifacts_listing_external_id",
+        "ix_agent_artifacts_listing_analysis_id",
+        "ix_agent_artifacts_search_job_id",
+        "ix_agent_artifacts_context_key",
+        "ix_agent_artifacts_source_task_id",
+        "ix_agent_artifacts_orchestration_run_id",
+        "ix_agent_artifacts_input_hash",
+        "ix_agent_artifacts_content_hash",
+        "ix_agent_artifacts_created_at",
+        "ix_agent_artifacts_context_latest",
+        'sa.ForeignKey("agent_tasks.id")',
+        "op.drop_index",
+        'op.drop_table("agent_artifacts")',
+    ]
+    for expected in required:
+        assert expected in text
