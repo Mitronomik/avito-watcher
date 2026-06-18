@@ -31,7 +31,11 @@ from app.agents.contracts import (
     AgentTaskClass,
 )
 from app.agents.registry import get_agent_task_registry, get_agent_workflow_registry
-from app.models.agent_task import ALLOWED_AGENT_TASK_STATUSES
+from app.models.agent_task import (
+    AGENT_TASK_DEPENDENCY_STATUSES,
+    AGENT_TASK_ORCHESTRATION_STATUSES,
+    ALLOWED_AGENT_TASK_STATUSES,
+)
 from app.models.human_review import HUMAN_VERDICTS, NEXT_ACTIONS, OUTCOME_STATUSES, REVIEW_STATUSES
 
 META_CONTRACT_VERSION = "v1"
@@ -89,6 +93,22 @@ LABELS: dict[str, dict[str, dict[str, str]]] = {
         "review": _text("На проверку", "Review"),
     },
     "roles": ROLE_LABELS,
+
+    "agent_task_dependency_status": {
+        "not_applicable": _text("Не применяется", "Not applicable"),
+        "waiting": _text("Ожидает", "Waiting"),
+        "ready": _text("Готово", "Ready"),
+        "blocked": _text("Заблокировано", "Blocked"),
+    },
+    "agent_task_orchestration_status": {
+        "not_applicable": _text("Не применяется", "Not applicable"),
+        "queued": _text("В очереди", "Queued"),
+        "running": _text("Выполняется", "Running"),
+        "completed": _text("Завершено", "Completed"),
+        "failed": _text("Ошибка", "Failed"),
+        "skipped": _text("Пропущено", "Skipped"),
+        "blocked": _text("Заблокировано", "Blocked"),
+    },
     "review_status": {
         "new": _text("Новый", "New"),
         "needs_review": _text("Нужна проверка", "Needs review"),
@@ -252,6 +272,21 @@ ENUM_LABELS: dict[str, dict[str, dict[str, str]]] = {
         "skipped": _text("Пропущено", "Skipped"),
         "success": _text("Успешно", "Success"),
     },
+    "agent_task_dependency_status": {
+        "not_applicable": _text("Не применяется", "Not applicable"),
+        "waiting": _text("Ожидает", "Waiting"),
+        "ready": _text("Готово", "Ready"),
+        "blocked": _text("Заблокировано", "Blocked"),
+    },
+    "agent_task_orchestration_status": {
+        "not_applicable": _text("Не применяется", "Not applicable"),
+        "queued": _text("В очереди", "Queued"),
+        "running": _text("Выполняется", "Running"),
+        "completed": _text("Завершено", "Completed"),
+        "failed": _text("Ошибка", "Failed"),
+        "skipped": _text("Пропущено", "Skipped"),
+        "blocked": _text("Заблокировано", "Blocked"),
+    },
     "source_type": {
         "asking": _text("Цена предложения", "Asking"),
         "confirmed": _text("Подтверждено", "Confirmed"),
@@ -314,6 +349,8 @@ def build_meta_contract() -> dict[str, Any]:
             "next_action": _enum("next_action", NEXT_ACTIONS),
             "outcome_status": _enum("outcome_status", OUTCOME_STATUSES),
             "agent_task_status": _enum("agent_task_status", ALLOWED_AGENT_TASK_STATUSES),
+            "agent_task_dependency_status": _enum("agent_task_dependency_status", AGENT_TASK_DEPENDENCY_STATUSES),
+            "agent_task_orchestration_status": _enum("agent_task_orchestration_status", AGENT_TASK_ORCHESTRATION_STATUSES),
             "source_type": _enum("source_type", ALLOWED_SOURCE_TYPES),
             "verification_status": _enum("verification_status", ALLOWED_VERIFICATION_STATUSES),
             "workflow_state": _enum("workflow_state", WORKFLOW_STATES),

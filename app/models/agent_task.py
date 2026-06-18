@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import CheckConstraint, DateTime, Integer, JSON, String, Text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -14,6 +14,23 @@ ALLOWED_AGENT_TASK_STATUSES = {
     "canceled",
     "skipped",
 }
+
+AGENT_TASK_DEPENDENCY_STATUSES = (
+    "not_applicable",
+    "waiting",
+    "ready",
+    "blocked",
+)
+
+AGENT_TASK_ORCHESTRATION_STATUSES = (
+    "not_applicable",
+    "queued",
+    "running",
+    "completed",
+    "failed",
+    "skipped",
+    "blocked",
+)
 
 
 def _now() -> datetime:
@@ -37,6 +54,14 @@ class AgentTask(Base):
     listing_analysis_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     search_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     context_key: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    orchestration_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    workflow_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    parent_task_id: Mapped[int | None] = mapped_column(ForeignKey("agent_tasks.id"), nullable=True, index=True)
+    depends_on_task_id: Mapped[int | None] = mapped_column(ForeignKey("agent_tasks.id"), nullable=True, index=True)
+    chain_depth: Mapped[int | None] = mapped_column(Integer, nullable=True, default=0)
+    blocking: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
+    dependency_status: Mapped[str | None] = mapped_column(String(32), nullable=True, default="not_applicable", index=True)
+    orchestration_status: Mapped[str | None] = mapped_column(String(32), nullable=True, default="not_applicable", index=True)
     dedupe_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
     result_json: Mapped[dict] = mapped_column(JSON, default=dict)

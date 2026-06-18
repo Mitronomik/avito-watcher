@@ -3,6 +3,7 @@ import subprocess
 import uuid
 
 import pytest
+from pathlib import Path
 from sqlalchemy.engine import make_url
 
 
@@ -47,3 +48,20 @@ def test_alembic_upgrade_head_passes_on_postgresql():
                 (test_database,),
             )
             conn.execute(f'DROP DATABASE IF EXISTS "{test_database}"')
+
+
+def test_pr38_migration_has_upgrade_and_downgrade_and_expected_columns():
+    migration = Path("alembic/versions/0018_agent_task_orchestration_metadata.py").read_text()
+    assert "def upgrade()" in migration
+    assert "def downgrade()" in migration
+    for name in (
+        "orchestration_run_id",
+        "workflow_id",
+        "parent_task_id",
+        "depends_on_task_id",
+        "chain_depth",
+        "blocking",
+        "dependency_status",
+        "orchestration_status",
+    ):
+        assert name in migration

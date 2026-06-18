@@ -82,7 +82,7 @@ def test_admin_api_meta_contract_shape_permissions_and_determinism(monkeypatch):
     assert data["permissions"][PERMISSION_ADMIN_HUMAN_REVIEW_WRITE]["available_now"] is False
     assert data["permissions"][PERMISSION_ADMIN_TECHNICAL_ACTIONS_WRITE]["roles"]["technical"] is True
     assert data["permissions"][PERMISSION_ADMIN_TECHNICAL_ACTIONS_WRITE]["available_now"] is False
-    assert {"review_status", "human_verdict", "next_action", "outcome_status", "agent_task_status", "source_type", "verification_status", "workflow_state", "workflow_action", "decision_recommendation", "risk_category", "risk_severity", "readiness_status", "readiness_item_status", "readiness_group", "readiness_item_id", "price_position_code", "price_position_confidence", "price_position_location_basis", "price_position_chart_reason", "price_position_metric", "price_position_range_basis"} == set(data["enums"])
+    assert {"review_status", "human_verdict", "next_action", "outcome_status", "agent_task_status", "agent_task_dependency_status", "agent_task_orchestration_status", "source_type", "verification_status", "workflow_state", "workflow_action", "decision_recommendation", "risk_category", "risk_severity", "readiness_status", "readiness_item_status", "readiness_group", "readiness_item_id", "price_position_code", "price_position_confidence", "price_position_location_basis", "price_position_chart_reason", "price_position_metric", "price_position_range_basis"} == set(data["enums"])
     assert "success" in {item["value"] for item in data["enums"]["agent_task_status"]["values"]}
     assert "succeeded" not in {item["value"] for item in data["enums"]["agent_task_status"]["values"]}
     for enum in data["enums"].values():
