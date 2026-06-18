@@ -17,6 +17,22 @@ class AgentTaskOrchestrationMetadataValidation:
     reason: str = "ok"
 
 
+def effective_chain_depth(task: AgentTask) -> int:
+    return task.chain_depth if task.chain_depth is not None else 0
+
+
+def effective_blocking(task: AgentTask) -> bool:
+    return task.blocking if task.blocking is not None else False
+
+
+def effective_dependency_status(task: AgentTask) -> str:
+    return task.dependency_status or "not_applicable"
+
+
+def effective_orchestration_status(task: AgentTask) -> str:
+    return task.orchestration_status or "not_applicable"
+
+
 def validate_agent_task_orchestration_metadata(
     *,
     task: AgentTask | None = None,

@@ -1,6 +1,6 @@
 """add agent task orchestration metadata
 
-Revision ID: 0018_agent_task_orchestration_metadata
+Revision ID: 0018_agent_task_orch_meta
 Revises: 0017_admin_audit_events
 Create Date: 2026-06-18
 """
@@ -9,7 +9,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0018_agent_task_orchestration_metadata"
+revision = "0018_agent_task_orch_meta"
 down_revision = "0017_admin_audit_events"
 branch_labels = None
 depends_on = None
@@ -26,6 +26,31 @@ def upgrade() -> None:
     op.add_column("agent_tasks", sa.Column("orchestration_status", sa.String(length=32), nullable=True))
     op.create_foreign_key("fk_agent_tasks_parent_task_id", "agent_tasks", "agent_tasks", ["parent_task_id"], ["id"])
     op.create_foreign_key("fk_agent_tasks_depends_on_task_id", "agent_tasks", "agent_tasks", ["depends_on_task_id"], ["id"])
+    op.create_check_constraint(
+        "ck_agent_tasks_dependency_status",
+        "agent_tasks",
+        "dependency_status IS NULL OR dependency_status IN ('not_applicable', 'waiting', 'ready', 'blocked')",
+    )
+    op.create_check_constraint(
+        "ck_agent_tasks_orchestration_status",
+        "agent_tasks",
+        "orchestration_status IS NULL OR orchestration_status IN ('not_applicable', 'queued', 'running', 'completed', 'failed', 'skipped', 'blocked')",
+    )
+    op.create_check_constraint(
+        "ck_agent_tasks_chain_depth_non_negative",
+        "agent_tasks",
+        "chain_depth IS NULL OR chain_depth >= 0",
+    )
+    op.create_check_constraint(
+        "ck_agent_tasks_parent_not_self",
+        "agent_tasks",
+        "parent_task_id IS NULL OR parent_task_id <> id",
+    )
+    op.create_check_constraint(
+        "ck_agent_tasks_dependency_not_self",
+        "agent_tasks",
+        "depends_on_task_id IS NULL OR depends_on_task_id <> id",
+    )
     op.create_index("ix_agent_tasks_orchestration_run_id", "agent_tasks", ["orchestration_run_id"])
     op.create_index("ix_agent_tasks_workflow_id", "agent_tasks", ["workflow_id"])
     op.create_index("ix_agent_tasks_parent_task_id", "agent_tasks", ["parent_task_id"])
@@ -41,6 +66,11 @@ def downgrade() -> None:
     op.drop_index("ix_agent_tasks_parent_task_id", table_name="agent_tasks")
     op.drop_index("ix_agent_tasks_workflow_id", table_name="agent_tasks")
     op.drop_index("ix_agent_tasks_orchestration_run_id", table_name="agent_tasks")
+    op.drop_constraint("ck_agent_tasks_dependency_not_self", "agent_tasks", type_="check")
+    op.drop_constraint("ck_agent_tasks_parent_not_self", "agent_tasks", type_="check")
+    op.drop_constraint("ck_agent_tasks_chain_depth_non_negative", "agent_tasks", type_="check")
+    op.drop_constraint("ck_agent_tasks_orchestration_status", "agent_tasks", type_="check")
+    op.drop_constraint("ck_agent_tasks_dependency_status", "agent_tasks", type_="check")
     op.drop_constraint("fk_agent_tasks_depends_on_task_id", "agent_tasks", type_="foreignkey")
     op.drop_constraint("fk_agent_tasks_parent_task_id", "agent_tasks", type_="foreignkey")
     op.drop_column("agent_tasks", "orchestration_status")

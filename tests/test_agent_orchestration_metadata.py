@@ -2,7 +2,13 @@ from pathlib import Path
 
 from sqlalchemy import inspect
 
-from app.agents.orchestration_metadata import validate_agent_task_orchestration_metadata
+from app.agents.orchestration_metadata import (
+    effective_blocking,
+    effective_chain_depth,
+    effective_dependency_status,
+    effective_orchestration_status,
+    validate_agent_task_orchestration_metadata,
+)
 from app.agents.registry import get_agent_workflow_registry
 from app.models.agent_task import (
     AGENT_TASK_DEPENDENCY_STATUSES,
@@ -33,10 +39,14 @@ def test_agent_task_orchestration_fields_exist_and_defaults_are_backward_compati
     assert task.workflow_id is None
     assert task.parent_task_id is None
     assert task.depends_on_task_id is None
-    assert task.chain_depth == 0
-    assert task.blocking is False
-    assert task.dependency_status == "not_applicable"
-    assert task.orchestration_status == "not_applicable"
+    assert task.chain_depth is None
+    assert task.blocking is None
+    assert task.dependency_status is None
+    assert task.orchestration_status is None
+    assert effective_chain_depth(task) == 0
+    assert effective_blocking(task) is False
+    assert effective_dependency_status(task) == "not_applicable"
+    assert effective_orchestration_status(task) == "not_applicable"
 
 
 def test_agent_task_can_store_safe_orchestration_metadata(db_session):

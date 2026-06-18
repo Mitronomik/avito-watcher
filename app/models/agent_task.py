@@ -44,6 +44,26 @@ class AgentTask(Base):
             "status IN ('pending', 'running', 'success', 'failed', 'canceled', 'skipped')",
             name="ck_agent_tasks_status",
         ),
+        CheckConstraint(
+            "dependency_status IS NULL OR dependency_status IN ('not_applicable', 'waiting', 'ready', 'blocked')",
+            name="ck_agent_tasks_dependency_status",
+        ),
+        CheckConstraint(
+            "orchestration_status IS NULL OR orchestration_status IN ('not_applicable', 'queued', 'running', 'completed', 'failed', 'skipped', 'blocked')",
+            name="ck_agent_tasks_orchestration_status",
+        ),
+        CheckConstraint(
+            "chain_depth IS NULL OR chain_depth >= 0",
+            name="ck_agent_tasks_chain_depth_non_negative",
+        ),
+        CheckConstraint(
+            "parent_task_id IS NULL OR parent_task_id <> id",
+            name="ck_agent_tasks_parent_not_self",
+        ),
+        CheckConstraint(
+            "depends_on_task_id IS NULL OR depends_on_task_id <> id",
+            name="ck_agent_tasks_dependency_not_self",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -58,10 +78,10 @@ class AgentTask(Base):
     workflow_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     parent_task_id: Mapped[int | None] = mapped_column(ForeignKey("agent_tasks.id"), nullable=True, index=True)
     depends_on_task_id: Mapped[int | None] = mapped_column(ForeignKey("agent_tasks.id"), nullable=True, index=True)
-    chain_depth: Mapped[int | None] = mapped_column(Integer, nullable=True, default=0)
-    blocking: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
-    dependency_status: Mapped[str | None] = mapped_column(String(32), nullable=True, default="not_applicable", index=True)
-    orchestration_status: Mapped[str | None] = mapped_column(String(32), nullable=True, default="not_applicable", index=True)
+    chain_depth: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    blocking: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    dependency_status: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    orchestration_status: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     dedupe_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
     result_json: Mapped[dict] = mapped_column(JSON, default=dict)

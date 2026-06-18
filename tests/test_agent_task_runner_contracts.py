@@ -105,6 +105,7 @@ def test_unknown_workflow_id_does_not_break_runner(db_session):
     db_session.refresh(task)
     assert result["succeeded"] == 1
     assert task.status == "success"
+    assert task.orchestration_status is None
 
 
 def test_depends_on_task_id_does_not_enforce_runtime_dependency_or_create_tasks(db_session):
@@ -118,4 +119,5 @@ def test_depends_on_task_id_does_not_enforce_runtime_dependency_or_create_tasks(
 
     assert result["succeeded"] == 2
     assert task.status == "success"
+    assert task.orchestration_status is None
     assert db_session.scalar(select(func.count()).select_from(AgentTask)) == 2
