@@ -58,6 +58,49 @@ def test_validation_rejects_unknown_task_cycle_and_caps(monkeypatch):
     assert svc.validate_blueprint(workflow_id="listing_evidence_pipeline").reason == "max_tasks_per_listing_exceeded"
 
 
+
+def test_root_dedupe_key_contract_is_deterministic_and_excludes_run_id():
+    svc = AgentOrchestratorService()
+    base = svc._payload(
+        "listing_evidence_pipeline",
+        "evidence_collector",
+        "evidence_collector_future",
+        "listing-1",
+        10,
+        20,
+        "ctx",
+        {"seed": "a"},
+    )
+    same = svc._payload(
+        "listing_evidence_pipeline",
+        "evidence_collector",
+        "evidence_collector_future",
+        "listing-1",
+        10,
+        20,
+        "ctx",
+        {"seed": "a"},
+    )
+
+    key = svc._dedupe_key(base)
+    assert key == svc._dedupe_key(same)
+    assert key.startswith("orchestration:listing_evidence_pipeline:listing-1:ctx:evidence_collector:")
+    assert "orchestration_run_id" not in base
+    assert "orch_" not in key
+
+    variants = [
+        svc._payload("report_safety_pipeline", "evidence_collector", "evidence_collector_future", "listing-1", 10, 20, "ctx", {"seed": "a"}),
+        svc._payload("listing_evidence_pipeline", "evidence_collector", "evidence_collector_future", "listing-2", 10, 20, "ctx", {"seed": "a"}),
+        svc._payload("listing_evidence_pipeline", "evidence_collector", "evidence_collector_future", "listing-1", 10, 20, "ctx-2", {"seed": "a"}),
+        svc._payload("listing_evidence_pipeline", "evidence_normalizer", "evidence_collector_future", "listing-1", 10, 20, "ctx", {"seed": "a"}),
+        svc._payload("listing_evidence_pipeline", "evidence_collector", "evidence_collector_future", "listing-1", 10, 20, "ctx", {"seed": "b"}),
+    ]
+    assert all(svc._dedupe_key(variant) != key for variant in variants)
+    assert svc._dedupe_key(svc._payload("listing_evidence_pipeline", "evidence_collector", "evidence_collector_future", None, 10, 20, None, {})).startswith(
+        "orchestration:listing_evidence_pipeline:none:none:evidence_collector:"
+    )
+
+
 def test_dry_run_and_disabled_enqueue_create_no_rows(db_session, monkeypatch):
     svc = AgentOrchestratorService(db_session)
     before_tasks = db_session.scalar(select(AgentTask).count()) if False else len(db_session.scalars(select(AgentTask)).all())

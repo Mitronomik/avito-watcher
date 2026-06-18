@@ -31,6 +31,7 @@ from app.agents.contracts import (
     AgentTaskClass,
 )
 from app.agents.registry import get_agent_task_registry, get_agent_workflow_registry
+from app.core.config import settings
 from app.models.agent_artifact import AGENT_ARTIFACT_REDACTION_STATUSES, AGENT_ARTIFACT_TYPES
 from app.models.agent_task import (
     AGENT_TASK_DEPENDENCY_STATUSES,
@@ -222,6 +223,9 @@ CAPABILITIES = {
     "workflow_state_read": True,
     "workflow_actions_execute": False,
     "agent_artifacts_read": True,
+    "orchestration_planning_supported": True,
+    "orchestration_enqueue_enabled": False,
+    "orchestration_monitor_trigger_enabled": False,
 }
 
 
@@ -403,7 +407,12 @@ def build_meta_contract() -> dict[str, Any]:
         "labels": LABELS,
         "legacy_labels": LEGACY_LABELS,
         "errors": {code: {"code": code, "http_status": http_status, "label": label, "description": description, "retryable": retryable} for code, http_status, label, description, retryable in ERRORS},
-        "capabilities": CAPABILITIES,
+        "capabilities": {
+            **CAPABILITIES,
+            "orchestration_planning_supported": True,
+            "orchestration_enqueue_enabled": settings.agent_orchestration_enabled,
+            "orchestration_monitor_trigger_enabled": settings.agent_orchestration_allow_monitor_trigger,
+        },
         "agent_contracts": {
             "enabled": True,
             "registry_version": AGENT_TASK_REGISTRY_VERSION,
