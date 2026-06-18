@@ -12,6 +12,7 @@ from app.models.admin_audit_event import AdminAuditEvent  # noqa: F401
 from app.models.listing_analysis import ListingAnalysis  # noqa: F401
 from app.models.listing_search_match import ListingSearchMatch  # noqa: F401
 from app.models.agent_task import AgentTask  # noqa: F401
+from app.models.agent_artifact import AgentArtifact  # noqa: F401
 from app.models.knowledge_note import KnowledgeNote  # noqa: F401
 from app.models.listing_detail_snapshot import ListingDetailSnapshot  # noqa: F401
 from app.models.listing_enrichment import ListingEnrichment  # noqa: F401
