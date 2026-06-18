@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from importlib import import_module
 from typing import Literal, Protocol
 
 from app.models.agent_task import AgentTask
@@ -34,47 +35,70 @@ class NoopAgentTaskHandler:
 
 class MissingAgentTaskHandler:
     def handle(self, task: AgentTask) -> AgentTaskHandlerResult:
+        try:
+            from app.agents.registry import get_agent_task_registry
+
+            registry = get_agent_task_registry()
+            reason = (
+                "agent_handler_not_registered"
+                if task.task_type in registry
+                else "unknown_agent_task_type"
+            )
+        except Exception:
+            reason = "agent_handler_not_registered"
         return AgentTaskHandlerResult(
             status="skipped",
             result_json={
-                "reason": "no_handler_registered",
+                "reason": reason,
+                "error_type": reason,
+                "error_message": "Agent task handler is not registered for this task type.",
                 "task_type": task.task_type,
             },
         )
 
 
+_HANDLER_SPECS = (
+    ("app.agents.review_copilot", "REVIEW_COPILOT_TASK_TYPE", "ReviewCopilotAgentTaskHandler"),
+    ("app.agents.listing_detail_extraction", "LISTING_DETAIL_EXTRACTION_TASK_TYPE", "ListingDetailExtractionAgentTaskHandler"),
+    ("app.agents.data_quality_agent", "DATA_QUALITY_AGENT_TASK_TYPE", "DataQualityAgentTaskHandler"),
+    ("app.agents.research_agent", "MARKET_RESEARCH_TASK_TYPE", "ResearchAgentTaskHandler"),
+    ("app.agents.weekly_strategy_agent", "WEEKLY_STRATEGY_AGENT_TASK_TYPE", "WeeklyStrategyAgentTaskHandler"),
+)
+
+
+def _import_handler_spec(module_name: str, task_type_name: str, handler_name: str):
+    try:
+        module = import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name == module_name:
+            return None
+        raise
+    try:
+        return getattr(module, task_type_name), getattr(module, handler_name)
+    except AttributeError:
+        return None
+
+
+def get_registered_agent_task_handler_names() -> set[str]:
+    names: set[str] = set()
+    for module_name, task_type_name, handler_name in _HANDLER_SPECS:
+        imported = _import_handler_spec(module_name, task_type_name, handler_name)
+        if imported is not None:
+            task_type, _ = imported
+            names.add(task_type)
+    return names
+
+
 def build_default_agent_task_handlers(db) -> dict[str, AgentTaskHandler]:
-    from app.agents.review_copilot import (
-        REVIEW_COPILOT_TASK_TYPE,
-        ReviewCopilotAgentTaskHandler,
-    )
-
-    from app.agents.listing_detail_extraction import (
-        LISTING_DETAIL_EXTRACTION_TASK_TYPE,
-        ListingDetailExtractionAgentTaskHandler,
-    )
-    from app.agents.data_quality_agent import (
-        DATA_QUALITY_AGENT_TASK_TYPE,
-        DataQualityAgentTaskHandler,
-    )
-    from app.agents.research_agent import (
-        MARKET_RESEARCH_TASK_TYPE,
-        ResearchAgentTaskHandler,
-    )
-    from app.agents.weekly_strategy_agent import (
-        WEEKLY_STRATEGY_AGENT_TASK_TYPE,
-        WeeklyStrategyAgentTaskHandler,
-    )
-
-    return {
-        REVIEW_COPILOT_TASK_TYPE: ReviewCopilotAgentTaskHandler(db),
-        LISTING_DETAIL_EXTRACTION_TASK_TYPE: ListingDetailExtractionAgentTaskHandler(
-            db
-        ),
-        DATA_QUALITY_AGENT_TASK_TYPE: DataQualityAgentTaskHandler(db),
-        MARKET_RESEARCH_TASK_TYPE: ResearchAgentTaskHandler(db),
-        WEEKLY_STRATEGY_AGENT_TASK_TYPE: WeeklyStrategyAgentTaskHandler(db),
-    }
+    handlers = {}
+    for module_name, task_type_name, handler_name in _HANDLER_SPECS:
+        imported = _import_handler_spec(module_name, task_type_name, handler_name)
+        if imported is None:
+            continue
+        task_type, handler_cls = imported
+        handlers[task_type] = handler_cls(db)
+    assert set(handlers) == get_registered_agent_task_handler_names()
+    return handlers
 
 
 class AgentTaskRunner:

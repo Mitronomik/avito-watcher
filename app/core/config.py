@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     weekly_strategy_agent_max_output_chars: int = 12000
     weekly_strategy_agent_prompt_version: str = "weekly-strategy-agent-v1"
     weekly_strategy_agent_schema_version: str = "weekly-strategy-agent-result-v1"
+    agent_orchestration_enabled: bool = False
+    agent_orchestration_allow_monitor_trigger: bool = False
+    agent_orchestration_max_chain_depth: int = 4
+    agent_orchestration_max_tasks_per_listing: int = 10
+    agent_orchestration_default_timeout_sec: int = 120
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     api_key: str = ""

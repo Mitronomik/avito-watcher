@@ -23,6 +23,14 @@ from app.api.admin_v1.risk_attention import RISK_ATTENTION_DTO_VERSION, RISK_CAT
 from app.api.admin_v1.readiness_checklist import READINESS_CHECKLIST_DTO_VERSION, READINESS_GROUPS, READINESS_ITEM_IDS, READINESS_ITEM_STATUSES, READINESS_STATUSES
 from app.api.admin_v1.schemas import API_VERSION
 from app.api.admin_v1.workflow import WORKFLOW_ACTIONS, WORKFLOW_STATE_DTO_VERSION, WORKFLOW_STATES
+from app.agents.contracts import (
+    AGENT_TASK_REGISTRY_VERSION,
+    AGENT_WORKFLOW_REGISTRY_VERSION,
+    AgentSafetyCategory,
+    AgentSideEffect,
+    AgentTaskClass,
+)
+from app.agents.registry import get_agent_task_registry, get_agent_workflow_registry
 from app.models.agent_task import ALLOWED_AGENT_TASK_STATUSES
 from app.models.human_review import HUMAN_VERDICTS, NEXT_ACTIONS, OUTCOME_STATUSES, REVIEW_STATUSES
 
@@ -286,6 +294,8 @@ def _enum(id_: str, values: tuple[str, ...] | list[str] | set[str], descriptions
 
 
 def build_meta_contract() -> dict[str, Any]:
+    agent_task_registry = get_agent_task_registry()
+    agent_workflow_registry = get_agent_workflow_registry()
     return {
         "api_version": API_VERSION,
         "meta_contract_version": META_CONTRACT_VERSION,
@@ -326,4 +336,43 @@ def build_meta_contract() -> dict[str, Any]:
         "legacy_labels": LEGACY_LABELS,
         "errors": {code: {"code": code, "http_status": http_status, "label": label, "description": description, "retryable": retryable} for code, http_status, label, description, retryable in ERRORS},
         "capabilities": CAPABILITIES,
+        "agent_contracts": {
+            "enabled": True,
+            "registry_version": AGENT_TASK_REGISTRY_VERSION,
+            "workflow_registry_version": AGENT_WORKFLOW_REGISTRY_VERSION,
+            "contract_versions": sorted({contract.agent_contract_version for contract in agent_task_registry.values()}),
+            "task_classes": [item.value for item in AgentTaskClass],
+            "safety_categories": [item.value for item in AgentSafetyCategory],
+            "side_effects": [item.value for item in AgentSideEffect],
+            "task_types": {
+                task_type: {
+                    "task_type": contract.task_type,
+                    "task_class": contract.task_class.value,
+                    "schema_version": contract.schema_version,
+                    "agent_contract_version": contract.agent_contract_version,
+                    "implemented": contract.implemented,
+                    "handler_required": contract.handler_required,
+                    "safety_category": contract.safety_category.value,
+                    "blocking": contract.blocking,
+                    "required_permission_refs": list(contract.required_permission_refs),
+                    "legacy_compatibility": contract.legacy_compatibility,
+                    "legacy_semantic_label": contract.legacy_semantic_label,
+                    "limitations": list(contract.limitations),
+                }
+                for task_type, contract in agent_task_registry.items()
+            },
+            "workflows": {
+                workflow_id: {
+                    "workflow_id": workflow.workflow_id,
+                    "workflow_label": workflow.workflow_label,
+                    "implemented": workflow.implemented,
+                    "task_classes": [item.value for item in workflow.task_classes],
+                    "max_chain_depth": workflow.max_chain_depth,
+                    "blocking_policy": workflow.blocking_policy,
+                    "required_permission_refs": list(workflow.required_permission_refs),
+                    "limitations": list(workflow.limitations),
+                }
+                for workflow_id, workflow in agent_workflow_registry.items()
+            },
+        },
     }
