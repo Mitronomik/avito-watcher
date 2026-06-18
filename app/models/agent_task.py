@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import CheckConstraint, DateTime, Integer, JSON, String, Text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -15,6 +15,23 @@ ALLOWED_AGENT_TASK_STATUSES = {
     "skipped",
 }
 
+AGENT_TASK_DEPENDENCY_STATUSES = (
+    "not_applicable",
+    "waiting",
+    "ready",
+    "blocked",
+)
+
+AGENT_TASK_ORCHESTRATION_STATUSES = (
+    "not_applicable",
+    "queued",
+    "running",
+    "completed",
+    "failed",
+    "skipped",
+    "blocked",
+)
+
 
 def _now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
@@ -27,6 +44,26 @@ class AgentTask(Base):
             "status IN ('pending', 'running', 'success', 'failed', 'canceled', 'skipped')",
             name="ck_agent_tasks_status",
         ),
+        CheckConstraint(
+            "dependency_status IS NULL OR dependency_status IN ('not_applicable', 'waiting', 'ready', 'blocked')",
+            name="ck_agent_tasks_dependency_status",
+        ),
+        CheckConstraint(
+            "orchestration_status IS NULL OR orchestration_status IN ('not_applicable', 'queued', 'running', 'completed', 'failed', 'skipped', 'blocked')",
+            name="ck_agent_tasks_orchestration_status",
+        ),
+        CheckConstraint(
+            "chain_depth IS NULL OR chain_depth >= 0",
+            name="ck_agent_tasks_chain_depth_non_negative",
+        ),
+        CheckConstraint(
+            "parent_task_id IS NULL OR parent_task_id <> id",
+            name="ck_agent_tasks_parent_not_self",
+        ),
+        CheckConstraint(
+            "depends_on_task_id IS NULL OR depends_on_task_id <> id",
+            name="ck_agent_tasks_dependency_not_self",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -37,6 +74,14 @@ class AgentTask(Base):
     listing_analysis_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     search_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     context_key: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    orchestration_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    workflow_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    parent_task_id: Mapped[int | None] = mapped_column(ForeignKey("agent_tasks.id"), nullable=True, index=True)
+    depends_on_task_id: Mapped[int | None] = mapped_column(ForeignKey("agent_tasks.id"), nullable=True, index=True)
+    chain_depth: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    blocking: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    dependency_status: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    orchestration_status: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     dedupe_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
     result_json: Mapped[dict] = mapped_column(JSON, default=dict)

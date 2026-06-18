@@ -95,3 +95,29 @@ def test_registry_reads_do_not_create_or_mutate_side_effect_tables(db_session):
     get_agent_task_registry()
     after = {name: db_session.scalar(select(func.count()).select_from(table)) for name, table in Base.metadata.tables.items()}
     assert after == before
+
+
+def test_unknown_workflow_id_does_not_break_runner(db_session):
+    task = _create_task(db_session, "known", "unknown-workflow")
+    task.workflow_id = "unknown_workflow"
+    db_session.commit()
+    result = AgentTaskRunner(AgentTaskRepository(db_session), handlers={"known": SuccessHandler()}).run_pending(limit=1)
+    db_session.refresh(task)
+    assert result["succeeded"] == 1
+    assert task.status == "success"
+    assert task.orchestration_status is None
+
+
+def test_depends_on_task_id_does_not_enforce_runtime_dependency_or_create_tasks(db_session):
+    parent = _create_task(db_session, "known", "dependency-parent")
+    task = _create_task(db_session, "known", "dependency-child")
+    task.depends_on_task_id = parent.id
+    db_session.commit()
+
+    result = AgentTaskRunner(AgentTaskRepository(db_session), handlers={"known": SuccessHandler()}).run_pending(limit=10)
+    db_session.refresh(task)
+
+    assert result["succeeded"] == 2
+    assert task.status == "success"
+    assert task.orchestration_status is None
+    assert db_session.scalar(select(func.count()).select_from(AgentTask)) == 2

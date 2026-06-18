@@ -3,6 +3,7 @@ import subprocess
 import uuid
 
 import pytest
+from pathlib import Path
 from sqlalchemy.engine import make_url
 
 
@@ -47,3 +48,50 @@ def test_alembic_upgrade_head_passes_on_postgresql():
                 (test_database,),
             )
             conn.execute(f'DROP DATABASE IF EXISTS "{test_database}"')
+
+
+def test_pr38_migration_has_upgrade_and_downgrade_and_expected_operations():
+    migration = Path("alembic/versions/0018_agent_task_orchestration_metadata.py").read_text()
+    assert "def upgrade()" in migration
+    assert "def downgrade()" in migration
+    columns = (
+        "orchestration_run_id",
+        "workflow_id",
+        "parent_task_id",
+        "depends_on_task_id",
+        "chain_depth",
+        "blocking",
+        "dependency_status",
+        "orchestration_status",
+    )
+    indexes = (
+        "ix_agent_tasks_orchestration_run_id",
+        "ix_agent_tasks_workflow_id",
+        "ix_agent_tasks_parent_task_id",
+        "ix_agent_tasks_depends_on_task_id",
+        "ix_agent_tasks_orchestration_status",
+        "ix_agent_tasks_dependency_status",
+    )
+    fks = (
+        "fk_agent_tasks_parent_task_id",
+        "fk_agent_tasks_depends_on_task_id",
+    )
+    checks = (
+        "ck_agent_tasks_dependency_status",
+        "ck_agent_tasks_orchestration_status",
+        "ck_agent_tasks_chain_depth_non_negative",
+        "ck_agent_tasks_parent_not_self",
+        "ck_agent_tasks_dependency_not_self",
+    )
+
+    assert "op.create_check_constraint" in migration
+    for name in (*columns, *indexes, *fks, *checks):
+        assert name in migration
+    for name in indexes:
+        assert f'op.drop_index("{name}"' in migration
+    for name in fks:
+        assert f'op.drop_constraint("{name}"' in migration
+    for name in checks:
+        assert f'op.drop_constraint("{name}"' in migration
+    for name in columns:
+        assert f'op.drop_column("agent_tasks", "{name}")' in migration
