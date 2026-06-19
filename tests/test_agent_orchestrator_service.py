@@ -26,11 +26,14 @@ def test_known_workflow_builds_safe_deterministic_future_only_plan():
 
     assert plan.valid is True
     assert plan.planning_supported is True
-    assert plan.enqueue_supported is False
+    assert plan.enqueue_supported is True
     assert [node.node_id for node in plan.nodes] == ["evidence_collector", "evidence_normalizer"]
-    assert all(node.handler_implemented is False for node in plan.nodes)
-    assert all(node.can_enqueue is False for node in plan.nodes)
-    assert all(node.blocked_reason in {"handler_unimplemented", "non_root_node"} for node in plan.nodes)
+    assert plan.nodes[0].handler_implemented is True
+    assert plan.nodes[0].can_enqueue is True
+    assert plan.nodes[0].blocked_reason is None
+    assert plan.nodes[1].handler_implemented is False
+    assert plan.nodes[1].can_enqueue is False
+    assert plan.nodes[1].blocked_reason == "handler_unimplemented"
     for node in plan.nodes:
         assert not hasattr(node, "execution_endpoint")
         assert not hasattr(node, "auth_param")
@@ -115,15 +118,17 @@ def test_dry_run_and_disabled_enqueue_create_no_rows(db_session, monkeypatch):
     assert db_session.scalars(select(AgentArtifact)).all() == []
 
 
-def test_enabled_future_only_enqueue_zero_tasks(db_session, monkeypatch):
+def test_enabled_enqueue_root_only(db_session, monkeypatch):
     monkeypatch.setattr("app.services.agent_orchestrator_service.settings.agent_orchestration_enabled", True)
     result = AgentOrchestratorService(db_session).enqueue_workflow(workflow_id="listing_evidence_pipeline", listing_external_id="l1", dry_run=False)
 
     assert result.ok is True
-    assert result.enqueued_task_ids == ()
-    assert result.orchestration_run_id is None
-    assert result.blocked_reason == "no_implemented_root_nodes"
-    assert db_session.scalars(select(AgentTask)).all() == []
+    assert len(result.enqueued_task_ids) == 1
+    assert result.orchestration_run_id is not None
+    assert result.blocked_reason is None
+    tasks = db_session.scalars(select(AgentTask)).all()
+    assert len(tasks) == 1
+    assert tasks[0].task_type == "evidence_collector_future"
 
 
 def test_repository_orchestration_metadata_and_runner_dependency_guard(db_session):
