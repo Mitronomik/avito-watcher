@@ -79,6 +79,7 @@ def test_payload_forbidden_keys_rejected_and_safe_limitations_allowed(bad):
 def test_payload_envelope_and_source_ref_validation():
     with pytest.raises(AgentArtifactValidationError):
         validate_agent_artifact_payload(["not-object"], artifact_type="evidence_candidates", schema_version=AGENT_ARTIFACT_SCHEMA_VERSION)
+    validate_agent_artifact_payload(payload(result_kind="evidence_candidates"), artifact_type="evidence_candidates", schema_version=AGENT_ARTIFACT_SCHEMA_VERSION)
     with pytest.raises(AgentArtifactValidationError):
         validate_agent_artifact_payload(payload(extra="nope"), artifact_type="evidence_candidates", schema_version=AGENT_ARTIFACT_SCHEMA_VERSION)
     validate_agent_artifact_source_refs([])
