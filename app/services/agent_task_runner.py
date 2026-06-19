@@ -58,6 +58,7 @@ class MissingAgentTaskHandler:
 
 
 _HANDLER_SPECS = (
+    ("app.agents.evidence_collector_agent", "EVIDENCE_COLLECTOR_TASK_TYPE", "EvidenceCollectorAgentTaskHandler"),
     ("app.agents.review_copilot", "REVIEW_COPILOT_TASK_TYPE", "ReviewCopilotAgentTaskHandler"),
     ("app.agents.listing_detail_extraction", "LISTING_DETAIL_EXTRACTION_TASK_TYPE", "ListingDetailExtractionAgentTaskHandler"),
     ("app.agents.data_quality_agent", "DATA_QUALITY_AGENT_TASK_TYPE", "DataQualityAgentTaskHandler"),
