@@ -36,6 +36,23 @@ _ALLOWED_PAYLOAD_KEYS = {
     "notes",
     "metadata",
 }
+_SENSITIVE_FACT_KEY_PARTS = (
+    "token",
+    "api_key",
+    "apikey",
+    "secret",
+    "password",
+    "credential",
+    "authorization",
+    "bearer",
+    "cookie",
+    "header",
+    "raw",
+    "payload",
+    "provider",
+    "debug",
+    "html",
+)
 
 
 def _short_text(value: Any, limit: int) -> str | None:
@@ -60,6 +77,19 @@ def _safe_refs(task: AgentTask) -> list[dict[str, Any]]:
 def _candidate_fallback_id(candidate: dict[str, Any]) -> str:
     raw = json.dumps(candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _safe_analysis_fact_keys(facts_json: dict) -> list[str]:
+    if not isinstance(facts_json, dict):
+        return []
+    safe_keys: list[str] = []
+    for key in facts_json:
+        text = str(key)
+        lowered = text.lower()
+        if any(part in lowered for part in _SENSITIVE_FACT_KEY_PARTS):
+            continue
+        safe_keys.append(text)
+    return sorted(safe_keys)[:5]
 
 
 class EvidenceCollectorAgentTaskHandler:
@@ -190,7 +220,9 @@ class EvidenceCollectorAgentTaskHandler:
             })
 
         if analysis is not None and analysis.status == "success" and isinstance(analysis.facts_json, dict) and analysis.facts_json:
-            safe_keys = sorted(str(k) for k in analysis.facts_json)[:5]
+            safe_keys = _safe_analysis_fact_keys(analysis.facts_json)
+            if not safe_keys and items:
+                return self._payload(task, items, limitations, missing)
             candidate = {
                 "candidate_id": f"listing_analysis:{analysis.id}",
                 "evidence_kind": "listing_analysis_summary",
@@ -206,6 +238,9 @@ class EvidenceCollectorAgentTaskHandler:
             candidate["candidate_id"] = candidate["candidate_id"] or _candidate_fallback_id(candidate)
             items.append(candidate)
 
+        return self._payload(task, items, limitations, missing)
+
+    def _payload(self, task: AgentTask, items: list[dict[str, Any]], limitations: list[str], missing: list[str]) -> dict[str, Any]:
         items = items[:5]
         if not items:
             limitations.append("insufficient_internal_listing_evidence")

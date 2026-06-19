@@ -44,6 +44,12 @@ FORBIDDEN_MARKERS = (
     "send_alert",
     "alert_sent",
     "investment_advice",
+    "api_key",
+    "authorization",
+    "bearer",
+    "password",
+    "credential",
+    "raw_payload",
 )
 
 
@@ -168,7 +174,7 @@ def test_analysis_candidate_safe_and_no_side_effect_tables_or_mutations(db_sessi
         input_hash="hash",
         score=99,
         verdict="buy",
-        facts_json={"area": 50, "token": "must_not_be_copied"},
+        facts_json={"area": 50, "token": "must_not_be_copied", "api_key": "x", "secret": "y", "cookie": "z"},
         risks_json={"risk": "x"},
     )
     db_session.add(analysis)
@@ -182,6 +188,9 @@ def test_analysis_candidate_safe_and_no_side_effect_tables_or_mutations(db_sessi
     encoded = json.dumps(artifact.payload_json, ensure_ascii=False).lower()
 
     assert "listing_analysis:" + str(analysis.id) in encoded
+    assert "area" in encoded
+    for marker in ("token", "api_key", "secret", "cookie", "authorization", "bearer", "password", "credential", "raw_payload", "debug_html"):
+        assert marker not in encoded
     assert "must_not_be_copied" not in encoded
     assert analysis.score == before_score
     assert analysis.verdict == before_verdict
