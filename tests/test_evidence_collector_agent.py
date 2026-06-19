@@ -80,6 +80,7 @@ def test_registry_contract_marks_evidence_collector_implemented_internal_only():
     assert EVIDENCE_COLLECTOR_TASK_TYPE in handlers
     assert contract.implemented is True
     assert contract.handler_name == EVIDENCE_COLLECTOR_TASK_TYPE
+    assert contract.output_schema["recommended_envelope"]["result_kind"] == EVIDENCE_CANDIDATES_ARTIFACT_TYPE
     assert AgentSideEffect.WRITE_AGENT_TASK_RESULT in contract.declared_side_effects
     assert AgentSideEffect.WRITE_AGENT_ARTIFACT_FUTURE in contract.declared_side_effects
     assert AgentSideEffect.EXTERNAL_HTTP_CALL not in contract.declared_side_effects
@@ -106,6 +107,12 @@ def test_handler_success_creates_one_safe_artifact_payload(db_session):
     artifact = artifacts[0]
     assert artifact.artifact_type == EVIDENCE_CANDIDATES_ARTIFACT_TYPE
     assert artifact.schema_version == EVIDENCE_CANDIDATES_SCHEMA_VERSION
+    assert artifact.payload_json["artifact_type"] == EVIDENCE_CANDIDATES_ARTIFACT_TYPE
+    assert artifact.payload_json["schema_version"] == EVIDENCE_CANDIDATES_SCHEMA_VERSION
+    assert artifact.payload_json["result_kind"] == EVIDENCE_CANDIDATES_ARTIFACT_TYPE
+    assert artifact.payload_json["result_kind"] != "artifact_payload"
+    contract = get_agent_task_registry()[EVIDENCE_COLLECTOR_TASK_TYPE]
+    assert contract.output_schema["recommended_envelope"]["result_kind"] == artifact.payload_json["result_kind"]
     assert set(artifact.payload_json) == PAYLOAD_KEYS
     validate_agent_artifact_payload(
         artifact.payload_json,

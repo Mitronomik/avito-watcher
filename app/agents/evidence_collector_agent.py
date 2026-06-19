@@ -247,7 +247,7 @@ class EvidenceCollectorAgentTaskHandler:
         payload = {
             "schema_version": EVIDENCE_CANDIDATES_SCHEMA_VERSION,
             "artifact_type": EVIDENCE_CANDIDATES_ARTIFACT_TYPE,
-            "result_kind": "artifact_payload",
+            "result_kind": EVIDENCE_CANDIDATES_ARTIFACT_TYPE,
             "summary": "Collected internal evidence candidates for listing.",
             "items": items,
             "limitations": limitations,

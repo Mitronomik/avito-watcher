@@ -76,8 +76,8 @@ def validate_agent_artifact_payload(payload_json: Any, *, artifact_type: str, sc
         raise AgentArtifactValidationError("payload schema_version mismatch")
     if payload_json.get("artifact_type") != artifact_type:
         raise AgentArtifactValidationError("payload artifact_type mismatch")
-    if payload_json.get("result_kind") != "artifact_payload":
-        raise AgentArtifactValidationError("payload result_kind must be artifact_payload")
+    if payload_json.get("result_kind") not in {"artifact_payload", artifact_type}:
+        raise AgentArtifactValidationError("payload result_kind must be artifact_payload or artifact_type")
     _walk_keys(payload_json)
     return payload_json
 
