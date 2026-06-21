@@ -31,9 +31,9 @@ def test_known_workflow_builds_safe_deterministic_future_only_plan():
     assert plan.nodes[0].handler_implemented is True
     assert plan.nodes[0].can_enqueue is True
     assert plan.nodes[0].blocked_reason is None
-    assert plan.nodes[1].handler_implemented is False
+    assert plan.nodes[1].handler_implemented is True
     assert plan.nodes[1].can_enqueue is False
-    assert plan.nodes[1].blocked_reason == "handler_unimplemented"
+    assert plan.nodes[1].blocked_reason == "non_root_node"
     for node in plan.nodes:
         assert not hasattr(node, "execution_endpoint")
         assert not hasattr(node, "auth_param")

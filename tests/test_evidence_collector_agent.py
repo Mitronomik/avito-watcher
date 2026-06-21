@@ -87,7 +87,7 @@ def test_registry_contract_marks_evidence_collector_implemented_internal_only():
     assert AgentSideEffect.EXTERNAL_LLM_CALL not in contract.declared_side_effects
     assert AgentSideEffect.RAG_WRITE_FUTURE not in contract.declared_side_effects
     assert workflow.implemented is False
-    assert get_agent_task_registry()["evidence_normalizer_future"].implemented is False
+    assert get_agent_task_registry()["evidence_normalizer_future"].implemented is True
 
 
 def test_handler_success_creates_one_safe_artifact_payload(db_session):
