@@ -79,7 +79,7 @@ class EvidenceNormalizerAgentTaskHandler:
         if source == "ambiguous":
             return _skip("ambiguous_source_artifact")
 
-        valid, reason = self._validate_source_artifact(source)
+        valid, reason = self._validate_source_artifact(task, source)
         if not valid:
             return _skip(reason)
 
@@ -196,7 +196,9 @@ class EvidenceNormalizerAgentTaskHandler:
                 stmt = stmt.where(getattr(AgentArtifact, key) == value)
         return list(self.db.scalars(stmt.order_by(AgentArtifact.created_at.desc(), AgentArtifact.id.desc())))
 
-    def _validate_source_artifact(self, artifact: AgentArtifact) -> tuple[bool, str]:
+    def _validate_source_artifact(self, task: AgentTask, artifact: AgentArtifact) -> tuple[bool, str]:
+        if artifact.listing_external_id != task.listing_external_id:
+            return False, "source_artifact_listing_mismatch"
         if artifact.artifact_type != EVIDENCE_CANDIDATES_ARTIFACT_TYPE:
             return False, "wrong_source_artifact_type"
         if artifact.schema_version != EVIDENCE_CANDIDATES_SCHEMA_VERSION:
@@ -297,15 +299,15 @@ class EvidenceNormalizerAgentTaskHandler:
         }
 
     def _source_refs(self, task: AgentTask, source: AgentArtifact) -> list[dict[str, Any]]:
-        refs = [
-            {
-                "source_kind": "agent_artifact",
-                "source_ref_id": str(source.id),
-                "note": "source_evidence_candidates_artifact",
-                "agent_task_id": task.id,
-                "listing_external_id": task.listing_external_id,
-            }
-        ]
+        source_ref = {
+            "source_kind": "agent_artifact",
+            "source_ref_id": str(source.id),
+            "note": "source_evidence_candidates_artifact",
+            "listing_external_id": source.listing_external_id,
+        }
+        if source.source_task_id is not None:
+            source_ref["agent_task_id"] = source.source_task_id
+        refs = [source_ref]
         if task.listing_analysis_id is not None:
             refs.append({"listing_analysis_id": task.listing_analysis_id})
         if task.search_job_id is not None:

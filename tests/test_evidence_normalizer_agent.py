@@ -221,6 +221,29 @@ def test_skip_policy(db_session, case, task_kwargs, artifact_kwargs, payload, re
     assert db_session.scalars(select(AgentArtifact).where(AgentArtifact.artifact_type == NORMALIZED_EVIDENCE_ARTIFACT_TYPE)).all() == []
 
 
+
+@pytest.mark.parametrize("link_field", ["payload_json", "depends_on_task_id", "parent_task_id"])
+def test_source_artifact_listing_mismatch_skips_for_direct_and_task_links(db_session, link_field):
+    db_session.add_all([_listing("listing-a"), _listing("listing-b")])
+    db_session.flush()
+    collector_b = _collector_task(db_session, listing_external_id="listing-b")
+    source_b = _artifact(db_session, listing_external_id="listing-b", context_key="ctx", source_task_id=collector_b.id)
+    kwargs = {"listing_external_id": "listing-a", "context_key": "ctx"}
+    if link_field == "payload_json":
+        kwargs["payload_json"] = {"source_artifact_id": source_b.id}
+    elif link_field == "depends_on_task_id":
+        kwargs["depends_on_task_id"] = collector_b.id
+    else:
+        kwargs["parent_task_id"] = collector_b.id
+    task = _task(db_session, **kwargs)
+
+    _run(db_session, task)
+
+    assert task.status == "skipped"
+    assert task.result_json["reason"] == "source_artifact_listing_mismatch"
+    assert task.result_json["artifact_type"] == NORMALIZED_EVIDENCE_ARTIFACT_TYPE
+    assert db_session.scalars(select(AgentArtifact).where(AgentArtifact.artifact_type == NORMALIZED_EVIDENCE_ARTIFACT_TYPE)).all() == []
+
 def test_empty_source_candidates_creates_empty_normalized_artifact(db_session):
     db_session.add(_listing())
     db_session.flush()
@@ -244,8 +267,9 @@ def test_empty_source_candidates_creates_empty_normalized_artifact(db_session):
 def test_success_normalizes_listing_snapshot_and_source_refs(db_session):
     db_session.add(_listing())
     db_session.flush()
+    collector = _collector_task(db_session, listing_external_id="ext-1")
     item = {"candidate_id": "listing_snapshot:123", "evidence_kind": "listing_snapshot", "source": "internal", "observed_value": {"price": 84900, "area_m2": 52, "price_per_m2": 1632.69}}
-    source = _artifact(db_session, payload=_source_payload(items=[item]))
+    source = _artifact(db_session, source_task_id=collector.id, payload=_source_payload(items=[item]))
     task = _task(db_session, listing_external_id="ext-1", context_key="ctx", payload_json={"source_artifact_id": source.id})
 
     _run(db_session, task)
@@ -264,8 +288,19 @@ def test_success_normalizes_listing_snapshot_and_source_refs(db_session):
     assert all(isinstance(ref, dict) for ref in artifact.source_refs_json)
     encoded_refs = json.dumps(artifact.source_refs_json)
     assert "agent_task:" not in encoded_refs and "artifact:" not in encoded_refs
-    assert "source_ref_id" in artifact.source_refs_json[0]
-    assert not ({"artifact_id", "source_artifact_id", "source_task_id"} & set(artifact.source_refs_json[0]))
+    top_source_ref = artifact.source_refs_json[0]
+    item_source_ref = out["source_refs"][0]
+    assert top_source_ref["source_kind"] == "agent_artifact"
+    assert top_source_ref["source_ref_id"] == str(source.id)
+    assert top_source_ref["note"] == "source_evidence_candidates_artifact"
+    assert top_source_ref["agent_task_id"] == collector.id
+    assert top_source_ref["agent_task_id"] != task.id
+    assert item_source_ref["source_kind"] == "agent_artifact"
+    assert item_source_ref["source_ref_id"] == str(source.id)
+    assert item_source_ref["note"] == "source_evidence_candidates_artifact"
+    assert item_source_ref["agent_task_id"] == collector.id
+    assert not ({"artifact_id", "source_artifact_id", "source_task_id"} & set(top_source_ref))
+    assert not ({"artifact_id", "source_artifact_id", "source_task_id"} & set(item_source_ref))
 
 
 def test_computes_price_per_m2_and_insufficient_item(db_session):
